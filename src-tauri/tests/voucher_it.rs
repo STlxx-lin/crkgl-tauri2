@@ -174,7 +174,7 @@ fn item_master_feeds_autofill() {
     voucher::create_db(&db, &voucher("in", "2026-09-04", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]))
         .expect("create");
 
-    let items = voucher::item_master_db(&db, Some("WG-A"), 10).expect("master");
+    let items = voucher::item_master_db(&db, Some("WG-A"), 10, true, false).expect("master");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].unit.as_deref(), Some("个"));
     assert_eq!(items[0].last_price_micros, Some(17_000));

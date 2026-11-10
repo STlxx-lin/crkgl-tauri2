@@ -200,7 +200,7 @@ function StatCard({
       <p className="text-caption-1-semibold text-text-tertiary">{span.label}</p>
       <p
         className={
-          "mt-1.5 font-mono text-[26px] font-medium leading-8 tabular-nums " +
+          "mt-1.5 font-mono text-[1.625rem] font-medium leading-8 tabular-nums " +
           (accent ? "text-text-primary" : "text-text-primary")
         }
       >
@@ -275,7 +275,7 @@ function MonthlyChart({
 
       <div className="mt-5 flex gap-3">
         {/* Y 轴刻度 */}
-        <div className="flex w-14 shrink-0 flex-col justify-between pb-7 text-end font-mono text-[11px] tabular-nums text-text-tertiary">
+        <div className="flex w-14 shrink-0 flex-col justify-between pb-7 text-end font-mono text-[0.6875rem] tabular-nums text-text-tertiary">
           {ticks.map((tick, index) => (
             <span key={index}>{moneyCompact(tick)}</span>
           ))}
@@ -337,7 +337,7 @@ function MonthlyChart({
             {recent.map((point, index) => (
               <span
                 key={point.month}
-                className="min-w-0 flex-1 text-center font-mono text-[11px] tabular-nums text-text-tertiary"
+                className="min-w-0 flex-1 text-center font-mono text-[0.6875rem] tabular-nums text-text-tertiary"
               >
                 {recent.length <= 8 || index % 2 === 0 ? point.month.slice(2).replace("-", "/") : ""}
               </span>
@@ -373,7 +373,7 @@ function TopList({
         <ol className="mt-3 flex flex-col">
           {items.map((item, index) => (
             <li key={(item.itemCode ?? "") + (item.itemName ?? "") + index} className="flex items-center gap-2 py-[5px]">
-              <span className="w-4 shrink-0 font-mono text-[11px] tabular-nums text-text-tertiary">{index + 1}</span>
+              <span className="w-4 shrink-0 font-mono text-[0.6875rem] tabular-nums text-text-tertiary">{index + 1}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate text-body-2-medium text-text-primary" title={item.itemName ?? ""}>
@@ -410,7 +410,7 @@ function GroupTable({ rows, title, empty }: { rows: GroupRow[]; title: string; e
         <p className="px-5 pb-8 pt-2 text-body-2-regular text-text-tertiary">{empty}</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-[13px]">
+          <table className="w-full border-collapse text-[0.8125rem]">
             <thead>
               <tr className="border-y border-separator-border text-caption-1-semibold text-text-tertiary">
                 <th className="px-5 py-2 text-start font-medium">名称</th>
@@ -458,7 +458,7 @@ function MonthTable({ points }: { points: SummaryBundle["monthly"] }) {
         <span className="text-caption-1-regular text-text-tertiary">最近 12 个月</span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-[13px]">
+        <table className="w-full border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-y border-separator-border text-caption-1-semibold text-text-tertiary">
               <th className="px-5 py-2 text-start font-medium">月份</th>

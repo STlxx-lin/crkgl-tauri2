@@ -3,10 +3,12 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { clientLog } from "./lib/api";
 import { applyTheme, storedTheme } from "./lib/theme";
+import { applyFontScale, storedFontScale } from "./lib/fontScale";
 import "./styles/app.css";
 
 // index.html 里的内联脚本已经定过首帧主题；这里只按存储再确认一次（不写盘）。
 applyTheme(storedTheme(), { persist: false });
+applyFontScale(storedFontScale(), { persist: false });
 document.documentElement.lang = "zh-CN";
 
 // 前端报错也落进 Rust 日志，方便现场排查

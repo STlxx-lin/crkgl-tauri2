@@ -96,6 +96,8 @@ pub struct VoucherSummary {
     pub row_count: i64,
     pub amount_cents: i64,
     pub created_at: String,
+    /// 第一行明细的物料名：供应商/归属为空时用它撑起列表第二条信息
+    pub first_item: Option<String>,
 }
 
 /// 物料主数据：从历史台账聚合，用于开单时联动带出单位与单价。
@@ -109,6 +111,8 @@ pub struct ItemMaster {
     pub last_price_micros: Option<i64>,
     /// 历史出现次数，用于排序
     pub hits: i64,
+    /// 当前结存数量 = 入库合计 - 出库合计（按同一物料编码聚合）
+    pub stock_qty: f64,
 }
 
 fn trimmed(value: &Option<String>) -> Option<&str> {
@@ -141,30 +145,53 @@ pub fn next_doc_no(conn: &Connection, kind: &str, date: &str) -> DbResult<String
     Ok(format!("{compact}{:03}", seq + 1))
 }
 
-/// 物料主数据：按编码聚合名称/单位，取最近一次的入库单价。
-pub fn item_master(conn: &Connection, keyword: Option<&str>, limit: i64) -> DbResult<Vec<ItemMaster>> {
+/// 物料快速输入的数据源：按编码聚合名称/单位，取最近一次的入库单价。
+///
+/// `inbound_only` 为真时只统计 `kind='in'` 的行——开单页的「物料编码」要引用
+/// 真正入库过的物料，出库流水里那些只在领用单出现过的名字不该出现在候选里。
+pub fn item_master(
+    conn: &Connection,
+    keyword: Option<&str>,
+    limit: i64,
+    inbound_only: bool,
+    in_stock_only: bool,
+) -> DbResult<Vec<ItemMaster>> {
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
         .map(|k| format!("%{}%", k));
     let limit = limit.clamp(1, 500);
-    let sql = "
+    let kind_filter = if inbound_only { "AND l.kind = 'in'" } else { "" };
+    let sql = format!(
+        "
         SELECT item_code,
                COALESCE(NULLIF(TRIM(item_name), ''), '') AS item_name,
                MAX(NULLIF(TRIM(unit), '')) AS unit,
                COUNT(*) AS hits,
                (SELECT l2.price_micros FROM ledger l2
                  WHERE l2.item_code = l.item_code AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
-                 ORDER BY l2.doc_date DESC, l2.id DESC LIMIT 1) AS last_price
+                   {kind_sub}
+                 ORDER BY l2.doc_date DESC, l2.id DESC LIMIT 1) AS last_price,
+               -- 结存 = 入库 - 出库；同一编码在两种单据里都能对上
+               COALESCE((SELECT SUM(CASE WHEN s.kind = 'in' THEN s.qty ELSE -s.qty END)
+                           FROM ledger s
+                          WHERE s.item_code = l.item_code), 0) AS stock_qty
         FROM ledger l
         WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
+          {kind_filter}
           AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1)
         GROUP BY item_code
+        HAVING (?3 = 0 OR COALESCE((SELECT SUM(CASE WHEN s.kind = 'in' THEN s.qty ELSE -s.qty END)
+                                     FROM ledger s WHERE s.item_code = l.item_code), 0) > 0)
         ORDER BY hits DESC, item_code
-        LIMIT ?2";
-    let mut stmt = conn.prepare(sql).map_err(DbError::from)?;
+        LIMIT ?2",
+        kind_sub = if inbound_only { "AND l2.kind = 'in'" } else { "" },
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
-        .query_map(rusqlite::params![like, limit], |r| {
+        .query_map(
+            rusqlite::params![like, limit, if in_stock_only { 1i64 } else { 0i64 }],
+            |r| {
             let name: String = r.get(1)?;
             let code: String = r.get(0)?;
             Ok(ItemMaster {
@@ -173,6 +200,7 @@ pub fn item_master(conn: &Connection, keyword: Option<&str>, limit: i64) -> DbRe
                 unit: r.get(2)?,
                 hits: r.get(3)?,
                 last_price_micros: r.get(4)?,
+                stock_qty: r.get::<_, f64>(5).unwrap_or(0.0),
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -247,10 +275,14 @@ pub fn list(conn: &Connection, kind: Option<&str>, limit: i64) -> DbResult<Vec<V
     let limit = limit.clamp(1, 200);
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, doc_no, doc_date, partner, owner, row_count, amount_cents, created_at
-             FROM vouchers
-             WHERE (?1 IS NULL OR kind = ?1)
-             ORDER BY doc_date DESC, id DESC
+            "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,
+                    v.created_at,
+                    (SELECT l.item_name FROM ledger l
+                      WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
+                      ORDER BY l.row_no, l.id LIMIT 1) AS first_item
+             FROM vouchers v
+             WHERE (?1 IS NULL OR v.kind = ?1)
+             ORDER BY v.doc_date DESC, v.id DESC
              LIMIT ?2",
         )
         .map_err(DbError::from)?;
@@ -266,6 +298,7 @@ pub fn list(conn: &Connection, kind: Option<&str>, limit: i64) -> DbResult<Vec<V
                 row_count: r.get(6)?,
                 amount_cents: r.get(7)?,
                 created_at: r.get(8)?,
+                first_item: r.get(9)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -669,8 +702,14 @@ pub fn list_db(db: &Db, kind: Option<&str>, limit: i64) -> DbResult<Vec<VoucherS
     db.with(|c| list(c, kind, limit).map_err(DbError))
 }
 
-pub fn item_master_db(db: &Db, keyword: Option<&str>, limit: i64) -> DbResult<Vec<ItemMaster>> {
-    db.with(|c| item_master(c, keyword, limit).map_err(DbError))
+pub fn item_master_db(
+    db: &Db,
+    keyword: Option<&str>,
+    limit: i64,
+    inbound_only: bool,
+    in_stock_only: bool,
+) -> DbResult<Vec<ItemMaster>> {
+    db.with(|c| item_master(c, keyword, limit, inbound_only, in_stock_only).map_err(DbError))
 }
 
 pub fn next_doc_no_db(db: &Db, kind: &str, date: &str) -> DbResult<String> {
@@ -935,14 +974,64 @@ mod tests {
         db.with_loose(|c| create(c, &input("in", "2026-08-31", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))])))
             .unwrap();
 
-        let items = db.with_loose(|c| item_master(c, Some("WG-A"), 10)).unwrap();
+        let items = db.with_loose(|c| item_master(c, Some("WG-A"), 10, false, false)).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].item_code, "WG-A");
         assert_eq!(items[0].hits, 2);
         assert_eq!(items[0].last_price_micros, Some(17_000), "应取最近一次的单价");
 
-        let all = db.with_loose(|c| item_master(c, None, 10)).unwrap();
+        let all = db.with_loose(|c| item_master(c, None, 10, false, false)).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn item_master_inbound_only_skips_outbound_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-30", vec![line("WG-IN", "入库过的", 10.0, Some(15_000))]),
+            )
+        })
+        .unwrap();
+        // 只在出库单出现过的物料，不该进开单候选
+        db.with_loose(|c| {
+            create(c, &input("out", "2026-08-31", vec![line("WG-OUT", "只出库过", 3.0, None)]))
+        })
+        .unwrap();
+
+        let inbound = db.with_loose(|c| item_master(c, None, 10, true, false)).unwrap();
+        let codes: Vec<&str> = inbound.iter().map(|i| i.item_code.as_str()).collect();
+        assert_eq!(codes, vec!["WG-IN"], "只应列已入库的物料");
+
+        // 不限来源时两者都在
+        let all = db.with_loose(|c| item_master(c, None, 10, false, false)).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn stock_qty_is_inbound_minus_outbound() {
+        let db = Db::open_in_memory().unwrap();
+        // 入库 10，出库 4 -> 结存 6
+        db.with_loose(|c| create(c, &input("in", "2026-08-30", vec![line("WG-S", "有剩余", 10.0, Some(1_000))])))
+            .unwrap();
+        db.with_loose(|c| create(c, &input("out", "2026-08-31", vec![line("WG-S", "有剩余", 4.0, None)])))
+            .unwrap();
+        // 入库 2，出库 2 -> 结存 0，出库时不该再出现
+        db.with_loose(|c| create(c, &input("in", "2026-08-30", vec![line("WG-Z", "用光了", 2.0, Some(1_000))])))
+            .unwrap();
+        db.with_loose(|c| create(c, &input("out", "2026-08-31", vec![line("WG-Z", "用光了", 2.0, None)])))
+            .unwrap();
+
+        let all = db.with_loose(|c| item_master(c, None, 10, true, false)).unwrap();
+        let mut by_code: Vec<(&str, f64)> = all.iter().map(|i| (i.item_code.as_str(), i.stock_qty)).collect();
+        by_code.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(by_code, vec![("WG-S", 6.0), ("WG-Z", 0.0)]);
+
+        // 只看有库存：只剩 WG-S
+        let in_stock = db.with_loose(|c| item_master(c, None, 10, true, true)).unwrap();
+        let codes: Vec<&str> = in_stock.iter().map(|i| i.item_code.as_str()).collect();
+        assert_eq!(codes, vec!["WG-S"]);
     }
 
     #[test]

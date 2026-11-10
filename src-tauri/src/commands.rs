@@ -450,13 +450,23 @@ pub fn voucher_next_no(
     voucher::next_doc_no_db(&state.db, &kind, &date)
 }
 
+/// 物料快速输入候选。`inbound_only` 为真时只统计已入库的物料，
+/// 开单页的「物料编码」就是要引用真正入库过的数据。
 #[tauri::command]
 pub fn item_master(
     state: State<'_, Arc<AppState>>,
     keyword: Option<String>,
     limit: Option<i64>,
+    inbound_only: Option<bool>,
+    in_stock_only: Option<bool>,
 ) -> Result<Vec<voucher::ItemMaster>, String> {
-    voucher::item_master_db(&state.db, keyword.as_deref(), limit.unwrap_or(200))
+    voucher::item_master_db(
+        &state.db,
+        keyword.as_deref(),
+        limit.unwrap_or(200),
+        inbound_only.unwrap_or(false),
+        in_stock_only.unwrap_or(false),
+    )
 }
 
 // ---------- 批量 ----------

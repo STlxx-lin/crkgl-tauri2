@@ -117,10 +117,15 @@ export function priceText(micros: number | null | undefined): string {
   return priceFormat.format(micros / 10_000);
 }
 
-/** 编辑框里的单价初值：固定 4 位，方便直接改。 */
+/**
+ * 编辑框里的单价初值：保留两位小数（42.0000 -> 42，42.1000 -> 42.1）。
+ * 台账里仍有厘级单价，但那是历史数据；开单录入按两位走，避免一屏全是尾零。
+ */
 export function priceInput(micros: number | null | undefined): string {
   if (micros === null || micros === undefined) return "";
-  return (micros / 10_000).toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  const fixed = (micros / 10_000).toFixed(2);
+  // 只去掉小数末尾多余的 0，不碰整数部分的 0
+  return fixed.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 /** 输入框文本（元）→ 万分之一元。 */

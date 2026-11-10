@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>仓库出入库明细</title>
+    <script>
+      // 首帧就把字号定下来，避免字号跳一下；主题由 class="dark" 兜底
+      (function () {
+        try {
+          var sizes = { small: 14, normal: 16, large: 18, xlarge: 20 };
+          var s = localStorage.getItem("ledger.fontScale");
+          document.documentElement.style.fontSize = (sizes[s] || 16) + "px";
+        } catch (e) {
+          document.documentElement.style.fontSize = "16px";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

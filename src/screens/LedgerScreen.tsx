@@ -36,7 +36,13 @@ import { PageHeader } from "../components/AppShell";
 import { RowDetail } from "../components/RowDetail";
 
 const PAGE_SIZE = 100;
-const ROW_HEIGHT = 36;
+// 行高随字号走：表格行是 h-9（2.25rem），字号调大后行也变高，
+// 虚拟滚动要按真实像素算，否则切片位置会偏。
+const ROW_HEIGHT_REM = 2.25;
+function rowHeightPx(): number {
+  const root = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  return Math.round(ROW_HEIGHT_REM * root);
+}
 const KINDS: { id: string; label: string }[] = [
   { id: "all", label: "全部" },
   { id: "in", label: "入库" },
@@ -136,7 +142,17 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // 窗口切片只在逐行模式用；合并状态下直接整页渲染
-  const virtual = useVirtualRows(scrollRef, mergeByDoc ? 0 : rows.length, ROW_HEIGHT);
+  // 字号变了行高也变，虚拟滚动按新行高重算
+  const [rowHeight, setRowHeight] = useState(() => rowHeightPx());
+  useEffect(() => {
+    const sync = () => setRowHeight(rowHeightPx());
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+    return () => observer.disconnect();
+  }, []);
+  const virtual = useVirtualRows(scrollRef, mergeByDoc ? 0 : rows.length, rowHeight);
+
 
   /**
    * 按单据合并时，把同一单的相邻明细折成一行；关闭时就是原样的逐行明细。
@@ -425,11 +441,11 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
           <div ref={scrollRef} className="ledger-table h-full overflow-auto rounded-xl border border-separator-border bg-background-primary-default">
             <Table
               aria-label="出入库明细"
-              className="min-w-[1220px] table-fixed text-[13px]"
-              containerClassName="min-w-0"
+              className="min-w-[87rem] table-fixed text-[0.8125rem]"
+              containerClassName="min-w-0 overflow-visible"
             >
               <TableHeader>
-                <TableColumn id="select" className="w-[40px]" aria-label="选择">
+                <TableColumn id="select" className="w-[2.5rem]" aria-label="选择">
                   <input
                     type="checkbox"
                     aria-label="全选本页"
@@ -443,24 +459,24 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                     className="size-3.5 cursor-pointer accent-accent-500"
                   />
                 </TableColumn>
-                <TableColumn id="kind" className="w-[64px]">类型</TableColumn>
-                <TableColumn id="date" className="w-[104px]">
+                <TableColumn id="kind" className="w-[4rem]">类型</TableColumn>
+                <TableColumn id="date" className="w-[6.5rem]">
                   <SortHeader label="日期" active={filter.sort === 'date'} desc={Boolean(filter.desc)} onClick={() => toggleSort('date')} />
                 </TableColumn>
-                <TableColumn id="doc" className="w-[128px]">单据编号</TableColumn>
-                <TableColumn id="code" className="w-[132px]">物料编码</TableColumn>
-                <TableColumn id="name" isRowHeader className="w-[260px]">物料名称</TableColumn>
-                <TableColumn id="unit" className="w-[56px]">单位</TableColumn>
-                <TableColumn id="qty" className="w-[84px] text-end">
+                <TableColumn id="doc" className="w-[8rem]">单据编号</TableColumn>
+                <TableColumn id="code" className="w-[8.25rem]">物料编码</TableColumn>
+                <TableColumn id="name" isRowHeader className="w-[16.25rem]">物料名称</TableColumn>
+                <TableColumn id="unit" className="w-[3.5rem]">单位</TableColumn>
+                <TableColumn id="qty" className="w-[5.25rem] text-end">
                   <SortHeader label="数量" active={filter.sort === 'qty'} desc={Boolean(filter.desc)} onClick={() => toggleSort('qty')} />
                 </TableColumn>
-                <TableColumn id="price" className="w-[88px] text-end">单价</TableColumn>
-                <TableColumn id="amount" className="w-[104px] text-end">
+                <TableColumn id="price" className="w-[5.5rem] text-end">单价</TableColumn>
+                <TableColumn id="amount" className="w-[6.5rem] text-end">
                   <SortHeader label="合计" active={filter.sort === 'amount'} desc={Boolean(filter.desc)} onClick={() => toggleSort('amount')} />
                 </TableColumn>
-                <TableColumn id="partner" className="w-[120px]">供应商</TableColumn>
-                <TableColumn id="owner" className="w-[120px]">归属</TableColumn>
-                <TableColumn id="flags" className="w-[92px]">提醒</TableColumn>
+                <TableColumn id="partner" className="w-[7.5rem]">供应商</TableColumn>
+                <TableColumn id="owner" className="w-[7.5rem]">归属</TableColumn>
+                <TableColumn id="flags" className="w-[5.75rem]">提醒</TableColumn>
               </TableHeader>
               <TableBody
                 renderEmptyState={() => (
@@ -496,7 +512,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                     onAction={() => openDetail(row)}
                     onDoubleClick={() => openDetail(row)}
                   >
-                    <TableCell className="w-[40px]">
+                    <TableCell className="w-[2.5rem]">
                       <input
                         type="checkbox"
                         aria-label={`选择第 ${row.rowNo} 行`}

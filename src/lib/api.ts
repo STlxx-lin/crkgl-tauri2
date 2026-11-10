@@ -223,8 +223,18 @@ export function nextDocNo(kind: Kind, date: string): Promise<string> {
   return call<string>("voucher_next_no", { kind, date });
 }
 
-export function fetchItemMaster(keyword?: string, limit = 200): Promise<ItemMaster[]> {
-  return call<ItemMaster[]>("item_master", { keyword: keyword ?? null, limit });
+export function fetchItemMaster(
+  keyword?: string,
+  limit = 200,
+  inboundOnly = true,
+  inStockOnly = false,
+): Promise<ItemMaster[]> {
+  return call<ItemMaster[]>("item_master", {
+    keyword: keyword ?? null,
+    limit,
+    inboundOnly,
+    inStockOnly,
+  });
 }
 
 // ---------- 批量 ----------

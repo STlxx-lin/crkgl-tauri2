@@ -52,7 +52,7 @@ export function PrintVoucher({
           打印
         </Button>
         <span className="rounded-lg bg-background-primary-default px-3 py-1.5 text-body-2-regular text-text-secondary">
-          每页 {perPage} 行 · 共 {pages.length} 页
+          {voucher.lines.length} 行明细 · 共 {pages.length} 页 · 每页最多 {perPage} 行
         </span>
         <Button size="small" variant="secondary" leadingIcon={RiCloseLine} onClick={onClose}>
           关闭
@@ -123,12 +123,13 @@ export function PrintVoucher({
                     <td>{line.remark ?? ""}</td>
                   </tr>
                 ))}
-                {Array.from({ length: Math.max(0, perPage - chunk.length) }).map((_, index) => (
-                  <tr key={`blank-${pageIndex}-${index}`} aria-hidden>
-                    <td className="print-center">{pageIndex * perPage + chunk.length + index + 1}</td>
+                {/* 有几行打几行，不补空行；perPage 只是一页装得下的上限 */}
+                {chunk.length === 0 ? (
+                  <tr aria-hidden>
+                    <td className="print-center">1</td>
                     <td colSpan={7}>&nbsp;</td>
                   </tr>
-                ))}
+                ) : null}
                 {pageIndex === pages.length - 1 ? (
                   <tr className="print-total">
                     <td colSpan={4} className="print-num">

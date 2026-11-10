@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { RiArrowDownSLine, RiSearchLine } from "@remixicon/react";
 import { cx } from "@/utils/cx";
-import { listItems } from "../lib/api";
-import type { Item } from "../lib/types";
+import { fetchItemMaster, listItems } from "../lib/api";
+import type { Item, ItemMaster } from "../lib/types";
 import { priceText } from "../lib/format";
 
 interface ItemPickerProps {
@@ -13,6 +13,14 @@ interface ItemPickerProps {
   onBlurClose?: () => void;
   disabled?: boolean;
   placeholder?: string;
+  /**
+   * 候选来源：
+   * · "inbound"（默认）只列真正入库过的物料——开单页的物料编码要引用已入库数据
+   * · "master" 列基础资料里的全部物料（含还没入库过的）
+   */
+  source?: "inbound" | "master";
+  /** 只看还有库存的物料（出库单用） */
+  inStockOnly?: boolean;
 }
 
 /**
@@ -29,6 +37,8 @@ export function ItemPicker({
   onBlurClose,
   disabled,
   placeholder = "编码或名称",
+  source = "inbound",
+  inStockOnly = false,
 }: ItemPickerProps) {
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState("");
@@ -69,7 +79,10 @@ export function ItemPicker({
       const ticket = ++seq.current;
       setLoading(true);
       try {
-        const list = await listItems({ keyword: keyword.trim() || undefined, onlyActive: true, limit: 30 });
+        const list =
+          source === "inbound"
+            ? inboundToItems(await fetchItemMaster(keyword.trim() || undefined, 30, true, inStockOnly))
+            : await listItems({ keyword: keyword.trim() || undefined, onlyActive: true, limit: 30 });
         if (ticket === seq.current) {
           setItems(list);
           setActive(0);
@@ -81,7 +94,7 @@ export function ItemPicker({
       }
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [keyword, open]);
+  }, [keyword, open, source, inStockOnly]);
 
   // 点外面收起
   useEffect(() => {
@@ -145,8 +158,10 @@ export function ItemPicker({
           disabled={disabled}
           placeholder={placeholder}
           className={cx(
-            "h-8 w-full rounded-md border bg-transparent pe-6 ps-1.5 text-[12px] text-text-primary outline-none",
-            open ? "border-border-focus-ring" : "border-transparent hover:border-border-button-default",
+            "h-8 w-full rounded-md border pe-6 ps-1.5 text-[0.75rem] text-text-primary outline-none",
+            open
+              ? "border-border-focus-ring bg-background-primary-default"
+              : "border-border-button-default bg-background-secondary-default hover:border-border-button-hover",
             disabled && "text-text-tertiary",
           )}
         />
@@ -193,12 +208,23 @@ export function ItemPicker({
                         )}
                       >
                         <span className="flex items-center gap-2">
-                          <span className="font-mono text-[11px] text-text-tertiary">{item.itemCode}</span>
+                          <span className="font-mono text-[0.6875rem] text-text-tertiary">{item.itemCode}</span>
                           <span className="truncate text-body-2-medium text-text-primary">{item.itemName}</span>
                         </span>
                         <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
                           {item.category ? <span>{item.category}</span> : null}
                           {item.unit ? <span>{item.unit}</span> : null}
+                          {item.stockQty !== null && item.stockQty !== undefined ? (
+                            <span
+                              className={
+                                item.stockQty > 0
+                                  ? "rounded bg-emerald-500/12 px-1 py-0.5 font-mono tabular-nums text-emerald-500"
+                                  : "rounded bg-amber-500/12 px-1 py-0.5 font-mono tabular-nums text-amber-500"
+                              }
+                            >
+                              库存 {formatStock(item.stockQty)}
+                            </span>
+                          ) : null}
                           {item.priceMicros !== null ? (
                             <span className="ms-auto font-mono tabular-nums">¥{priceText(item.priceMicros)}</span>
                           ) : null}
@@ -214,4 +240,29 @@ export function ItemPicker({
         : null}
     </div>
   );
+}
+
+/** 后端聚合结果 → 选择器用的 Item 形状（单价字段名不同，这里转一次）。 */
+function inboundToItems(rows: ItemMaster[]): Item[] {
+  return rows.map((row, index) => ({
+    id: -(index + 1),
+    itemCode: row.itemCode,
+    itemName: row.itemName,
+    category: null,
+    unit: row.unit,
+    priceMicros: row.lastPriceMicros,
+    spec: null,
+    itemType: null,
+    drawingNo: null,
+    owner: null,
+    supplier: null,
+    remark: null,
+    active: true,
+    stockQty: row.stockQty,
+  }));
+}
+
+/** 库存量：去掉无意义的尾零，最多三位小数。 */
+function formatStock(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(value);
 }

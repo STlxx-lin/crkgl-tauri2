@@ -306,7 +306,7 @@ function ItemsPanel({
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[1080px] table-fixed border-collapse text-[13px]">
+        <table className="w-full min-w-[1080px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="w-[132px] px-3 py-2 text-start font-medium">物料编码</th>
@@ -335,7 +335,7 @@ function ItemsPanel({
             ) : (
               rows.map((item) => (
                 <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[12px] text-text-secondary" title={item.itemCode}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={item.itemCode}>
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
@@ -357,7 +357,7 @@ function ItemsPanel({
                     )}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-tertiary">{item.category ?? "—"}</td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[12px] text-text-tertiary" title={item.drawingNo ?? ""}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.drawingNo ?? ""}>
                     {item.drawingNo ?? "—"}
                   </td>
                   <td className="px-3 py-1.5 text-text-tertiary">{item.unit ?? "—"}</td>
@@ -658,7 +658,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[860px] table-fixed border-collapse text-[13px]">
+        <table className="w-full min-w-[860px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="w-[210px] px-3 py-2 text-start font-medium">图号</th>
@@ -688,10 +688,10 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
             ) : (
               rows.map((item) => (
                 <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[12px] text-text-secondary" title={item.drawingNo ?? ""}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={item.drawingNo ?? ""}>
                     {item.drawingNo ?? <span className="text-text-tertiary">（未填）</span>}
                   </td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[12px] text-text-tertiary" title={item.itemCode}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.itemCode}>
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
@@ -888,7 +888,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[720px] table-fixed border-collapse text-[13px]">
+        <table className="w-full min-w-[720px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="px-3 py-2 text-start font-medium">供应商名称</th>
@@ -911,7 +911,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
                 <tr key={supplier.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
                   <td className="truncate px-3 py-1.5 text-text-primary">{supplier.name}</td>
                   <td className="truncate px-3 py-1.5 text-text-tertiary">{supplier.contact ?? "—"}</td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[12px] text-text-tertiary">{supplier.phone ?? "—"}</td>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary">{supplier.phone ?? "—"}</td>
                   <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{count(supplier.hits)}</td>
                   <td className="px-3 py-1.5 text-center">
                     <span className={supplier.active ? "text-caption-1-semibold text-emerald-500" : "text-caption-1-regular text-text-tertiary"}>

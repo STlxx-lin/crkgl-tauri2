@@ -189,7 +189,7 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
               </div>
             ) : (
               <div className="max-h-[560px] overflow-auto">
-                <table className="w-full table-fixed border-collapse text-[12px]">
+                <table className="w-full table-fixed border-collapse text-[0.75rem]">
                   <thead className="sticky top-0 bg-background-primary-default">
                     <tr className="border-y border-separator-border text-caption-1-semibold text-text-tertiary">
                       <th className="w-[124px] whitespace-nowrap px-5 py-2 text-start font-medium">时间</th>
@@ -266,7 +266,7 @@ function PrintSetup() {
     if (n === rows) return;
     savePrintRows(n);
     setRows(n);
-    toast("打印行数已更新", { description: `每页 ${n} 行`, status: "success" });
+    toast("每页上限已更新", { description: `每页最多 ${n} 行`, status: "success" });
   };
 
   return (
@@ -277,9 +277,9 @@ function PrintSetup() {
       </div>
       <div className="flex items-end gap-2">
         <label className="flex flex-col gap-1">
-          <span className="text-caption-1-semibold text-text-tertiary">A4 每页明细行数</span>
+          <span className="text-caption-1-semibold text-text-tertiary">A4 每页行数上限</span>
           <input
-            aria-label="A4 每页明细行数"
+            aria-label="A4 每页行数上限"
             inputMode="numeric"
             value={draft}
             onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ""))}
@@ -291,11 +291,11 @@ function PrintSetup() {
           />
         </label>
         <span className="pb-2 text-body-2-regular text-text-tertiary">
-          默认 {PRINT_ROWS_DEFAULT} 行（纸单行数），可填 {PRINT_ROWS_MIN}–{PRINT_ROWS_MAX}
+          默认 {PRINT_ROWS_DEFAULT}，可填 {PRINT_ROWS_MIN}–{PRINT_ROWS_MAX}
         </span>
       </div>
       <p className="text-caption-1-regular text-text-tertiary">
-        开单页点「A4 打印」按这个行数出稿：不足补空行，超了自动分页。
+        打印按单据实际行数出稿：有几行打几行，不补空行；只有超过这个上限才分成多页。
       </p>
     </section>
   );

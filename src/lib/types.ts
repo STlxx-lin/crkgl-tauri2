@@ -330,14 +330,19 @@ export interface VoucherSummary {
   rowCount: number;
   amountCents: number;
   createdAt: string;
+  /** 第一行明细的物料名，供应商为空时用它显示 */
+  firstItem: string | null;
 }
 
 export interface ItemMaster {
   itemCode: string;
   itemName: string;
   unit: string | null;
-  lastPriceCents: number | null;
+  /** 最近一次入库单价（万分之一元） */
+  lastPriceMicros: number | null;
   hits: number;
+  /** 当前结存数量（入库合计 - 出库合计） */
+  stockQty: number;
 }
 
 /** 批量改只动描述性字段，数量金额必须逐行确认。 */
@@ -365,6 +370,8 @@ export interface Item {
   supplier: string | null;
   remark: string | null;
   active: boolean;
+  /** 结存数量（只在开单候选里有值，主数据列表不带） */
+  stockQty?: number | null;
 }
 
 export interface ItemInput {

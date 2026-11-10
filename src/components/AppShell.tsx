@@ -9,6 +9,7 @@ import {
 } from "@remixicon/react";
 import { cx } from "@/utils/cx";
 import { ThemeToggle } from "./ThemeToggle";
+import { FontScaleToggle } from "./FontScaleToggle";
 
 export type PageKey = "ledger" | "voucher" | "master" | "summary" | "import" | "remote";
 
@@ -92,6 +93,7 @@ export function AppShell({ page, onPage, nav, remote, footer, children }: AppShe
 
         <div className="mt-auto flex flex-col gap-4 border-t border-separator-border px-4 py-4">
           {footer}
+          <FontScaleToggle />
           <ThemeToggle className="self-start" />
         </div>
       </aside>

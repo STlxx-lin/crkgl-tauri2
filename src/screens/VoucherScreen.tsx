@@ -6,6 +6,8 @@ import {
   RiFileList3Line,
   RiPrinterLine,
   RiSearchLine,
+  RiSidebarFoldLine,
+  RiSidebarUnfoldLine,
   RiSaveLine,
 } from "@remixicon/react";
 import {
@@ -21,7 +23,7 @@ import {
   updateVoucher,
 } from "../lib/api";
 import type { DocHit, Item, Kind, LedgerRow, Supplier, Voucher, VoucherLineInput, VoucherSummary } from "../lib/types";
-import { amount, count, date, flagLabel, kindLabel, money, priceText, qty } from "../lib/format";
+import { amount, count, date, flagLabel, kindLabel, money, priceInput, priceText, qty } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { toast } from "@/components/base/toast/toast";
@@ -64,6 +66,26 @@ const today = () => {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 };
 
+// 单据查询侧栏的展开状态：按本机记住，下次开单还是同一副布局
+const DOC_SEARCH_KEY = "ledger.voucher.docSearchOpen";
+
+function storedDocSearchOpen(): boolean {
+  try {
+    // 默认展开：第一次用的人需要看到这个入口
+    return window.localStorage.getItem(DOC_SEARCH_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function saveDocSearchOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(DOC_SEARCH_KEY, open ? "1" : "0");
+  } catch {
+    // 存不下也不影响本次会话
+  }
+}
+
 let lineSeq = 0;
 function blankLine(): DraftLine {
   lineSeq += 1;
@@ -95,15 +117,23 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   const [lines, setLines] = useState<DraftLine[]>(() => [blankLine()]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [history, setHistory] = useState<VoucherSummary[]>([]);
+  // 本机开单列表：按编号/供应商筛 + 入库出库筛选
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyKind, setHistoryKind] = useState<"all" | "in" | "out">("all");
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<VoucherSummary | null>(null);
   // A4 打印：用当前录入内容出稿，未保存也能先打一份校样
   const [printing, setPrinting] = useState(false);
   // 单据查询：跨「本机开单」与「Excel 导入」两种来源
+  const [showDocSearch, setShowDocSearch] = useState(() => storedDocSearchOpen());
   const [docQuery, setDocQuery] = useState("");
   const [docHits, setDocHits] = useState<DocHit[] | null>(null);
   const [docSearching, setDocSearching] = useState(false);
   const [viewingImport, setViewingImport] = useState<{ hit: DocHit; lines: LedgerRow[] } | null>(null);
+  // 本机单据详情：点列表只“看”，不灌进左边表单，避免冲掉正在录的单
+  const [viewingVoucher, setViewingVoucher] = useState<Voucher | null>(null);
+  // 正在查看详情的打印稿
+  const [printingView, setPrintingView] = useState<Voucher | null>(null);
   const dirty = useRef(false);
 
   const loadHistory = useCallback(async () => {
@@ -151,6 +181,25 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
     // 只在新建单据且日期变化时取号
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode.kind, mode.id]);
+
+  /** 列表展示用：按编号/供应商/归属过滤，再按类型筛。 */
+  const shownHistory = useMemo(() => {
+    const q = historyQuery.trim().toLowerCase();
+    return history.filter((v) => {
+      if (historyKind !== "all" && v.kind !== historyKind) return false;
+      if (!q) return true;
+      return (
+        v.docNo.toLowerCase().includes(q) ||
+        (v.partner ?? "").toLowerCase().includes(q) ||
+        (v.owner ?? "").toLowerCase().includes(q)
+      );
+    });
+  }, [history, historyQuery, historyKind]);
+
+  const shownAmount = useMemo(
+    () => shownHistory.reduce((sum, v) => sum + v.amountCents, 0),
+    [shownHistory],
+  );
 
   const totals = useMemo(() => {
     let amount = 0;
@@ -230,7 +279,8 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
     await freshDocNo(kind, today());
   };
 
-  const openVoucher = async (summary: VoucherSummary) => {
+  /** 点列表：只打开详情，不动左边正在录的单。 */
+  const showVoucher = async (summary: VoucherSummary) => {
     setBusy(true);
     try {
       const voucher = await getVoucher(summary.id);
@@ -238,6 +288,27 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
         toast("单据不存在", { status: "error" });
         return;
       }
+      setViewingVoucher(voucher);
+    } catch (err) {
+      toast("单据读取失败", { description: String(err), status: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 显式「载入编辑」才把单据灌进表单；有未保存内容时先确认。 */
+  const loadVoucherIntoForm = async (summary: VoucherSummary | Voucher) => {
+    if (dirty.current && !window.confirm("左边有未保存的内容，载入这张单据会覆盖。继续？")) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const voucher = "lines" in summary ? summary : await getVoucher(summary.id);
+      if (!voucher) {
+        toast("单据不存在", { status: "error" });
+        return;
+      }
+      setViewingVoucher(null);
       setMode({ kind: voucher.kind, id: voucher.id });
       setHead({
         docNo: voucher.docNo,
@@ -260,7 +331,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
                 itemName: line.itemName ?? "",
                 unit: line.unit ?? "",
                 qty: line.qty === null ? "" : String(line.qty),
-                price: line.priceMicros === null ? "" : (line.priceMicros / 10000).toFixed(4),
+                price: line.priceMicros === null ? "" : priceInput(line.priceMicros),
                 remark: line.remark ?? "",
               };
             })
@@ -346,10 +417,10 @@ const runDocSearch = useCallback(async (keyword: string) => {
     }
   }, []);
 
-  /** 点查询结果：本机单直接载入编辑器，导入单弹只读明细。 */
+  /** 点查询结果：本机单也先看详情，导入单弹只读明细。 */
   const openHit = async (hit: DocHit) => {
     if (hit.voucherId !== null) {
-      await openVoucher({
+      await showVoucher({
         id: hit.voucherId,
         kind: hit.kind,
         docNo: hit.docNo,
@@ -359,6 +430,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
         rowCount: hit.rowCount,
         amountCents: hit.amountCents,
         createdAt: "",
+        firstItem: null,
       });
       return;
     }
@@ -417,12 +489,32 @@ const runDocSearch = useCallback(async (keyword: string) => {
             >
               新出库单
             </Button>
+            <Button
+              size="small"
+              variant="secondary"
+              leadingIcon={showDocSearch ? RiSidebarFoldLine : RiSidebarUnfoldLine}
+              aria-pressed={showDocSearch}
+              title={showDocSearch ? "收起单据查询侧栏" : "展开单据查询侧栏"}
+              onClick={() => {
+                const next = !showDocSearch;
+                setShowDocSearch(next);
+                saveDocSearchOpen(next);
+              }}
+            >
+              {showDocSearch ? "收起查询" : "单据查询"}
+            </Button>
           </>
         }
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div
+          className={
+            showDocSearch
+              ? "grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]"
+              : "grid grid-cols-1 gap-4"
+          }
+        >
           {/* 单据主体：按纸单布局排 —— 居中标题、表头横带、明细、合计行、签字行 */}
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
             {/* 单头：公司名 + 单据名（居中，和纸单一致） */}
@@ -469,7 +561,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   onBlur={() => {
                     if (mode.id === null) freshDocNo(mode.kind, head.docDate);
                   }}
-                  className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[13px] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
+                  className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.8125rem] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -478,25 +570,25 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   aria-label="单据编号"
                   value={head.docNo}
                   onChange={(e) => setHead((prev) => ({ ...prev, docNo: e.target.value }))}
-                  className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[13px] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
+                  className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.8125rem] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
                 />
               </div>
             </div>
 
             {/* 明细表：列与纸单一致；送货单号逐行填（一张单可能对应多张送货单） */}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[860px] border-collapse text-[13px]">
+              <table className="w-full min-w-[1080px] table-fixed border-collapse text-[0.8125rem]">
                 <thead>
                   <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
                     <th className="w-10 px-2 py-2 text-center font-medium">#</th>
                     {isIn ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
-                    <th className="w-36 px-2 py-2 text-start font-medium">物料编码</th>
-                    <th className="px-2 py-2 text-start font-medium">物料名称</th>
-                    <th className="w-16 px-2 py-2 text-start font-medium">单位</th>
-                    <th className="w-24 px-2 py-2 text-end font-medium">数量</th>
-                    {isIn ? <th className="w-28 px-2 py-2 text-end font-medium">单价</th> : null}
+                    <th className="w-32 whitespace-nowrap px-2 py-2 text-start font-medium">物料编码</th>
+                    <th className="w-[20rem] min-w-[20rem] whitespace-nowrap px-2 py-2 text-start font-medium">物料名称</th>
+                    <th className="w-14 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
+                    <th className="w-16 px-2 py-2 text-end font-medium">数量</th>
+                    {isIn ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
                     {isIn ? <th className="w-28 px-2 py-2 text-end font-medium">合计</th> : null}
-                    <th className="w-40 px-2 py-2 text-start font-medium">备注</th>
+                    <th className="w-32 px-2 py-2 text-start font-medium">备注</th>
                     <th className="w-10 px-2 py-2" />
                   </tr>
                 </thead>
@@ -508,7 +600,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                         : null;
                     return (
                       <tr key={line.key} className="border-b border-separator-border last:border-0">
-                        <td className="px-2 py-1 text-center font-mono text-[11px] tabular-nums text-text-tertiary">
+                        <td className="px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-text-tertiary">
                           {index + 1}
                         </td>
                         {isIn ? (
@@ -518,7 +610,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                               value={line.deliveryNo}
                               onChange={(e) => setLine(line.key, { deliveryNo: e.target.value })}
                               placeholder="送货单号"
-                              className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 font-mono text-[12px] tabular-nums text-text-secondary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                              className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default font-mono text-[0.75rem] tabular-nums text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                             />
                           </td>
                         ) : null}
@@ -527,6 +619,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.itemCode}
                             onPick={(item) => applyMaster(line.key, item)}
                             onChangeText={(text) => setLine(line.key, { itemCode: text })}
+                            // 出库只能领有库存的物料；入库才需要能选到没有结存的新料
+                            inStockOnly={!isIn}
+                            placeholder={isIn ? "编码或名称" : "选有库存的物料"}
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -534,7 +629,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.itemName}
                             onChange={(e) => setLine(line.key, { itemName: e.target.value })}
                             placeholder="物料名称"
-                            className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -542,7 +637,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.unit}
                             onChange={(e) => setLine(line.key, { unit: e.target.value })}
                             placeholder="单位"
-                            className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 text-text-secondary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -551,7 +646,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.qty}
                             onChange={(e) => setLine(line.key, { qty: e.target.value })}
                             placeholder="0"
-                            className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 text-end font-mono tabular-nums text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-end font-mono tabular-nums text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
                         {isIn ? (
@@ -561,7 +656,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                               value={line.price}
                               onChange={(e) => setLine(line.key, { price: e.target.value })}
                               placeholder="0.00"
-                              className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 text-end font-mono tabular-nums text-text-secondary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                              className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-end font-mono tabular-nums text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                             />
                           </td>
                         ) : null}
@@ -575,7 +670,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.remark}
                             onChange={(e) => setLine(line.key, { remark: e.target.value })}
                             placeholder="备注"
-                            className="h-8 w-full rounded-md border border-transparent bg-transparent px-1.5 text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
                         <td className="px-1 py-1 text-center">
@@ -626,7 +721,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   aria-label="采购人"
                   value={head.buyer}
                   onChange={(e) => setHead((prev) => ({ ...prev, buyer: e.target.value }))}
-                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -636,7 +731,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   value={head.storekeeper}
                   onChange={(e) => setHead((prev) => ({ ...prev, storekeeper: e.target.value }))}
                   placeholder="签字"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -646,7 +741,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   value={head.receiver}
                   onChange={(e) => setHead((prev) => ({ ...prev, receiver: e.target.value }))}
                   placeholder="签字"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 text-body-regular text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
               </div>
             </div>
@@ -697,7 +792,8 @@ const runDocSearch = useCallback(async (keyword: string) => {
             ) : null}
           </section>
 
-          {/* 单据查询：按编号查，跨本机开单与导入两种来源 */}
+          {/* 单据查询：按编号查，跨本机开单与导入两种来源；可从页头收起 */}
+          {showDocSearch ? (
           <section className="flex flex-col gap-2 rounded-2xl border border-border-button-default bg-background-primary-default p-4">
             <div className="flex items-baseline justify-between gap-2">
               <h2 className="text-title-4-semibold text-text-primary">单据查询</h2>
@@ -711,7 +807,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   if (e.key === "Enter") void runDocSearch(docQuery);
                 }}
                 placeholder="单据编号，如 20260831206 或 0831"
-                className="h-8 min-w-0 flex-1 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[12px] tabular-nums text-text-primary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+                className="h-8 min-w-0 flex-1 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.75rem] tabular-nums text-text-primary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
               />
               <Button size="small" leadingIcon={RiSearchLine} onClick={() => runDocSearch(docQuery)} disabled={docSearching || !isTauri}>
                 查询
@@ -738,15 +834,15 @@ const runDocSearch = useCallback(async (keyword: string) => {
                         <span
                           className={
                             hit.kind === "in"
-                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[11px] font-medium text-emerald-500"
-                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[11px] font-medium text-sky-400"
+                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
+                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
                           }
                         >
                           {kindLabel(hit.kind)}
                         </span>
                         <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{hit.docNo}</span>
                         {hit.source === "import" ? (
-                          <span className="rounded bg-background-secondary-default px-1 py-0.5 text-[10px] text-text-tertiary">
+                          <span className="rounded bg-background-secondary-default px-1 py-0.5 text-[0.625rem] text-text-tertiary">
                             导入
                           </span>
                         ) : null}
@@ -764,28 +860,65 @@ const runDocSearch = useCallback(async (keyword: string) => {
               </ul>
             )}
           </section>
+          ) : null}
 
           {/* 单据列表 */}
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
-            <div className="flex items-baseline justify-between gap-2 px-4 pb-2 pt-4">
+            <div className="flex flex-wrap items-center gap-2 px-4 pb-2 pt-4">
               <h2 className="text-title-4-semibold text-text-primary">本机开单</h2>
-              <span className="text-caption-1-regular text-text-tertiary">{count(history.length)} 张</span>
+              <span className="text-caption-1-regular text-text-tertiary">
+                {historyQuery || historyKind !== "all"
+                  ? `${count(shownHistory.length)} / ${count(history.length)} 张`
+                  : `${count(history.length)} 张`}
+              </span>
+              <div className="ms-auto flex items-center gap-2">
+                <input
+                  aria-label="筛选本机单据"
+                  value={historyQuery}
+                  onChange={(e) => setHistoryQuery(e.target.value)}
+                  placeholder="编号 / 供应商"
+                  className="h-7 w-36 rounded-lg border border-border-button-default bg-background-secondary-default px-2 text-[0.75rem] text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+                />
+                {(["all", "in", "out"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    aria-pressed={historyKind === k}
+                    onClick={() => setHistoryKind(k)}
+                    className={
+                      "h-7 rounded-md px-2 text-[0.6875rem] font-medium transition-colors " +
+                      (historyKind === k
+                        ? "bg-background-primary-default text-text-primary ring-1 ring-separator-border"
+                        : "text-text-tertiary hover:text-text-secondary")
+                    }
+                  >
+                    {k === "all" ? "全部" : kindLabel(k)}
+                  </button>
+                ))}
+              </div>
             </div>
-            {history.length === 0 ? (
+            <p className="px-4 pb-2 text-caption-1-regular text-text-tertiary">
+              点一行看明细；要改内容用弹窗里的「载入编辑」，不会冲掉左边正在录的单。
+            </p>
+            {shownHistory.length === 0 ? (
               <div className="px-4 pb-8 pt-2">
                 <EmptyState
                   icon={RiFileList3Line}
-                  title="还没有开过单"
-                  description="左边填一张入库单或出库单，保存后会出现在台账里。"
+                  title={history.length === 0 ? "还没有开过单" : "没有符合条件的单据"}
+                  description={
+                    history.length === 0
+                      ? "左边填一张入库单或出库单，保存后会出现在台账里。"
+                      : "换个编号或类型再试。"
+                  }
                 />
               </div>
             ) : (
               <ul className="max-h-[560px] overflow-auto px-2 pb-3">
-                {history.map((voucher) => (
+                {shownHistory.map((voucher) => (
                   <li key={voucher.id}>
                     <button
                       type="button"
-                      onClick={() => openVoucher(voucher)}
+                      onClick={() => showVoucher(voucher)}
                       className={
                         "flex w-full flex-col gap-0.5 rounded-lg px-2 py-2 text-start transition-colors hover:bg-background-secondary-hover " +
                         (mode.id === voucher.id ? "bg-background-secondary-default" : "")
@@ -795,17 +928,30 @@ const runDocSearch = useCallback(async (keyword: string) => {
                         <span
                           className={
                             voucher.kind === "in"
-                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[11px] font-medium text-emerald-500"
-                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[11px] font-medium text-sky-400"
+                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
+                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
                           }
                         >
                           {kindLabel(voucher.kind)}
                         </span>
                         <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{voucher.docNo}</span>
+                        {mode.id === voucher.id ? (
+                          <span className="rounded bg-accent-500/12 px-1 py-0.5 text-[0.625rem] font-medium text-accent-500">
+                            编辑中
+                          </span>
+                        ) : null}
                         <span className="ms-auto text-caption-1-regular text-text-tertiary">{date(voucher.docDate)}</span>
                       </span>
                       <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
-                        <span className="truncate">{voucher.partner ?? voucher.owner ?? "—"}</span>
+                        {/* 供应商/归属为空时退回首行物料名，别让整行只剩一个「—」 */}
+                        <span className="truncate" title={voucher.firstItem ?? ""}>
+                          {voucher.partner ?? voucher.owner ?? voucher.firstItem ?? "未填供应商"}
+                        </span>
+                        {voucher.partner || voucher.owner ? (
+                          <span className="shrink-0 truncate text-text-tertiary/70" title={voucher.firstItem ?? ""}>
+                            {voucher.firstItem ?? ""}
+                          </span>
+                        ) : null}
                         <span className="ms-auto shrink-0 font-mono tabular-nums">
                           {count(voucher.rowCount)} 行 · {money(voucher.amountCents)}
                         </span>
@@ -815,11 +961,115 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 ))}
               </ul>
             )}
+            {shownHistory.length > 0 ? (
+              <div className="flex items-center justify-between border-t border-separator-border px-4 py-2">
+                <span className="text-caption-1-regular text-text-tertiary">
+                  当前列表 入库 {count(shownHistory.filter((v) => v.kind === "in").length)} 张 · 出库{" "}
+                  {count(shownHistory.filter((v) => v.kind === "out").length)} 张
+                </span>
+                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                  合计 {money(shownAmount)}
+                </span>
+              </div>
+            ) : null}
           </section>
         </div>
       </div>
 
-{viewingImport ? (
+{viewingVoucher ? (
+        <Modal isOpen onOpenChange={(open: boolean) => !open && setViewingVoucher(null)} size="xl">
+          {({ close }) => (
+            <>
+              <ModalHeader
+                title={`${kindLabel(viewingVoucher.kind)}单 ${viewingVoucher.docNo}`}
+                description={`${date(viewingVoucher.docDate)} · ${count(viewingVoucher.lines.length)} 行 · ${money(
+                  viewingVoucher.lines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0),
+                )} · ${viewingVoucher.partner ?? viewingVoucher.owner ?? "—"}`}
+              />
+              <ModalBody>
+                <div className="overflow-x-auto rounded-xl border border-separator-border">
+                  <table className="w-full border-collapse text-[0.8125rem]">
+                    <thead>
+                      <tr className="border-b border-separator-border bg-background-tertiary-default text-caption-1-semibold text-text-tertiary">
+                        <th className="w-12 px-2 py-2 text-center font-medium">#</th>
+                        <th className="w-32 px-2 py-2 text-start font-medium">送货单号</th>
+                        <th className="w-32 px-2 py-2 text-start font-medium">物料编码</th>
+                        <th className="px-2 py-2 text-start font-medium">物料名称</th>
+                        <th className="w-14 px-2 py-2 text-start font-medium">单位</th>
+                        <th className="w-24 px-2 py-2 text-end font-medium">数量</th>
+                        <th className="w-24 px-2 py-2 text-end font-medium">单价</th>
+                        <th className="w-28 px-2 py-2 text-end font-medium">合计</th>
+                        <th className="w-32 px-2 py-2 text-start font-medium">备注</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewingVoucher.lines.map((line, index) => (
+                        <tr key={line.id} className="border-b border-separator-border last:border-0">
+                          <td className="px-2 py-1 text-center font-mono text-[0.75rem] tabular-nums text-text-tertiary">
+                            {index + 1}
+                          </td>
+                          <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
+                            {line.deliveryNo ?? "—"}
+                          </td>
+                          <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
+                            {line.itemCode ?? "—"}
+                          </td>
+                          <td className="truncate px-2 py-1 text-text-primary" title={line.itemName ?? ""}>
+                            {line.itemName ?? "—"}
+                          </td>
+                          <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
+                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">{qty(line.qty)}</td>
+                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-tertiary">
+                            {line.priceMicros === null ? "—" : priceText(line.priceMicros)}
+                          </td>
+                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-primary">
+                            {line.amountCents === null ? "—" : amount(line.amountCents)}
+                          </td>
+                          <td className="truncate px-2 py-1 text-text-tertiary" title={line.remark ?? ""}>
+                            {line.remark ?? "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-2 text-caption-1-regular text-text-tertiary">
+                  点「载入编辑」才会把这张单读进左边表单；直接关闭不会动你正在录的内容。
+                </p>
+              </ModalBody>
+              <ModalFooter>
+                <Button size="small" variant="ghost" leadingIcon={RiDeleteBinLine} onClick={() => {
+                  const hit = history.find((v) => v.id === viewingVoucher.id);
+                  if (hit) {
+                    close();
+                    setPendingDelete(hit);
+                  }
+                }}>
+                  删除
+                </Button>
+                <Button size="small" variant="secondary" leadingIcon={RiPrinterLine} onClick={() => {
+                  setPrintingView(viewingVoucher);
+                  close();
+                }}>
+                  A4 打印
+                </Button>
+                <Button size="small" variant="secondary" onClick={close}>
+                  关闭
+                </Button>
+                <Button size="small" onClick={() => loadVoucherIntoForm(viewingVoucher)}>
+                  载入编辑
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </Modal>
+      ) : null}
+
+      {printingView ? (
+        <PrintVoucher voucher={printingView} onClose={() => setPrintingView(null)} />
+      ) : null}
+
+      {viewingImport ? (
         <Modal isOpen onOpenChange={(open: boolean) => !open && setViewingImport(null)} size="xl">
           {({ close }) => (
             <>
@@ -831,7 +1081,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
               />
               <ModalBody>
                 <div className="overflow-x-auto rounded-xl border border-separator-border">
-                  <table className="w-full border-collapse text-[13px]">
+                  <table className="w-full border-collapse text-[0.8125rem]">
                     <thead>
                       <tr className="border-b border-separator-border bg-background-tertiary-default text-caption-1-semibold text-text-tertiary">
                         <th className="w-12 px-2 py-2 text-center font-medium">源行</th>
@@ -847,10 +1097,10 @@ const runDocSearch = useCallback(async (keyword: string) => {
                     <tbody>
                       {viewingImport.lines.map((line) => (
                         <tr key={line.id} className="border-b border-separator-border last:border-0">
-                          <td className="px-2 py-1 text-center font-mono text-[11px] tabular-nums text-text-tertiary">
+                          <td className="px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-text-tertiary">
                             {line.rowNo}
                           </td>
-                          <td className="truncate px-2 py-1 font-mono text-[12px] text-text-secondary">
+                          <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
                             {line.itemCode ?? "—"}
                           </td>
                           <td className="truncate px-2 py-1 text-text-primary" title={line.itemName ?? ""}>
@@ -864,7 +1114,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-primary">
                             {line.amountCents === null ? "—" : amount(line.amountCents)}
                           </td>
-                          <td className="px-2 py-1 text-[11px] leading-4 text-amber-500">
+                          <td className="px-2 py-1 text-[0.6875rem] leading-4 text-amber-500">
                             {line.flags.length > 0 ? line.flags.map(flagLabel).join(" ") : "—"}
                           </td>
                         </tr>

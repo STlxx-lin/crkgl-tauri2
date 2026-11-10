@@ -391,7 +391,7 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
             </div>
           ) : (
             <div className="overflow-x-auto rounded-2xl border border-border-button-default bg-background-primary-default">
-              <table className="w-full border-collapse text-[13px]">
+              <table className="w-full border-collapse text-[0.8125rem]">
                 <thead>
                   <tr className="border-b border-separator-border text-caption-1-semibold text-text-tertiary">
                     <th className="px-5 py-2.5 text-start font-medium">文件</th>
@@ -454,7 +454,7 @@ function StepDot({ index, label, active, done }: { index: number; label: string;
       <span
         aria-hidden
         className={
-          "flex size-5 items-center justify-center rounded-full border text-[11px] tabular-nums " +
+          "flex size-5 items-center justify-center rounded-full border text-[0.6875rem] tabular-nums " +
           (active
             ? "border-text-primary bg-text-primary text-background-primary-default"
             : done
@@ -601,7 +601,7 @@ function PreviewPanel({
             </span>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-[12px]">
+            <table className="w-full border-collapse text-[0.75rem]">
               <thead>
                 <tr className="text-caption-1-semibold text-text-tertiary">
                   <th className="px-3 py-1.5 text-start font-medium">日期</th>
@@ -627,7 +627,7 @@ function PreviewPanel({
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
                       {row.amountCents === null ? "—" : (row.amountCents / 100).toFixed(2)}
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-[11px] text-amber-500">{row.flags.join(" ") || "—"}</td>
+                    <td className="px-3 py-1.5 font-mono text-[0.6875rem] text-amber-500">{row.flags.join(" ") || "—"}</td>
                   </tr>
                 ))}
               </tbody>

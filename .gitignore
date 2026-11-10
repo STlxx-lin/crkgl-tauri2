@@ -5,6 +5,7 @@ shots/
 _archive/
 src-tauri/target/
 src-tauri/gen/
+.mimosa/
 *.log
 .env
 .env.*
