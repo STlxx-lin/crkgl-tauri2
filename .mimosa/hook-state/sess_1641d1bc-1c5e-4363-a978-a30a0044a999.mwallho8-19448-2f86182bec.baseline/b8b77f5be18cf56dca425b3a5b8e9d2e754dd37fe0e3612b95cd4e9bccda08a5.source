@@ -1,0 +1,442 @@
+// 与 Rust 侧 serde 结构一一对应。字段名统一 camelCase。
+
+export type Kind = "in" | "out";
+
+export interface LedgerFilter {
+  from?: string | null;
+  to?: string | null;
+  kind?: Kind | null;
+  owner?: string | null;
+  partner?: string | null;
+  buyer?: string | null;
+  keyword?: string | null;
+  flagged?: boolean;
+  sort?: "date" | "amount" | "qty" | "name" | null;
+  desc?: boolean;
+}
+
+export interface LedgerRow {
+  id: number;
+  kind: Kind;
+  docDate: string | null;
+  docNo: string | null;
+  deliveryNo: string | null;
+  itemCode: string | null;
+  itemName: string | null;
+  spec: string | null;
+  unit: string | null;
+  qty: number | null;
+  priceMicros: number | null;
+  amountCents: number | null;
+  remark: string | null;
+  partner: string | null;
+  buyer: string | null;
+  owner: string | null;
+  receiver: string | null;
+  flags: string[];
+  sheet: string;
+  rowNo: number;
+  importId: number | null;
+  createdAt: string | null;
+}
+
+export interface LedgerTotals {
+  rows: number;
+  inRows: number;
+  outRows: number;
+  amountInCents: number;
+  amountOutCents: number;
+  qtyIn: number;
+  qtyOut: number;
+  docCount: number;
+  itemCount: number;
+}
+
+export interface LedgerPage {
+  rows: LedgerRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totals: LedgerTotals;
+}
+
+export interface Facets {
+  owners: string[];
+  partners: string[];
+  buyers: string[];
+  minDate: string | null;
+  maxDate: string | null;
+  itemCount: number;
+  inRows: number;
+  outRows: number;
+}
+
+export interface GroupRow {
+  key: string;
+  inRows: number;
+  outRows: number;
+  inQty: number;
+  outQty: number;
+  amountInCents: number;
+  amountOutCents: number;
+}
+
+export interface TopItem {
+  itemCode: string | null;
+  itemName: string | null;
+  unit: string | null;
+  amountCents: number;
+  qty: number;
+  rows: number;
+}
+
+export interface MonthPoint {
+  month: string;
+  amountInCents: number;
+  amountOutCents: number;
+  inRows: number;
+  outRows: number;
+}
+
+export interface PeriodCompare {
+  now: GroupRow;
+  previous: GroupRow;
+  previousLabel: string;
+}
+
+export interface SummaryBundle {
+  totals: LedgerTotals;
+  monthly: MonthPoint[];
+  byOwner: GroupRow[];
+  byPartner: GroupRow[];
+  topOut: TopItem[];
+  topIn: TopItem[];
+  compare: PeriodCompare | null;
+}
+
+export interface Issue {
+  sheet: string;
+  rowNo: number;
+  message: string;
+}
+
+export interface HeaderGuess {
+  column: number;
+  header: string;
+  field: string | null;
+}
+
+export interface SheetReport {
+  name: string;
+  rows: number;
+  nonEmptyRows: number;
+  detail: boolean;
+  /** 主数据表（供应商名称 / 物料编号 / 基础信息），写进基础资料，不进台账 */
+  master: boolean;
+  note: string;
+  headers: HeaderGuess[];
+  sample: string[][];
+}
+
+export interface WorkbookReport {
+  path: string;
+  fileName: string;
+  sizeBytes: number;
+  sheets: SheetReport[];
+}
+
+export interface DraftRow {
+  sheet: string;
+  rowNo: number;
+  kind: Kind | "";
+  docDate: string;
+  docNo: string;
+  deliveryNo: string;
+  itemCode: string;
+  itemName: string;
+  unit: string;
+  qty: number | null;
+  priceMicros: number | null;
+  amountCents: number | null;
+  remark: string;
+  partner: string;
+  buyer: string;
+  owner: string;
+  receiver: string;
+  flags: string[];
+}
+
+export interface SheetPlan {
+  name: string;
+  mapping: Record<string, string>;
+  mode?: "replace" | "append" | null;
+}
+
+export interface SheetPreview {
+  name: string;
+  kind: Kind;
+  rows: number;
+  skipped: number;
+  flagged: number;
+  issues: Issue[];
+  sample: DraftRow[];
+}
+
+export interface PreviewResult {
+  sheets: SheetPreview[];
+  totalRows: number;
+  totalIssues: number;
+  flaggedRows: number;
+}
+
+export interface SheetSummary {
+  name: string;
+  kind: Kind;
+  rows: number;
+  skipped: number;
+}
+
+export interface ImportOutcome {
+  importId: number;
+  fileName: string;
+  rows: number;
+  skipped: number;
+  flagged: number;
+  replaced: number;
+  issues: Issue[];
+  sheets: SheetSummary[];
+  duplicateOf: number | null;
+  /** 顺带导入的基础资料结果 */
+  master: MasterImportOutcome | null;
+  /** 基础资料导入失败的提示（台账已写成功） */
+  masterError: string | null;
+}
+
+export interface ImportRecord {
+  id: number;
+  fileName: string;
+  fileHash: string;
+  importedAt: string;
+  rowCount: number;
+  skippedCount: number;
+  note: string | null;
+  liveRows: number;
+}
+
+export interface WebStatus {
+  enabled: boolean;
+  listening: boolean;
+  port: number;
+  requestedPort: number;
+  error: string | null;
+  urls: string[];
+  staticReady: boolean;
+  startedAt: string | null;
+}
+
+export interface AccessEntry {
+  at: string;
+  ip: string;
+  path: string;
+  status: number;
+}
+
+export interface BootstrapInfo {
+  appVersion: string;
+  schemaVersion: number;
+  dbPath: string;
+  rowCount: number;
+  importCount: number;
+  minDate: string | null;
+  maxDate: string | null;
+  inRows: number;
+  outRows: number;
+  web: WebStatus;
+  startupImport: ImportOutcome | null;
+  lastError: string | null;
+  sampleWorkbooks: string[];
+}
+
+export interface ExportResult {
+  path: string;
+  rows: number;
+}
+
+// ---------- 开单 ----------
+
+export interface VoucherLineInput {
+  /** 送货单号：纸单上逐行填 */
+  deliveryNo?: string | null;
+  itemCode?: string | null;
+  itemName?: string | null;
+  unit?: string | null;
+  qty?: number | null;
+  /** 单价（分）。出库没有单价。 */
+  priceMicros?: number | null;
+  remark?: string | null;
+}
+
+export interface VoucherInput {
+  kind: Kind;
+  docNo?: string | null;
+  docDate?: string | null;
+  partner?: string | null;
+  deliveryNo?: string | null;
+  buyer?: string | null;
+  owner?: string | null;
+  receiver?: string | null;
+  remark?: string | null;
+  lines: VoucherLineInput[];
+}
+
+export interface VoucherLine {
+  id: number;
+  ledgerId: number;
+  deliveryNo: string | null;
+  itemCode: string | null;
+  itemName: string | null;
+  unit: string | null;
+  qty: number | null;
+  priceMicros: number | null;
+  amountCents: number | null;
+  remark: string | null;
+}
+
+export interface Voucher {
+  id: number;
+  kind: Kind;
+  docNo: string;
+  docDate: string;
+  partner: string | null;
+  deliveryNo: string | null;
+  buyer: string | null;
+  owner: string | null;
+  receiver: string | null;
+  remark: string | null;
+  rowCount: number;
+  amountCents: number;
+  createdAt: string;
+  sheet: string;
+  lines: VoucherLine[];
+}
+
+export interface VoucherSummary {
+  id: number;
+  kind: Kind;
+  docNo: string;
+  docDate: string;
+  partner: string | null;
+  owner: string | null;
+  rowCount: number;
+  amountCents: number;
+  createdAt: string;
+}
+
+export interface ItemMaster {
+  itemCode: string;
+  itemName: string;
+  unit: string | null;
+  lastPriceCents: number | null;
+  hits: number;
+}
+
+/** 批量改只动描述性字段，数量金额必须逐行确认。 */
+export interface BulkPatch {
+  owner?: string | null;
+  buyer?: string | null;
+  remark?: string | null;
+}
+
+// ---------- 基础资料 ----------
+
+export interface Item {
+  id: number;
+  itemCode: string;
+  itemName: string;
+  category: string | null;
+  unit: string | null;
+  priceMicros: number | null;
+  spec: string | null;
+  /** 外购件 / 加工件 */
+  itemType: string | null;
+  /** 图号 */
+  drawingNo: string | null;
+  owner: string | null;
+  supplier: string | null;
+  remark: string | null;
+  active: boolean;
+}
+
+export interface ItemInput {
+  itemCode: string;
+  itemName: string;
+  category?: string | null;
+  unit?: string | null;
+  priceMicros?: number | null;
+  spec?: string | null;
+  itemType?: string | null;
+  drawingNo?: string | null;
+  owner?: string | null;
+  supplier?: string | null;
+  remark?: string | null;
+  active?: boolean;
+}
+
+export interface Supplier {
+  id: number;
+  name: string;
+  contact: string | null;
+  phone: string | null;
+  remark: string | null;
+  active: boolean;
+  hits: number;
+}
+
+export interface SupplierInput {
+  name: string;
+  contact?: string | null;
+  phone?: string | null;
+  remark?: string | null;
+  active?: boolean;
+}
+
+export interface CategoryCount {
+  category: string;
+  count: number;
+}
+
+export interface MasterStats {
+  items: number;
+  itemsActive: number;
+  suppliers: number;
+  categories: CategoryCount[];
+  itemTypes: CategoryCount[];
+  /** 已填图号的物料数 */
+  withDrawing: number;
+  /** 加工件里缺图号、需要补的数量 */
+  missingDrawing: number;
+}
+
+export interface MasterImportOutcome {
+  itemsAdded: number;
+  itemsUpdated: number;
+  suppliersAdded: number;
+  suppliersSkipped: number;
+  sheetsFound: string[];
+  message: string;
+}
+
+/** 单据查询结果：本机开单（可编辑）或 Excel 导入（只读）。 */
+export interface DocHit {
+  docNo: string;
+  kind: Kind;
+  docDate: string | null;
+  partner: string | null;
+  owner: string | null;
+  buyer: string | null;
+  deliveryNo: string | null;
+  rowCount: number;
+  amountCents: number;
+  source: "voucher" | "import";
+  voucherId: number | null;
+}

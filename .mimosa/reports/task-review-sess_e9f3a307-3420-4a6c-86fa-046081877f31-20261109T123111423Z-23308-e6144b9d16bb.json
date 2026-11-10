@@ -1,0 +1,649 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261109T123111423Z-23308-e6144b9d16bb",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "dist-remote/assets/index-BJAvZhpe.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "baseline-read",
+      "target": "dist-remote/assets/window-C0FBu__w.js",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "scan",
+      "target": "src/components/ThemeToggle.tsx",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "src/components/AppShell.tsx",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "dist-remote/assets/index-BJAvZhpe.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "dist-remote/assets/window-C0FBu__w.js",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 198,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 2
+    },
+    "change_tracking": {
+      "touched_observed": 1,
+      "touched_retained": 1,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 11,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 11,
+      "selected_files": 11,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 11,
+      "scanned_files": 0,
+      "skipped_files": 0,
+      "failed_files": 11,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "baseline_snapshot_unreadable": 9,
+      "scanner_failed": 11,
+      "project_check_failed": 20
+    },
+    "reasons": [
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/window-C0FBu__w.js",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src/components/ThemeToggle.tsx",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "src/components/AppShell.tsx",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/window-C0FBu__w.js",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "dist-remote/assets/window-C0FBu__w.js",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src/components/ThemeToggle.tsx",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "src/components/AppShell.tsx",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/dist-js-B78fRGDZ.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/index-BJAvZhpe.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "dist-remote/assets/window-C0FBu__w.js",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-11-09T12:31:11.423Z",
+  "session_id": "sess_e9f3a307-3420-4a6c-86fa-046081877f31",
+  "target": ".",
+  "revision": null,
+  "rules_version": "unavailable",
+  "diff_hash": "89da8b2dc80252b0f3d8b95ead877da6d687415d7af98153532ac684c3f6286f",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 11,
+    "changed_files": [
+      {
+        "file": "dist-remote/assets/dist-js-B78fRGDZ.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "e583e2c4e88857b0dfe5a0410905d1f5ace8326f20d24cde12ca14d56586c51b"
+      },
+      {
+        "file": "dist-remote/assets/index-BJAvZhpe.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 28
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "4acef12b155d8cb1a7299f989eb4653c41f6957d9746af88f1c1d85409a0ae66"
+      },
+      {
+        "file": "dist-remote/assets/window-C0FBu__w.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "506340a7c88609649772b083d59b2b3c01205fd980ca8ee4b9319eab45c67f8c"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "8d307c67d4ef1e2362ab0a54f8435e0d13825ee98f4c66d0e1e2149ba5a0e13e"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "e583e2c4e88857b0dfe5a0410905d1f5ace8326f20d24cde12ca14d56586c51b"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 28
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "4acef12b155d8cb1a7299f989eb4653c41f6957d9746af88f1c1d85409a0ae66"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 28
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "a3631601556982c2feb42b7b6aeb0a2d5b57fec7d6a430968435a5cc18da2e39"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "506340a7c88609649772b083d59b2b3c01205fd980ca8ee4b9319eab45c67f8c"
+      },
+      {
+        "file": "src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 1
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "aebef5269aed1e34781b0c790519958e2535cce155c40337210b8c5994bd409c"
+      },
+      {
+        "file": "src/components/AppShell.tsx",
+        "ranges": [
+          {
+            "start": 123,
+            "end": 123
+          },
+          {
+            "start": 130,
+            "end": 132
+          }
+        ],
+        "before_hash": "9cd1769b8b85e589a9f524c15e9ae75b2ceaf9880eca16d4bef72876c41fd309",
+        "after_hash": "3c445d308c4ebdfba340594c0b2b4c735b2a47199a2ef295fa23e7f6197a2c70"
+      },
+      {
+        "file": "src/components/ThemeToggle.tsx",
+        "ranges": [
+          {
+            "start": 12,
+            "end": 15
+          },
+          {
+            "start": 39,
+            "end": 39
+          },
+          {
+            "start": 43,
+            "end": 43
+          },
+          {
+            "start": 47,
+            "end": 49
+          },
+          {
+            "start": 62,
+            "end": 62
+          },
+          {
+            "start": 64,
+            "end": 64
+          },
+          {
+            "start": 67,
+            "end": 68
+          }
+        ],
+        "before_hash": "5dde67d19cc65eec62e77817fd41242387b79ef55bf6f2403985e842503155e3",
+        "after_hash": "140ad3fce721b2e61684dfe8d66d8d315d7a19b76594f62c6f8febf9cdf992ef"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-11-09T12:31:08.550Z",
+    "completed_at": "2026-11-09T12:31:11.423Z",
+    "duration_ms": 2873,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 2873,
+    "peakMemoryBytes": 100012032,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 0,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31-20261109T123111423Z-23308-e6144b9d16bb.json",
+    "latest_report": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31.json",
+    "history_summary": ".mimosa/history/run-20261109T123111423Z-23308-e6144b9d16bb.json"
+  }
+}

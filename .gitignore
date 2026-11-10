@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-remote/
+shots/
+_archive/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.env
+.env.*
+!.env.example

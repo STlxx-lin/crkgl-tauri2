@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261109T162324341Z-10996-2c87de9980fa",
+  "runStatus": "inconclusive",
+  "errors": [
+    "candidate-select:src/components/RowDetail.tsx: candidate_limit_exceeded: 4 changed reviewable file(s) were not scanned because the limit is 20",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/dist-js-BtQmPmkJ.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/index-Bup5Ijh1.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/window-Bf6IRj7B.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/dist-js-BoCxgnGu.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/dist-js-BtQmPmkJ.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/index-B7dvsUe-.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/index-Bup5Ijh1.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/window-B0xBqkSL.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/debug/dist-remote/assets/window-Bf6IRj7B.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "scan:src-tauri/tests/voucher_it.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/dist-js-BtQmPmkJ.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/index-Bup5Ijh1.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/window-Bf6IRj7B.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/dist-js-BoCxgnGu.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/dist-js-BtQmPmkJ.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/index-B7dvsUe-.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/index-Bup5Ijh1.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/window-B0xBqkSL.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/debug/dist-remote/assets/window-Bf6IRj7B.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/src/db.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/src/import.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/src/ledger.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/src/master.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/src/voucher.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/screens/LedgerScreen.tsx: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/screens/MasterScreen.tsx: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/screens/VoucherScreen.tsx: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/lib/format.ts: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/lib/types.ts: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": null,
+  "diffHash": "133bb13f940f98bcf50e14efde5dcdecaa1c85ddae68254b1d067605e269cc11",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-09T16:23:24.341Z",
+  "timing": {
+    "startedAt": "2026-11-09T16:23:19.541Z",
+    "completedAt": "2026-11-09T16:23:24.341Z",
+    "durationMs": 4800
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "candidate_limit_exceeded": 1,
+      "baseline_snapshot_unreadable": 9,
+      "scanner_failed": 20,
+      "project_check_failed": 30
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31-20261109T162324341Z-10996-2c87de9980fa.json"
+}

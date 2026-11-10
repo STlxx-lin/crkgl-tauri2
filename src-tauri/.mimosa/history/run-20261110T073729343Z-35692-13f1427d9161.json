@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261110T073729343Z-35692-13f1427d9161",
+  "runStatus": "inconclusive",
+  "errors": [
+    "candidate-select:examples/import_probe.rs: changed_file_unreadable: observed changed file no longer exists or cannot be read",
+    "baseline-read:target/release/dist-remote/assets/dist-js-CsSuiis8.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/release/dist-remote/assets/index-DVUoCYvw.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/release/dist-remote/assets/window-BAUywc-n.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/dist-js-CsSuiis8.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/dist-js-DY2vNkBh.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/index-D1k0XZFx.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/index-DVUoCYvw.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/window-BAUywc-n.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:target/debug/dist-remote/assets/window-J1302uM-.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "scan:src/master.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/import.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/commands.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/release/dist-remote/assets/dist-js-CsSuiis8.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/release/dist-remote/assets/index-DVUoCYvw.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/release/dist-remote/assets/window-BAUywc-n.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/dist-js-CsSuiis8.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/dist-js-DY2vNkBh.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/index-D1k0XZFx.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/index-DVUoCYvw.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/window-BAUywc-n.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:target/debug/dist-remote/assets/window-J1302uM-.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": null,
+  "diffHash": "d30f7682188dee67adb1e16fd2defd5aabd80080833dc64227ca0cf4f87947a1",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-10T07:37:29.343Z",
+  "timing": {
+    "startedAt": "2026-11-10T07:37:25.818Z",
+    "completedAt": "2026-11-10T07:37:29.343Z",
+    "durationMs": 3525
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "changed_file_unreadable": 1,
+      "baseline_snapshot_unreadable": 9,
+      "scanner_failed": 12,
+      "project_check_failed": 22
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31-20261110T073729343Z-35692-13f1427d9161.json"
+}

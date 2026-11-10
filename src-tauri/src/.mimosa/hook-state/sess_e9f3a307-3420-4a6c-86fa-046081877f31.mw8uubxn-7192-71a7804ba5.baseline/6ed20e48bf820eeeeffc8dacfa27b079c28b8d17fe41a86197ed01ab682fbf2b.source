@@ -1,0 +1,877 @@
+//! xlsm 导入：先看（inspect）→ 预览（preview）→ 落库（run）。
+//!
+//! 表结构按实测的 `仓库出入库明细_5611_Modified.xlsm` 对齐：
+//!   - `入库明细` 首行表头：入库时间/单据编号/送货单号/物料编码/物料名称/单位/数量/单价/合计/备注/供应商名称/采购人
+//!   - `出库明细` 首行表头：日期/出库单号/物料编码/物料名称/单位/数量/备注/归属/领用人/采购人
+//! 同一个文件里可以有多张明细表，sheet 名不同但表头能对上就一起导入。
+//!
+//! 只读源文件，不改它。公式单元格取 Excel 缓存的值；没缓存值就当空处理并打提醒。
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use calamine::{open_workbook_auto, Data, Reader};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::db::{Db, DbError};
+use crate::ledger::normalize_date;
+
+/// 标准字段。顺序就是界面上映射下拉的顺序。
+pub const FIELDS: &[&str] = &[
+    "doc_date",
+    "doc_no",
+    "delivery_no",
+    "item_code",
+    "item_name",
+    "unit",
+    "qty",
+    "price",
+    "amount",
+    "remark",
+    "partner",
+    "buyer",
+    "owner",
+    "receiver",
+];
+
+pub fn field_label(field: &str) -> &'static str {
+    match field {
+        "doc_date" => "日期",
+        "doc_no" => "单据编号",
+        "delivery_no" => "送货单号",
+        "item_code" => "物料编码",
+        "item_name" => "物料名称",
+        "unit" => "单位",
+        "qty" => "数量",
+        "price" => "单价",
+        "amount" => "合计金额",
+        "remark" => "备注",
+        "partner" => "供应商",
+        "buyer" => "采购人",
+        "owner" => "归属",
+        "receiver" => "领用人",
+        _ => "未使用",
+    }
+}
+
+/// 内置表头别名：精确匹配优先，再做去空白/去括号的比较。
+const ALIASES: &[(&str, &[&str])] = &[
+    ("doc_date", &["入库时间", "日期", "入库日期", "出库时间", "出库日期", "发生日期", "单据日期"]),
+    ("doc_no", &["单据编号", "入库单号", "出库单号", "单据号", "单号", "入库单", "出库单"]),
+    ("delivery_no", &["送货单号", "送货单", "验收单号"]),
+    ("item_code", &["物料编码", "编码", "物料编号", "物料编码序号", "图号"]),
+    ("item_name", &["物料名称", "名称", "品名", "物料"]),
+    ("unit", &["单位", "计量单位"]),
+    ("qty", &["数量", "入库数量", "出库数量"]),
+    ("price", &["单价", "进货单价", "进货价", "价格"]),
+    ("amount", &["合计", "金额", "总价", "合计金额", "金额合计"]),
+    ("remark", &["备注", "说明"]),
+    ("partner", &["供应商名称", "供应商", "供货商"]),
+    ("buyer", &["采购人", "采购员", "采购"]),
+    ("owner", &["归属", "归属部门", "使用部门", "领用部门", "车间"]),
+    ("receiver", &["领用人", "领用", "领取人"]),
+];
+
+/// 明细表必须带日期 + 数量，否则当成别的工作表跳过。
+pub fn looks_like_detail(headers: &[(String, String)]) -> bool {
+    let has_date = headers.iter().any(|(_, f)| f == "doc_date");
+    let has_qty = headers.iter().any(|(_, f)| f == "qty");
+    let has_name = headers
+        .iter()
+        .any(|(_, f)| f == "item_name" || f == "item_code");
+    has_date && has_qty && has_name
+}
+
+pub fn guess_field(header: &str) -> Option<String> {
+    let raw = header.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    for (field, names) in ALIASES {
+        if names.iter().any(|n| *n == raw) {
+            return Some((*field).to_string());
+        }
+    }
+    // 去掉空白、括号内容后再次比较：`单  价`、`数量（个）`
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && *c != '（' && *c != '(' && *c != '）' && *c != ')')
+            .collect()
+    };
+    let target = squash(raw);
+    for (field, names) in ALIASES {
+        if names.iter().any(|n| squash(n) == target) {
+            return Some((*field).to_string());
+        }
+    }
+    None
+}
+
+/// 单元格取值：数字用最短表示，日期序列号单独处理。
+fn cell_text(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(s) => s.trim().to_string(),
+        Data::Float(f) => crate::ledger::trim_float(*f),
+        Data::Int(i) => i.to_string(),
+        Data::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        Data::DateTime(dt) => excel_date(dt.as_f64()),
+        Data::DateTimeIso(s) | Data::DurationIso(s) => s.trim().to_string(),
+        Data::Error(e) => format!("#ERR:{e:?}"),
+    }
+}
+
+fn cell_float(cell: &Data) -> Option<f64> {
+    match cell {
+        Data::Float(f) => Some(*f),
+        Data::Int(i) => Some(*i as f64),
+        Data::DateTime(dt) => Some(dt.as_f64()),
+        Data::String(s) => parse_number(s),
+        _ => None,
+    }
+}
+
+/// `1,234.50`、`￥12`、`12元` 都要能认出来。
+pub fn parse_number(raw: &str) -> Option<f64> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !matches!(c, ',' | '，' | ' ' | '¥' | '￥' | '元' | '/' | '%'))
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    cleaned.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Excel 序列号 → `YYYY-MM-DD`（1900 日期系统）。
+pub fn excel_date(serial: f64) -> String {
+    if !serial.is_finite() || serial < 1.0 || serial > 80000.0 {
+        return String::new();
+    }
+    // Excel 把 1900 当闰年，1899-12-30 起算正好抵消
+    let base = match chrono::NaiveDate::from_ymd_opt(1899, 12, 30) {
+        Some(d) => d,
+        None => return String::new(),
+    };
+    base + chrono::Days::new(serial.floor() as u64)
+        .0_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+trait ExcelDay {
+    fn _naive(&self) -> chrono::NaiveDate;
+}
+impl ExcelDay for chrono::NaiveDate {
+    fn _naive(&self) -> chrono::NaiveDate {
+        *self
+    }
+}
+
+/// 任何日期写法统一成 `YYYY-MM-DD`；认不出来返回空串。
+pub fn parse_date_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        return String::new();
+    }
+    if let Ok(v) = trimmed.parse::<f64>() {
+        return excel_date(v);
+    }
+    let normalized = normalize_date(trimmed);
+    if chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").is_ok() {
+        return normalized;
+    }
+    // `2025年1月5日`、`2025.1.5` 已被 normalize_date 覆盖大部分；再兜一层中文
+    let replaced = trimmed
+        .replace('年', "-")
+        .replace('月', "-")
+        .replace('日', "")
+        .replace('.', "-")
+        .replace('/', "-");
+    let normalized = normalize_date(&replaced);
+    if chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").is_ok() {
+        return normalized;
+    }
+    String::new()
+}
+
+/// 元 → 分，四舍五入。
+pub fn to_cents(value: f64) -> i64 {
+    (value * 100.0).round() as i64
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetReport {
+    pub name: String,
+    pub rows: usize,
+    pub non_empty_rows: usize,
+    pub detail: bool,
+    pub note: String,
+    pub headers: Vec<HeaderGuess>,
+    /// 前 5 行原始值（已截断），给向导里看一眼
+    pub sample: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderGuess {
+    pub column: usize,
+    pub header: String,
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookReport {
+    pub path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub sheets: Vec<SheetReport>,
+}
+
+/// 读工作簿里所有 sheet，按首行表头猜字段，标出哪些是明细表。
+pub fn inspect(path: &Path) -> Result<WorkbookReport, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件: {e}"))?;
+    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+    let names = book.sheet_names().to_vec();
+    let mut sheets = Vec::new();
+    for name in names {
+        let range = match book.worksheet_range(&name) {
+            Ok(r) => r,
+            Err(err) => {
+                sheets.push(SheetReport {
+                    name: name.clone(),
+                    rows: 0,
+                    non_empty_rows: 0,
+                    detail: false,
+                    note: format!("读取失败: {err}"),
+                    headers: Vec::new(),
+                    sample: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let total = range.height();
+        let mut non_empty = 0;
+        let mut sample: Vec<Vec<String>> = Vec::new();
+        for (index, row) in range.rows().enumerate() {
+            let texts: Vec<String> = row.iter().map(cell_text).collect();
+            if texts.iter().any(|t| !t.is_empty()) {
+                non_empty += 1;
+            }
+            if index < 5 {
+                sample.push(texts;
+            }
+        }
+        let headers: Vec<HeaderGuess> = range
+            .rows()
+            .next()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(column, cell)| {
+                        let header = cell_text(cell);
+                        HeaderGuess {
+                            column,
+                            field: guess_field(&header),
+                            header,
+                        }
+                    })
+                    .filter(|h| !h.header.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pairs: Vec<(String, String)> = headers
+            .iter()
+            .filter_map(|h| h.field.clone().map(|f| (h.header.clone(), f)))
+            .collect();
+        let detail = looks_like_detail(&pairs);
+        let note = if detail {
+            format!(
+                "明细表：{} 行数据",
+                non_empty.saturating_sub(1)
+            )
+        } else if non_empty == 0 {
+            "空表".to_string()
+        } else {
+            "不像明细表（缺少日期/数量/物料列），不会导入".to_string()
+        };
+        sheets.push(SheetReport {
+            name,
+            rows: total,
+            non_empty_rows: non_empty,
+            detail,
+            note,
+            headers,
+            sample,
+        });
+    }
+    Ok(WorkbookReport {
+        path: path.display().to_string(),
+        file_name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        size_bytes: meta.len(),
+        sheets,
+    })
+}
+
+/// 一条问题：哪张表、哪一行、什么毛病。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Issue {
+    pub sheet: String,
+    pub row_no: u64,
+    pub message: String,
+}
+
+/// 标准化后的一行。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftRow {
+    pub sheet: String,
+    pub row_no: u64,
+    pub kind: String,
+    pub doc_date: String,
+    pub doc_no: String,
+    pub delivery_no: String,
+    pub item_code: String,
+    pub item_name: String,
+    pub unit: String,
+    pub qty: Option<f64>,
+    pub price_cents: Option<i64>,
+    pub amount_cents: Option<i64>,
+    pub remark: String,
+    pub partner: String,
+    pub buyer: String,
+    pub owner: String,
+    pub receiver: String,
+    pub flags: Vec<String>,
+}
+
+pub struct ParsedSheet {
+    pub name: String,
+    pub rows: Vec<DraftRow>,
+    pub issues: Vec<Issue>,
+    pub skipped: usize,
+}
+
+impl ParsedSheet {
+    pub fn is_in(&self) -> bool {
+        infer_kind(&self.name, &self.rows) == "in"
+    }
+}
+
+/// 有的表既有"出库"也有"入库"字样：先看名字，再看行里有没有入库专有列值。
+pub fn infer_kind(sheet_name: &str, rows: &[DraftRow]) -> &'static str {
+    let name = sheet_name.replace(' ', "");
+    if name.contains("入库") {
+        return "in";
+    }
+    if name.contains("出库") || name.contains("领用") {
+        return "out";
+    }
+    if rows.iter().any(|r| !r.partner.is_empty() || !r.delivery_no.is_empty()) {
+        "in"
+    } else {
+        "out"
+    }
+}
+
+/// `mapping`：列序号 → 字段名（空/未使用表示不导入）。
+pub fn parse_sheet(
+    book: &mut impl Reader<Error = calamine::Error>,
+    sheet: &str,
+    mapping: &sheet_column_map,
+) -> Result<ParsedSheet, String> {
+    let range = book
+        .worksheet_range(sheet)
+        .map_err(|e| format!("读取工作表 `{sheet}` 失败: {e}"))?;
+    let mut rows_out = Vec::new();
+    let mut issues = Vec::new();
+    let mut skipped = 0usize;
+    let field_col: Vec<(&str, usize)> = mapping
+        .iter()
+        .filter(|(_, f)| !f.is_empty() && f != "unused")
+        .map(|(column, field)| (field.as_str(), *column))
+        .collect();
+
+    for (index, row) in range.rows().enumerate() {
+        let row_no = (index + 1) as u64;
+        if index == 0 {
+            continue; // 表头
+        }
+        let get = |field: &str| -> Option<&Data> {
+            field_col
+                .iter()
+                .find(|(f, _)| *f == field)
+                .and_then(|(_, column)| row.get(*column))
+        };
+        let text = |field: &str| -> String { get(field).map(cell_text).unwrap_or_default() };
+
+        let date_raw = text("doc_date");
+        let code = text("item_code");
+        let name = text("item_name");
+        let qty_raw = get("qty").and_then(cell_float);
+        let has_qty_cell = get("qty").map(cell_text).unwrap_or_default();
+
+        // 整行空：导入时跳过，不算问题
+        if date_raw.is_empty()
+            && code.is_empty()
+            && name.is_empty()
+            && has_qty_cell.is_empty()
+            && text("amount").is_empty()
+            && text("doc_no").is_empty()
+        {
+            skipped += 1;
+            continue;
+        }
+
+        let mut flags: Vec<String> = Vec::new();
+        let date = parse_date_text(&date_raw);
+        if date.is_empty() {
+            flags.push("no_date".into());
+            issues.push(Issue {
+                sheet: sheet.to_string(),
+                row_no,
+                message: format!("日期认不出来：`{date_raw}`"),
+            });
+        }
+        if code.is_empty() && name.is_empty() {
+            skipped += 1;
+            issues.push(Issue {
+                sheet: sheet.to_string(),
+                row_no,
+                message: "没有物料编码也没有物料名称，整行跳过".to_string(),
+            });
+            continue;
+        }
+        if code.is_empty() {
+            flags.push("no_code".into());
+        }
+        let price = get("price").and_then(cell_float).map(to_cents);
+        let amount = get("amount").and_then(cell_float).map(to_cents);
+        if price.is_none() {
+            flags.push("no_price".into());
+        }
+        if amount.is_none() || amount == Some(0) {
+            flags.push("no_amount".into());
+        }
+        if qty_raw.is_none() {
+            flags.push("no_qty".into());
+            issues.push(Issue {
+                sheet: sheet.to_string(),
+                row_no,
+                message: if has_qty_cell.is_empty() {
+                    "数量为空".to_string()
+                } else {
+                    format!("数量不是数字：`{has_qty_cell}`")
+                },
+            });
+        }
+        // 数量 × 单价与合计对不上（容差 1 分）——只提醒，不改数
+        if let (Some(q), Some(p), Some(a)) = (qty_raw, price, amount) {
+            let expect = (q * p as f64).round() as i64;
+            if a != 0 && (expect - a).abs() > 1 {
+                flags.push("qty_mismatch".into());
+            }
+        }
+
+        rows_out.push(DraftRow {
+            sheet: sheet.to_string(),
+            row_no,
+            kind: String::new(), // 由 infer_kind 在导入时统一填
+            doc_date: date,
+            doc_no: text("doc_no"),
+            delivery_no: text("delivery_no"),
+            item_code: code,
+            item_name: name,
+            unit: text("unit"),
+            qty: qty_raw,
+            price_cents: price,
+            amount_cents: amount,
+            remark: text("remark"),
+            partner: text("partner"),
+            buyer: text("buyer"),
+            owner: text("owner"),
+            receiver: text("receiver"),
+            flags,
+        });
+    }
+
+    Ok(ParsedSheet {
+        name: sheet.to_string(),
+        rows: rows_out,
+        issues,
+        skipped,
+    })
+}
+
+/// 列序号 → 字段。BTreeMap 保证遍历顺序稳定。
+pub type sheet_column_map = BTreeMap<usize, String>;
+
+/// 从报告的猜测结果生成默认映射。
+pub fn mapping_from_report(sheet: &SheetReport) -> sheet_column_map {
+    let mut map = BTreeMap::new();
+    for header in &sheet.headers {
+        if let Some(field) = &header.field {
+            map.insert(header.column, field.clone());
+        }
+    }
+    map
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetPlan {
+    pub name: String,
+    /// 列序号 → 字段名
+    pub mapping: BTreeMap<usize, String>,
+    /// `replace` = 先清空这张表旧数据再导；`append` = 追加
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    pub sheets: Vec<SheetPreview>,
+    pub total_rows: usize,
+    pub total_issues: usize,
+    pub flagged_rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetPreview {
+    pub name: String,
+    pub kind: String,
+    pub rows: usize,
+    pub skipped: usize,
+    pub flagged: usize,
+    pub issues: Vec<Issue>,
+    pub sample: Vec<DraftRow>,
+}
+
+fn plan_for(report: &WorkbookReport, requested: Option<&[SheetPlan]>) -> Result<Vec<SheetPlan>, String> {
+    if let Some(plans) = requested {
+        if !plans.is_empty() {
+            return Ok(plans.to_vec());
+        }
+    }
+    let plans: Vec<SheetPlan> = report
+        .sheets
+        .iter()
+        .filter(|s| s.detail)
+        .map(|s| SheetPlan {
+            name: s.name.clone(),
+            mapping: mapping_from_report(s),
+            mode: None,
+        })
+        .collect();
+    if plans.is_empty() {
+        return Err("这个工作簿里没有找到能识别的明细表（需要同时有日期、数量、物料列）".to_string());
+    }
+    Ok(plans)
+}
+
+pub fn preview(path: &Path, plans: Option<&[SheetPlan]>, sample_limit: usize) -> Result<PreviewResult, String> {
+    let report = inspect(path)?;
+    let plans = plan_for(&report, plans)?;
+    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+    let mut total_rows = 0;
+    let mut total_issues = 0;
+    let mut flagged_rows = 0;
+    let mut sheets = Vec::new();
+    for plan in &plans {
+        let parsed = parse_sheet(&mut book, &plan.name, &plan.mapping)?;
+        let kind = if parsed.is_in() { "in" } else { "out" };
+        let flagged = parsed.rows.iter().filter(|r| !r.flags.is_empty()).count();
+        total_rows += parsed.rows.len();
+        total_issues += parsed.issues.len();
+        flagged_rows += flagged;
+        let sample = parsed.rows.iter().take(sample_limit).cloned().collect();
+        let mut issues = parsed.issues;
+        issues.truncate(60);
+        sheets.push(SheetPreview {
+            name: plan.name.clone(),
+            kind: kind.to_string(),
+            rows: parsed.rows.len(),
+            skipped: parsed.skipped,
+            flagged,
+            issues,
+            sample,
+        });
+    }
+    Ok(PreviewResult {
+        sheets,
+        total_rows,
+        total_issues,
+        flagged_rows,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    pub import_id: i64,
+    pub file_name: String,
+    pub rows: usize,
+    pub skipped: usize,
+    pub flagged: usize,
+    pub issues: Vec<Issue>,
+    pub sheets: Vec<SheetSummary>,
+    pub replaced: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetSummary {
+    pub name: String,
+    pub kind: String,
+    pub rows: usize,
+    pub skipped: usize,
+}
+
+fn file_hash(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读文件失败: {e}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// 导入落库。整批一个事务：要么全进，要么一条不进。
+pub fn run(path: &Path, plans: Option<&[SheetPlan]>, replace_all: bool) -> Result<ImportOutcome, String> {
+    run_into(path, plans, replace_all, None::<&mut dyn FnMut(usize, usize)>)
+}
+
+pub fn run_into(
+    path: &Path,
+    plans: Option<&[SheetPlan]>,
+    replace_all: bool,
+    mut progress: Option<&mut dyn FnMut(usize, usize)>,
+) -> Result<ImportOutcome, String> {
+    let report = inspect(path)?;
+    let plans = plan_for(&report, plans)?;
+    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+
+    let mut parsed_sheets = Vec::new();
+    for plan in &plans {
+        parsed_sheets.push(parse_sheet(&mut book, &plan.name, &plan.mapping)?);
+    }
+    let total: usize = parsed_sheets.iter().map(|p| p.rows.len()).sum();
+
+    // 整批放在内存里再一次性写：1~2 万行完全吃得下，换来事务内没有重解析
+    let mut all_rows: Vec<DraftRow> = Vec::with_capacity(total);
+    let mut all_issues: Vec<Issue> = Vec::new();
+    let mut summaries = Vec::new();
+    for parsed in &parsed_sheets {
+        let kind = if parsed.is_in() { "in" } else { "out" };
+        for row in &parsed.rows {
+            let mut row = row.clone();
+            row.kind = kind.to_string();
+            all_rows.push(row);
+        }
+        all_issues.extend(parsed.issues.iter().take(200).cloned());
+        summaries.push(SheetSummary {
+            name: parsed.name.clone(),
+            kind: kind.to_string(),
+            rows: parsed.rows.len(),
+            skipped: parsed.skipped,
+        });
+    }
+
+    let skipped: usize = parsed_sheets.iter().map(|p| p.skipped).sum();
+    let flagged = all_rows.iter().filter(|r| !r.flags.is_empty()).count();
+    let hash = file_hash(path)?;
+    let file_name = report.file_name.clone();
+    let sheets_json = serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".into());
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let rows_total = all_rows.len();
+
+    Ok(())
+}
+
+/// 实际写库部分单独拆出来，方便测试时给内存库喂数据。
+pub fn write_rows(db: &Db, header: &HeaderRow, rows: &[DraftRow]) -> Result<i64, String> {
+    db.with(|conn| {
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let import_id: i64 = {
+            tx.execute(
+                "INSERT INTO imports (file_name, file_hash, sheets, imported_at, row_count, skipped_count, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    header.file_name,
+                    header.file_hash,
+                    header.sheets_json,
+                    header.imported_at,
+                    header.row_count,
+                    header.skipped_count,
+                    header.note
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.last_insert_rowid()
+        };
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO ledger (import_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
+                        item_code, item_name, unit, qty, price_cents, amount_cents, remark,
+                        partner, buyer, owner, receiver, flags)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                )
+                .map_err(DbError::from)?;
+            for row in rows {
+                stmt.execute(rusqlite::params![
+                    import_id,
+                    row.sheet,
+                    row.row_no,
+                    row.kind,
+                    null_if_empty(&row.doc_date),
+                    null_if_empty(&row.doc_no),
+                    null_if_empty(&row.delivery_no),
+                    null_if_empty(&row.item_code),
+                    null_if_empty(&row.item_name),
+                    null_if_empty(&row.unit),
+                    row.qty,
+                    row.price_cents,
+                    row.amount_cents,
+                    null_if_empty(&row.remark),
+                    null_if_empty(&row.partner),
+                    null_if_empty(&row.buyer),
+                    null_if_empty(&row.owner),
+                    null_if_empty(&row.receiver),
+                    row.flags.join(","),
+                ])
+                .map_err(DbError::from)?;
+            }
+        }
+        tx.commit().map_err(DbError::from)?;
+        Ok(import_id)
+    })
+}
+
+pub struct HeaderRow {
+    pub file_name: String,
+    pub file_hash: String,
+    pub sheets_json: String,
+    pub imported_at: String,
+    pub row_count: i64,
+    pub skipped_count: i64,
+    pub note: Option<String>,
+}
+
+fn null_if_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_aliases_match_known_sheets() {
+        assert_eq!(guess_field("入库时间").as_deref(), Some("doc_date"));
+        assert_eq!(guess_field(" 日期 ").as_deref(), Some("doc_date"));
+        assert_eq!(guess_field("出库单号").as_deref(), Some("doc_no"));
+        assert_eq!(guess_field("单据编号").as_deref(), Some("doc_no"));
+        assert_eq!(guess_field("合计").as_deref(), Some("amount"));
+        assert_eq!(guess_field("供应商名称").as_deref(), Some("partner"));
+        assert_eq!(guess_field("归属").as_deref(), Some("owner"));
+        assert_eq!(guess_field("数量（个）").as_deref(), Some("qty"));
+        assert_eq!(guess_field("辅助列"), None);
+        assert_eq!(guess_field("库存数量"), None);
+    }
+
+    #[test]
+    fn detail_detection_needs_date_qty_and_item() {
+        let ok = vec![
+            ("入库时间".into(), "doc_date".into()),
+            ("数量".into(), "qty".into()),
+            ("物料名称".into(), "item_name".into()),
+        ];
+        assert!(looks_like_detail(&ok));
+        let missing_qty = vec![
+            ("日期".into(), "doc_date".into()),
+            ("物料名称".into(), "item_name".into()),
+        ];
+        assert!(!looks_like_detail(&missing_qty));
+    }
+
+    #[test]
+    fn date_forms_converge() {
+        assert_eq!(parse_date_text("2025/10/30"), "2025-10-30");
+        assert_eq!(parse_date_text("2025-6-30"), "2025-06-30");
+        assert_eq!(parse_date_text("2025年1月5日"), "2025-01-05");
+        assert_eq!(parse_date_text("45759"), "2025-04-12");
+        assert_eq!(parse_date_text("-"), "");
+        assert_eq!(parse_date_text("上周"), "");
+    }
+
+    #[test]
+    fn numbers_with_decorations() {
+        assert_eq!(parse_number("1,234.50"), Some(1234.5));
+        assert_eq!(parse_number("￥12"), Some(12.0));
+        assert_eq!(parse_number("12元"), Some(12.0));
+        assert_eq!(parse_number("abc"), None);
+        assert_eq!(to_cents(0.1 + 0.2), 30);
+    }
+
+    #[test]
+    fn kind_inference_prefers_sheet_name() {
+        assert_eq!(infer_kind("入库明细", &[]), "in");
+        assert_eq!(infer_kind("出库明细", &[]), "out");
+        assert_eq!(infer_kind("Sheet4", &[]), "out");
+    }
+
+    #[test]
+    fn write_rows_stores_flags_and_nulls() {
+        let db = Db::open_in_memory().unwrap();
+        let rows = vec![DraftRow {
+            sheet: "入库明细".into(),
+            row_no: 2,
+            kind: "in".into(),
+            doc_date: "2025-10-30".into(),
+            doc_no: "20251030200".into(),
+            item_code: "WG-WJ-0292".into(),
+            item_name: "M10*80膨胀螺丝".into(),
+            unit: "斤".into(),
+            qty: Some(2.5),
+            price_cents: Some(600),
+            amount_cents: Some(1500),
+            flags: vec!["no_code".into()],
+            ..Default::default()
+        }];
+        let header = HeaderRow {
+            file_name: "t.xlsm".into(),
+            file_hash: "h".into(),
+            sheets_json: "[]".into(),
+            imported_at: "2025-10-30 10:00:00".into(),
+            row_count: 1,
+            skipped_count: 0,
+            note: None,
+        };
+        let id = write_rows(&db, &header, &rows).unwrap();
+        assert!(id > 0);
+        db.with(|c| {
+            let (flags, partner): (String, Option<String>) = c
+                .query_row("SELECT flags, partner FROM ledger LIMIT 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(DbError::from)?;
+            assert_eq!(flags, "no_code");
+            assert!(partner.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+}

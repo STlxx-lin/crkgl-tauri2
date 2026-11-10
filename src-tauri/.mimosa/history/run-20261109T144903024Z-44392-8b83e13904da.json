@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261109T144903024Z-44392-8b83e13904da",
+  "runStatus": "inconclusive",
+  "errors": [
+    "candidate-select:tests/import_real.rs: changed_file_unreadable: observed changed file no longer exists or cannot be read",
+    "candidate-select:src/_probe.rs: changed_file_unreadable: observed changed file no longer exists or cannot be read",
+    "candidate-select:src/paths.rs: candidate_limit_exceeded: 16 changed reviewable file(s) were not scanned because the limit is 20",
+    "baseline:.: baseline_partial: baseline capture had enumeration or snapshot errors",
+    "scan:src/lib.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/import.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/swap_bind.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/summary.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/report_sites.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_db_block.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_reader.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/db.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_empty_strings.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_types.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_more.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_map_err.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/normalize_err.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_seed.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_from_string.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_tests.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_tests2.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_tests3.py: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/ledger.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "supply-chain-check:.: stop_budget_exhausted: focused supply-chain check was not run before the gate budget"
+  ],
+  "target": ".",
+  "revision": null,
+  "diffHash": "f47fd0dbe6b199a02f4a043f0610a702ee95feebd3e3593258e5faf1f8a949e8",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-09T14:49:03.024Z",
+  "timing": {
+    "startedAt": "2026-11-09T14:48:58.823Z",
+    "completedAt": "2026-11-09T14:49:03.024Z",
+    "durationMs": 4201
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "changed_file_unreadable": 2,
+      "candidate_limit_exceeded": 1,
+      "baseline_partial": 1,
+      "scanner_failed": 19,
+      "stop_budget_exhausted": 1,
+      "project_check_failed": 24
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31-20261109T144903024Z-44392-8b83e13904da.json"
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261109T123111423Z-23308-e6144b9d16bb",
+  "runStatus": "inconclusive",
+  "errors": [
+    "baseline-read:src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:dist-remote/assets/dist-js-B78fRGDZ.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:dist-remote/assets/index-BJAvZhpe.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "baseline-read:dist-remote/assets/window-C0FBu__w.js: baseline_snapshot_unreadable: file is missing from task baseline",
+    "scan:src/components/ThemeToggle.tsx: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/dist-js-8qMh-jRc.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/dist-js-B78fRGDZ.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/index-BJAvZhpe.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/index-yiOCmwM4.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/window-C0FBu__w.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src-tauri/target/release/dist-remote/assets/window-Dk1OqVh0.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/components/AppShell.tsx: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:dist-remote/assets/dist-js-B78fRGDZ.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:dist-remote/assets/index-BJAvZhpe.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:dist-remote/assets/window-C0FBu__w.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": null,
+  "diffHash": "89da8b2dc80252b0f3d8b95ead877da6d687415d7af98153532ac684c3f6286f",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-09T12:31:11.423Z",
+  "timing": {
+    "startedAt": "2026-11-09T12:31:08.550Z",
+    "completedAt": "2026-11-09T12:31:11.423Z",
+    "durationMs": 2873
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "baseline_snapshot_unreadable": 9,
+      "scanner_failed": 11,
+      "project_check_failed": 20
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_e9f3a307-3420-4a6c-86fa-046081877f31-20261109T123111423Z-23308-e6144b9d16bb.json"
+}

@@ -1,0 +1,81 @@
+@import "../../styles/globals.css";
+
+/*
+ * 项目级覆盖。BoardUI 的 token 在 styles/theme.css 里，这里只补三种东西：
+ *   1. 表格行高与数字对齐（台账页是密集表格）
+ *   2. 滚动条收窄
+ *   3. 表格外框圆角与滚动淡出
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-feature-settings: "tnum" 1;
+  background: var(--color-background-full);
+  color: var(--color-text-primary);
+}
+
+/* 台账表格：固定列宽、数字右对齐、等宽数字。只作用于台账页，别影响别的表。 */
+.ledger-table table {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.ledger-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  white-space: nowrap;
+}
+.ledger-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ledger-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滚动条：细一点，和深色底同色系 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-background-quaternary-default) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-background-quaternary-default);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 顶部滚动淡出遮罩：粘性表头下滚动时内容淡入，避免硬切 */
+.scroll-fade-wrap {
+  position: relative;
+}
+.scroll-fade-wrap .scroll-fade {
+  pointer-events: none;
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 24px;
+  z-index: 3;
+  background: linear-gradient(to bottom, var(--color-background-primary-default), transparent);
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out, ease-out);
+}
+.scroll-fade-wrap[data-scrolled="true"] .scroll-fade {
+  opacity: 1;
+}

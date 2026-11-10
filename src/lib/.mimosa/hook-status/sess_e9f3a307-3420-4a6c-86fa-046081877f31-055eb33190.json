@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-11-09T06:36:27.318Z",
+  "sessionId": "sess_e9f3a307-3420-4a6c-86fa-046081877f31",
+  "event": "PostToolUse",
+  "toolName": "Write",
+  "file": "C:/Users/14147/.zcode/v2/visualizations/2e30fde58e2813e18983ffc9ce7735c4d0fd9012937616b27fa8e72e6ce60193/fix_ts.py",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 17,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

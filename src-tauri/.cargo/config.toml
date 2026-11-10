@@ -1,0 +1,5 @@
+# 本机 PATH 里的 "Rust stable MSVC 1.88" 是完整工具链目录（非 rustup 代理），
+# 会绕过 rust-toolchain.toml 固定到 1.90.0 的选择。显式指向 1.90.0 的工具链。
+[build]
+rustc = "C:\\Users\\14147\\.rustup\\toolchains\\1.90.0-x86_64-pc-windows-msvc\\bin\\rustc.exe"
+rustdoc = "C:\\Users\\14147\\.rustup\\toolchains\\1.90.0-x86_64-pc-windows-msvc\\bin\\rustdoc.exe"
