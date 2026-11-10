@@ -380,8 +380,10 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
 
     setBusy(true);
     try {
+      let savedId = mode.id;
       if (mode.id === null) {
         const id = await createVoucher(payload);
+        savedId = id;
         toast("单据已保存", { description: `${head.docNo} · ${count(payloadLines.length)} 行`, status: "success" });
         setMode({ kind: mode.kind, id });
       } else {
@@ -393,6 +395,19 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
       if (mode.kind === "in" && head.buyer.trim()) saveBuyer(head.buyer);
       await loadHistory();
       onChanged();
+
+      // 保存成功立刻出稿：拿去签字归档是紧接着的下一步。
+      // 新单刚建好，回读一次拿到带 id 的明细，打印内容和库里一致。
+      if (savedId !== null) {
+        try {
+          const fresh = await getVoucher(savedId);
+          if (fresh) setPrintingView(fresh);
+          else setPrinting(true);
+        } catch {
+          // 回读失败就退回用当前草稿出稿，别让打印把保存流程卡住
+          setPrinting(true);
+        }
+      }
     } catch (err) {
       toast("保存失败", { description: String(err), status: "error", duration: 7000 });
     } finally {
