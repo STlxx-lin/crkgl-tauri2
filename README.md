@@ -20,10 +20,12 @@ Tauri 2 + Rust + React 19 + Vite 7 + Tailwind v4 + BoardUI 的仓库台账程序
 crkgl-tauri2/
 ├─ src/                     前端
 │  ├─ App.tsx               启动状态机（boot → ready），读 bootstrap
-│  ├─ screens/              台账 / 汇总 / 导入 / 只读站
-│  ├─ components/           AppShell、RowDetail、EmptyState
+│  ├─ screens/              台账 / 汇总 / 导入 / 基础资料 / 开单 / 只读站
+│  ├─ components/           AppShell、RowDetail、EmptyState、FontScaleToggle
 │  ├─ lib/api.ts            Tauri 命令 + 只读站 HTTP 的统一客户端
 │  ├─ lib/format.ts         金额（分→元）、数量、日期、环比
+│  ├─ lib/fontScale.ts      界面字号缩放（四档，改根字号）
+│  ├─ lib/printPrefs.ts     打印偏好（A4 每页行数上限）
 │  └─ styles/app.css        项目级样式（表格、滚动条）
 ├─ components/ styles/ utils/   BoardUI 源码组件（`npx boardui add <name>` 可加）
 ├─ src-tauri/
@@ -31,10 +33,12 @@ crkgl-tauri2/
 │  ├─ src/ledger.rs         台账查询/筛选/编辑/删除/CSV
 │  ├─ src/summary.rs        GROUP BY 汇总
 │  ├─ src/import.rs         xlsm 解析：inspect → preview → run
+│  ├─ src/voucher.rs        单据（开单）与明细，voucher_create / voucher_get 等
+│  ├─ src/dict.rs           字典（单位/类别/类型/出库部门/采购人）增删改与同步
 │  ├─ src/web.rs            80 端口只读站（axum）
 │  ├─ src/commands.rs       Tauri 命令（唯一能写数据的入口）
 │  └─ migrations/001_init.sql
-└─ scripts/                 rust90.cmd（MSVC + Rust 1.90 包装）、ui-probe.mjs（截图冒烟）
+└─ scripts/                 rust90.cmd（MSVC + Rust 1.90 包装）、ui-*.mjs（Playwright 验收截图冒烟）、verify-*.mjs（DB 复核）
 ```
 
 ## 运行
@@ -61,7 +65,7 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 - `dist-remote/` 作为资源打进安装目录，80 端口站从那里读
 - 安装后的数据库在 `%APPDATA%\coldcoffee.warehouse.ledger\ledger.db`
 
-## 主题
+## 主题与字号
 
 侧栏底部有「浅色 / 深色」切换，两套都用 BoardUI 的语义 token，切的是 `<html>` 上的 `.dark`：
 
@@ -70,6 +74,13 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 - 桌面端会同步 Tauri 窗口主题，标题栏跟着变
 - 只读站是同一套前端，局域网同事也能各自切自己的
 - 默认深色；从未选过时不读系统主题
+
+侧栏底部的**字号**控件把界面整体缩放，四档：小 / 标准 / 大 / 特大（根字号 14 / 16 / 18 / 20px）：
+
+- 只改 `<html>` 根字号，BoardUI 的字号 token 全是 rem，会整体等比缩放
+- 存在 `localStorage` 的 `ledger.fontScale`，只影响本机显示，不写库、不影响只读站
+- 表格里原本写死 px 的字号已换成 rem，跟着一起走
+- 仓库现场屏幕远一点就用大号、特大号
 
 ## 导入规则
 
@@ -151,12 +162,22 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 - 本机开的单标可编辑，点开载入编辑器继续改
 - Excel 导入的单标「导入」，点开是只读明细，带源表行号与数据提醒
 
-## 基础资料（物料与供应商）
+## 打印
 
-「基础资料」页维护两张字典表，开单时直接引用：
+开单页保存成功后自动弹出 **A4 打印视图**（`.print-overlay` 里的 `.print-paper`），保存失败不打印：
+
+- 按单据实际行数出稿：有几行打几行，不补空行；超过上限才分页
+- 「设置」页可调每页行数上限（默认 18 行，1–40），存 `localStorage` 的 `ledger.print.rows`，只影响本机排版
+- 常用 5~10 行的单据永远一页一张，不会有大片空白
+- 打印视图与打印偏好都只在本机，不进数据库、不同步到只读站
+
+## 基础资料（物料、供应商与字典）
+
+「基础资料」页维护三块内容，开单时直接引用：
 
 - **物料**：编码、名称、类别、单位、参考单价、默认供应商、在用/停用
 - **供应商**：名称、联系人、电话、备注，并显示它在台账里出现过多少行
+- **字典**：单位 / 类别 / 类型 / 出库部门 / 采购人 五类文字字段的统一候选
 
 数据来源两条，都是幂等的：
 
@@ -169,6 +190,31 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 
 - 填物料编码 → 带出名称、单位、参考单价（出库不带单价）
 - 供应商是带下拉的输入框，可以选也可以直接打字
+
+### 字典（单位 / 类别 / 类型 / 出库部门 / 采购人）
+
+这五类原来都是自由文本：同一个部门在台账里写成「470FQ/1台」和「470FQ/一台」，
+统计时就被拆成两组；单位下拉每次现查历史值，慢且不完整。现在统一收在 `dict` 表
+（迁移 `009_dict.sql`），首次升级时从 `items` 与 `ledger` 里灌好初值：
+
+| 类别 | kind | 来源列 | 初值规模 |
+| --- | --- | --- | --- |
+| 单位 | `unit` | `items.unit` | 37 条（个 1788 / 只 777 / 件 434 …；`0` 是粘贴残留，不收） |
+| 类别 | `category` | `items.category` | 9 条（原材料、五金类、电器类 …） |
+| 类型 | `item_type` | `items.item_type` | 2 条（外购件 / 加工件） |
+| 出库部门 | `owner` | `ledger.owner`（台账里叫「归属」） | 17 条（乾力车间 476 / MQ 193 …） |
+| 采购人 | `buyer` | `ledger.buyer` | 3 条（严兰兰 / 周梓棋 / 测试） |
+
+行为约定：
+
+- **改名同步数据**：在字典里把「470FQ/一台」改成「470FQ/1台」，会同时改写台账与物料里用到旧值的行，返回受影响行数，界面提示「同步改了 N 行数据」。
+- **还在用就不能删**：删除前先数引用行数，有引用直接拒绝并提示先停用或改名；没有引用的才允许删。
+- **停用只影响下拉**：停用项不再出现在开单候选里，历史数据原样保留。
+- **录入即登记**：开单时手输的新单位/部门/采购人会在保存时写进字典（`hits` 累加），导入 Excel 的明细同样登记。
+- **从数据补齐**：手工改过专有名词之后点一次，把现有数据里还没进字典的值收进来。
+
+开单页取字典的位置：明细的「单位」列是带搜索的下拉（可现输），表头的「出库部门」和
+「采购人」也是。物料表单的「单位」「类型」候选同样来自字典。
 
 ## 开单与批量操作
 
@@ -210,6 +256,13 @@ npm run build:remote       # 只读站产物 dist-remote/
 scripts\rust90.cmd test --lib    # Rust 单测（30 个）
 node scripts/ui-probe.mjs shots  # 用只能读站截图冒烟（需 CHROME_PATH）
 ```
+
+`scripts/` 里的 Playwright 验收脚本（全部走 `CHROME_PATH` + `BASE`）只在验收时用，不参与生产构建：
+
+- `ui-*.mjs`：给 Tauri 前端 stub `__TAURI_INTERNALS__` 后驱动 UI 跑截图冒烟，一个脚本验一个点（开单、入库带单价、出库不带、打印、单据查询、字体缩放、图号页、只读边界……）
+- `verify-*.mjs`：验 DB 复核脚本（`verify-db-state.mjs` / `verify-voucher-db.mjs`），比照落库结果
+- 各脚本都是独立可跑的：`node scripts/ui-save-print.mjs` 验「保存成功才打印、失败不打印」
+- 截图落在 `shots/`（已 gitignore），用来人工对排版
 
 ## 已知取舍
 
