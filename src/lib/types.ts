@@ -126,6 +126,24 @@ export interface HeaderGuess {
   field: string | null;
 }
 
+/** 月度进销存宽表在向导里的摘要。 */
+export interface PivotSheetInfo {
+  /** 认出的月份；null 表示表名认不出，会跳过 */
+  month: number | null;
+  /** 逐日网格天数 */
+  days: number;
+  /** 真实物料行数（不含尾部填充行） */
+  items: number;
+  /** 尾部「编码=0」的填充行 */
+  fillerRows: number;
+  /** 日格里的非零笔数 */
+  flowCells: number;
+  /** 有期初结存的物料数 */
+  openingItems: number;
+  /** 源表「现结存」非零的物料数 */
+  closingItems: number;
+}
+
 export interface SheetReport {
   name: string;
   rows: number;
@@ -133,6 +151,9 @@ export interface SheetReport {
   detail: boolean;
   /** 主数据表（供应商名称 / 物料编号 / 基础信息），写进基础资料，不进台账 */
   master: boolean;
+  /** 月度「库存进销存报表」宽表：一行一物料 + 逐日入库/出库网格 */
+  pivot: boolean;
+  pivotInfo?: PivotSheetInfo | null;
   note: string;
   headers: HeaderGuess[];
   sample: string[][];
@@ -154,6 +175,8 @@ export interface DraftRow {
   deliveryNo: string;
   itemCode: string;
   itemName: string;
+  location: string;
+  spec: string;
   unit: string;
   qty: number | null;
   priceMicros: number | null;
@@ -172,14 +195,29 @@ export interface SheetPlan {
   mode?: "replace" | "append" | null;
 }
 
+export interface PivotPreviewSummary {
+  months: number[];
+  totalItems: number;
+  locatedItems: number;
+  openingRows: number;
+  dailyRows: number;
+  residualRows: number;
+  adjustRows: number;
+  correctionRows: number;
+  fillerRows: number;
+  corrections: string[];
+}
+
 export interface SheetPreview {
   name: string;
-  kind: Kind;
+  /** `in` / `out`，或 `pivot`（月度进销存宽表拆出来的流水） */
+  kind: Kind | "pivot";
   rows: number;
   skipped: number;
   flagged: number;
   issues: Issue[];
   sample: DraftRow[];
+  pivotSummary?: PivotPreviewSummary | null;
 }
 
 export interface PreviewResult {
@@ -191,7 +229,8 @@ export interface PreviewResult {
 
 export interface SheetSummary {
   name: string;
-  kind: Kind;
+  /** `in` / `out`，或 `pivot`（月度进销存宽表拆出来的流水） */
+  kind: Kind | "pivot";
   rows: number;
   skipped: number;
 }
@@ -211,7 +250,6 @@ export interface ImportOutcome {
   /** 基础资料导入失败的提示（台账已写成功） */
   masterError: string | null;
 }
-
 export interface ImportRecord {
   id: number;
   fileName: string;
@@ -366,6 +404,8 @@ export interface Item {
   itemType: string | null;
   /** 图号 */
   drawingNo: string | null;
+  /** 库位（D-01-02-4F） */
+  location: string | null;
   owner: string | null;
   supplier: string | null;
   remark: string | null;
@@ -383,6 +423,8 @@ export interface ItemInput {
   spec?: string | null;
   itemType?: string | null;
   drawingNo?: string | null;
+  /** 库位（D-01-02-4F） */
+  location?: string | null;
   owner?: string | null;
   supplier?: string | null;
   remark?: string | null;
@@ -410,6 +452,46 @@ export interface SupplierInput {
 export interface CategoryCount {
   category: string;
   count: number;
+}
+
+// ---------- 字典（单位 / 类别 / 类型 / 出库部门 / 采购人） ----------
+
+export type DictKind = "unit" | "category" | "item_type" | "owner" | "buyer";
+
+/** 与 Rust 侧 dict::KINDS 同序，界面上的显示顺序也照它。 */
+export const DICT_KINDS: { kind: DictKind; label: string; hint: string }[] = [
+  { kind: "unit", label: "单位", hint: "个 / 只 / 件 / 米…开单明细的单位列" },
+  { kind: "category", label: "类别", hint: "五金类 / 轴承类 / 电器类…物料分类" },
+  { kind: "item_type", label: "类型", hint: "外购件 / 加工件" },
+  { kind: "owner", label: "出库部门", hint: "台账里的「归属」，出库单表头" },
+  { kind: "buyer", label: "采购人", hint: "入库单签字与台账采购人" },
+];
+
+export interface DictEntry {
+  id: number;
+  kind: DictKind;
+  value: string;
+  sortNo: number;
+  hits: number;
+  remark: string | null;
+  active: boolean;
+  /** 台账/物料里实际用到的行数 */
+  used: number;
+}
+
+export interface DictInput {
+  kind: DictKind;
+  value: string;
+  sortNo?: number | null;
+  remark?: string | null;
+  active?: boolean;
+}
+
+export interface DictKindCount {
+  kind: DictKind;
+  label: string;
+  total: number;
+  active: number;
 }
 
 export interface MasterStats {
@@ -446,4 +528,51 @@ export interface DocHit {
   amountCents: number;
   source: "voucher" | "import";
   voucherId: number | null;
+}
+
+// ---------- 库存 ----------
+
+export interface StockRow {
+  itemCode: string;
+  itemName: string;
+  location: string | null;
+  spec: string | null;
+  unit: string | null;
+  inQty: number;
+  outQty: number;
+  stockQty: number;
+  inRows: number;
+  outRows: number;
+  lastPriceMicros: number | null;
+  lastDate: string | null;
+}
+
+export interface StockIssue {
+  /** negative_stock / missing_code / bad_qty */
+  kind: string;
+  ledgerId: number | null;
+  itemCode: string | null;
+  itemName: string | null;
+  unit: string | null;
+  qty: number | null;
+  docNo: string | null;
+  docDate: string | null;
+  kindLabel: string | null;
+  detail: string;
+}
+
+export interface StockCheckSummary {
+  negativeItems: number;
+  negativeGap: number;
+  missingCodeRows: number;
+  badQtyRows: number;
+}
+
+export interface ClearOutcome {
+  ledgerRows: number;
+  vouchers: number;
+  imports: number;
+  items: number;
+  suppliers: number;
+  dict: number;
 }

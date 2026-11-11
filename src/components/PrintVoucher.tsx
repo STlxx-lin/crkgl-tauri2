@@ -69,18 +69,24 @@ export function PrintVoucher({
             <div className="print-meta">
               <div className="print-meta-row">
                 <span className="print-meta-label">{isIn ? "供应商名称" : "归属"}：</span>
-                <span className="print-meta-value">{voucher.partner ?? ""}</span>
+                <span className="print-meta-value">
+                  {(isIn ? voucher.partner : (voucher.owner ?? voucher.partner)) ?? ""}
+                </span>
               </div>
               <div className="print-meta-row">
                 <span className="print-meta-label">单据编号：</span>
                 <span className="print-meta-value">{voucher.docNo}</span>
               </div>
-              <div className="print-meta-row">
-                <span className="print-meta-label">送货单号：</span>
-                <span className="print-meta-value">
-                  {uniqueDeliveryNos(voucher).join("、")}
-                </span>
-              </div>
+              {isIn ? (
+                <div className="print-meta-row">
+                  <span className="print-meta-label">送货单号：</span>
+                  <span className="print-meta-value">
+                    {uniqueDeliveryNos(voucher).join("、")}
+                  </span>
+                </div>
+              ) : (
+                <div aria-hidden />
+              )}
               <div className="print-meta-row">
                 <span className="print-meta-label">{isIn ? "入库时间" : "出库时间"}：</span>
                 <span className="print-meta-value">{date(voucher.docDate)}</span>
@@ -88,20 +94,35 @@ export function PrintVoucher({
             </div>
 
             <table className="print-table">
-              <colgroup>
-                <col style={{ width: "5%" }} />
-                <col style={{ width: "16%" }} />
-                <col style={{ width: "21%" }} />
-                <col style={{ width: "7%" }} />
-                <col style={{ width: "10%" }} />
-                <col style={{ width: "12%" }} />
-                <col style={{ width: "13%" }} />
-                <col style={{ width: "16%" }} />
-              </colgroup>
+              {isIn ? (
+                <colgroup>
+                  <col style={{ width: "5%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "20%" }} />
+                  <col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "11%" }} />
+                  <col style={{ width: "13%" }} />
+                </colgroup>
+              ) : (
+                <colgroup>
+                  <col style={{ width: "5%" }} />
+                  <col style={{ width: "16%" }} />
+                  <col style={{ width: "21%" }} />
+                  <col style={{ width: "7%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "16%" }} />
+                </colgroup>
+              )}
               <thead>
                 <tr>
                   <th>序号</th>
-                  <th>送货单号</th>
+                  {isIn ? <th>送货单号</th> : null}
+                  <th>物料编码</th>
                   <th>物料名称</th>
                   <th>单位</th>
                   <th>数量</th>
@@ -114,7 +135,8 @@ export function PrintVoucher({
                 {chunk.map((line, index) => (
                   <tr key={`${pageIndex}-${line.id}`}>
                     <td className="print-center">{pageIndex * perPage + index + 1}</td>
-                    <td>{line.deliveryNo ?? ""}</td>
+                    {isIn ? <td>{line.deliveryNo ?? ""}</td> : null}
+                    <td>{line.itemCode ?? ""}</td>
                     <td>{line.itemName ?? ""}</td>
                     <td className="print-center">{line.unit ?? ""}</td>
                     <td className="print-num">{line.qty === null ? "" : qty(line.qty)}</td>
@@ -127,12 +149,12 @@ export function PrintVoucher({
                 {chunk.length === 0 ? (
                   <tr aria-hidden>
                     <td className="print-center">1</td>
-                    <td colSpan={7}>&nbsp;</td>
+                    <td colSpan={isIn ? 8 : 7}>&nbsp;</td>
                   </tr>
                 ) : null}
                 {pageIndex === pages.length - 1 ? (
                   <tr className="print-total">
-                    <td colSpan={4} className="print-num">
+                    <td colSpan={isIn ? 5 : 4} className="print-num">
                       合计
                     </td>
                     <td className="print-num">{qty(totalQty)}</td>
@@ -146,13 +168,13 @@ export function PrintVoucher({
 
             <div className="print-sign">
               <div>
-                采购人：<span>&nbsp;</span>
+                采购人：<span>{voucher.buyer || "\u00a0"}</span>
               </div>
               <div>
                 仓管：<span>&nbsp;</span>
               </div>
               <div>
-                领用人：<span>&nbsp;</span>
+                领用人：<span>{voucher.receiver || "\u00a0"}</span>
               </div>
             </div>
 

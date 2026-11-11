@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-static MIGRATIONS: [(&str, &str); 7] = [
+static MIGRATIONS: [(&str, &str); 11] = [
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_voucher", include_str!("../migrations/002_voucher.sql")),
     ("003_master_data", include_str!("../migrations/003_master_data.sql")),
@@ -20,6 +20,10 @@ static MIGRATIONS: [(&str, &str); 7] = [
     ("005_item_type", include_str!("../migrations/005_item_type.sql")),
     ("006_cleanup", include_str!("../migrations/006_cleanup.sql")),
     ("007_cleanup_junk", include_str!("../migrations/007_cleanup_junk.sql")),
+    ("008_item_location", include_str!("../migrations/008_item_location.sql")),
+    ("009_dict", include_str!("../migrations/009_dict.sql")),
+    ("010_stock_perf", include_str!("../migrations/010_stock_perf.sql")),
+    ("011_import_perf", include_str!("../migrations/011_import_perf.sql")),
 ];
 
 pub struct Db {
@@ -100,6 +104,8 @@ fn tune(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "cache_size", -64000)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
@@ -204,9 +210,83 @@ pub fn recent_access(db: &Db, limit: i64) -> DbResult<Vec<AccessEntry>> {
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearOutcome {
+    pub ledger_rows: usize,
+    pub vouchers: usize,
+    pub imports: usize,
+    pub items: usize,
+    pub suppliers: usize,
+    pub dict: usize,
+}
+
+/// 清空业务数据。
+/// - 默认清空 `ledger`、`vouchers`、`imports`；
+/// - `include_master` 为真时一并清空 `items`、`suppliers`、`dict`；
+/// - 写入 `settings.manual_clear = "1"`，防止下次启动自动回灌示例工作簿。
+pub fn clear_data(db: &Db, include_master: bool) -> DbResult<ClearOutcome> {
+    db.with(|c| {
+        let tx = c.unchecked_transaction().map_err(DbError::from)?;
+        let ledger_rows = tx.execute("DELETE FROM ledger", []).map_err(DbError::from)?;
+        let vouchers = tx.execute("DELETE FROM vouchers", []).map_err(DbError::from)?;
+        let imports = tx.execute("DELETE FROM imports", []).map_err(DbError::from)?;
+        let (items, suppliers, dict) = if include_master {
+            let i = tx.execute("DELETE FROM items", []).map_err(DbError::from)?;
+            let s = tx.execute("DELETE FROM suppliers", []).map_err(DbError::from)?;
+            let d = tx.execute("DELETE FROM dict", []).map_err(DbError::from)?;
+            (i, s, d)
+        } else {
+            (0, 0, 0)
+        };
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('manual_clear', '1')
+             ON CONFLICT(key) DO UPDATE SET value = '1'",
+            [],
+        )
+        .map_err(DbError::from)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(ClearOutcome {
+            ledger_rows,
+            vouchers,
+            imports,
+            items,
+            suppliers,
+            dict,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_data_removes_ledger_and_optionally_master() {
+        let db = Db::open_in_memory().expect("open");
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, item_name, qty) VALUES ('入库明细', 2, 'in', '螺丝', 10)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            c.execute(
+                "INSERT INTO items (item_code, item_name) VALUES ('WG-001', '螺丝')",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let out1 = clear_data(&db, false).unwrap();
+        assert_eq!(out1.ledger_rows, 1);
+        assert_eq!(out1.items, 0);
+        assert_eq!(get_setting(&db, "manual_clear").as_deref(), Some("1"));
+
+        let out2 = clear_data(&db, true).unwrap();
+        assert_eq!(out2.items, 1);
+    }
 
     #[test]
     fn migration_is_idempotent_and_registers_version() {

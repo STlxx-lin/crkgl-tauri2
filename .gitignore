@@ -4,9 +4,12 @@ dist-remote/
 shots/
 _archive/
 src-tauri/target/
+src-tauri/target-test/
 src-tauri/gen/
 .mimosa/
 *.log
+*.xlsx
+*.xlsm
 .env
 .env.*
 !.env.example

@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::db::{self, Db};
+use crate::dict;
 use crate::import::{self, SheetPlan};
 use crate::ledger::{self, LedgerFilter, LedgerPatch};
+use crate::stock;
 use crate::paths;
 use crate::summary;
 use crate::master;
@@ -211,12 +213,16 @@ pub struct PreviewArgs {
     pub plans: Option<Vec<SheetPlan>>,
     #[serde(default)]
     pub sample_limit: Option<usize>,
+    /// 月度进销存宽表所属年份。源表只有「1月…12月」，没有年份。
+    #[serde(default)]
+    pub year: Option<i32>,
 }
 
 #[tauri::command]
 pub fn import_preview(args: PreviewArgs) -> Result<import::PreviewResult, String> {
     let file = require_file(&args.path)?;
-    import::preview(&file, args.plans, args.sample_limit.unwrap_or(8).clamp(1, 50))
+    let year = args.year.unwrap_or_else(import::current_year);
+    import::preview_with_year(&file, args.plans, args.sample_limit.unwrap_or(8).clamp(1, 50), year)
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +237,9 @@ pub struct RunArgs {
     /// 顺带把工作簿里的供应商 / 物料编号 / 基础信息写进基础资料
     #[serde(default = "default_true")]
     pub master: bool,
+    /// 月度进销存宽表所属年份
+    #[serde(default)]
+    pub year: Option<i32>,
 }
 
 fn default_true() -> bool {
@@ -240,9 +249,11 @@ fn default_true() -> bool {
 #[tauri::command]
 pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<import::ImportOutcome, String> {
     let file = require_file(&args.path)?;
-    let mut outcome = import::run(&state.db, &file, args.plans, args.replace)?;
-    // 主数据失败不影响台账已经写好的行：把原因带回前端，让用户单独重试
-    if args.master {
+    let year = args.year.unwrap_or_else(import::current_year);
+    let mut outcome = import::run_with_year(&state.db, &file, args.plans, args.replace, year)?;
+    // 宽表在 run_with_year 内部已顺带写好基础资料并填入 outcome.master；
+    // 仅当常规明细工作簿尚未写入基础资料且开启了 master 选项时，才单独扫主数据表。
+    if args.master && outcome.master.is_none() {
         match master::import_workbook_db(&state.db, &file) {
             Ok(ms) => {
                 log::info!("主数据导入: {}", ms.message);
@@ -388,8 +399,11 @@ fn remote_dev_dir() -> Option<PathBuf> {
     }
 }
 
-/// 首启自动导入：库是空的、且能找到示例工作簿时跑一次。
+/// 首启自动导入：库是空的、未手动清空过、且能找到示例工作簿时跑一次。
 pub fn auto_import(state: &AppState) -> Option<import::ImportOutcome> {
+    if db::get_setting(&state.db, "manual_clear").as_deref() == Some("1") {
+        return None;
+    }
     if ledger::count(&state.db).unwrap_or(1) > 0 {
         return None;
     }
@@ -469,6 +483,59 @@ pub fn item_master(
     )
 }
 
+// ---------- 库存 ----------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockArgs {
+    #[serde(default)]
+    pub keyword: Option<String>,
+    /// 只看负库存
+    #[serde(default)]
+    pub only_negative: bool,
+    #[serde(default = "default_stock_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_stock_limit() -> i64 {
+    500
+}
+
+#[tauri::command]
+pub fn stock_report(
+    state: State<'_, Arc<AppState>>,
+    args: StockArgs,
+) -> Result<Vec<stock::StockRow>, String> {
+    stock::stock_report_db(
+        &state.db,
+        args.keyword.as_deref(),
+        args.only_negative,
+        args.limit,
+        args.offset,
+    )
+}
+
+#[tauri::command]
+pub fn stock_count(
+    state: State<'_, Arc<AppState>>,
+    keyword: Option<String>,
+    only_negative: Option<bool>,
+) -> Result<i64, String> {
+    stock::stock_count_db(&state.db, keyword.as_deref(), only_negative.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn stock_check(state: State<'_, Arc<AppState>>, limit: Option<i64>) -> Result<Vec<stock::IssueRow>, String> {
+    stock::check_issues_db(&state.db, limit.unwrap_or(300))
+}
+
+#[tauri::command]
+pub fn stock_check_summary(state: State<'_, Arc<AppState>>) -> Result<stock::CheckSummary, String> {
+    stock::check_summary_db(&state.db)
+}
+
 // ---------- 批量 ----------
 
 #[derive(Debug, Deserialize)]
@@ -518,6 +585,7 @@ pub fn items_count(
     state: State<'_, Arc<AppState>>,
     keyword: Option<String>,
     category: Option<String>,
+    item_type: Option<String>,
     only_active: Option<bool>,
     with_drawing: Option<bool>,
 ) -> Result<i64, String> {
@@ -525,6 +593,7 @@ pub fn items_count(
         &state.db,
         keyword.as_deref(),
         category.as_deref(),
+        item_type.as_deref(),
         only_active.unwrap_or(false),
         with_drawing,
     )
@@ -548,6 +617,45 @@ pub fn item_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), Strin
 #[tauri::command]
 pub fn item_lookup(state: State<'_, Arc<AppState>>, code: String) -> Result<Option<master::Item>, String> {
     master::find_item_db(&state.db, &code)
+}
+
+// ---------- 字典（单位 / 类别 / 类型 / 出库部门 / 采购人） ----------
+
+#[tauri::command]
+pub fn dict_list(
+    state: State<'_, Arc<AppState>>,
+    kind: String,
+    keyword: Option<String>,
+    only_active: Option<bool>,
+) -> Result<Vec<dict::DictEntry>, String> {
+    dict::list_db(&state.db, &kind, keyword.as_deref(), only_active.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn dict_counts(state: State<'_, Arc<AppState>>) -> Result<Vec<dict::DictKindCount>, String> {
+    dict::kind_counts_db(&state.db)
+}
+
+#[tauri::command]
+pub fn dict_create(state: State<'_, Arc<AppState>>, args: dict::DictInput) -> Result<i64, String> {
+    dict::create_db(&state.db, &args)
+}
+
+/// 改字典值会同步改写用到它的台账/物料行，返回受影响行数。
+#[tauri::command]
+pub fn dict_update(state: State<'_, Arc<AppState>>, id: i64, args: dict::DictInput) -> Result<usize, String> {
+    dict::update_db(&state.db, id, &args)
+}
+
+#[tauri::command]
+pub fn dict_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
+    dict::delete_db(&state.db, id)
+}
+
+/// 从现有物料与台账重新扫一遍，把还没进字典的值补上。
+#[tauri::command]
+pub fn dict_sync(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    dict::sync_db(&state.db)
 }
 
 #[tauri::command]
@@ -591,8 +699,11 @@ pub fn master_backfill(state: State<'_, Arc<AppState>>) -> Result<(usize, usize)
 }
 
 /// 首启把工作簿里的「物料编号」「供应商名称」导进主数据，再从台账补漏。
-/// 只在主数据为空时跑，避免覆盖用户后来的维护。
+/// 只在主数据为空且未手动清空过时跑，避免覆盖用户后来的维护。
 pub fn seed_master_data(state: &AppState) {
+    if db::get_setting(&state.db, "manual_clear").as_deref() == Some("1") {
+        return;
+    }
     let existing = master::stats_db(&state.db).map(|s| s.items + s.suppliers).unwrap_or(1);
     if existing > 0 {
         return;
@@ -611,6 +722,18 @@ pub fn seed_master_data(state: &AppState) {
         Ok((items, suppliers)) => log::info!("主数据补漏: 物料 +{items}，供应商 +{suppliers}"),
         Err(err) => log::warn!("主数据补漏失败: {err}"),
     }
+}
+
+#[tauri::command]
+pub fn data_clear(
+    state: State<'_, Arc<AppState>>,
+    include_master: Option<bool>,
+) -> Result<db::ClearOutcome, String> {
+    let outcome = db::clear_data(&state.db, include_master.unwrap_or(false))?;
+    if let Ok(mut slot) = state.last_import.lock() {
+        *slot = None;
+    }
+    Ok(outcome)
 }
 
 // ---------- 单据查询 ----------

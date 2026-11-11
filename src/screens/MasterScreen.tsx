@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   RiAddLine,
+  RiArrowDownSLine,
+  RiCheckLine,
   RiDeleteBinLine,
   RiDownload2Line,
   RiFileExcel2Line,
@@ -17,6 +20,7 @@ import {
   deleteSupplier,
   importMasterWorkbook,
   isTauri,
+  listDict,
   listItems,
   listSuppliers,
   masterStats,
@@ -29,7 +33,6 @@ import { Button } from "@/components/base/buttons/button";
 import { Input } from "@/components/base/input/input";
 import { SearchField } from "@/components/base/search-field/search-field";
 import { Select, SelectItem } from "@/components/base/select/select";
-import { ComboPicker } from "../components/ComboPicker";
 import { Switch } from "@/components/base/switch/switch";
 import { SegmentedControl, SegmentedControlItem } from "@/components/base/segmented-control/segmented-control";
 import { Tabs, Tab, TabList, TabPanel } from "@/components/base/tabs/tabs";
@@ -37,11 +40,12 @@ import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/compo
 import { toast } from "@/components/base/toast/toast";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
+import { DictPanel } from "../components/DictPanel";
 import { PageHeader } from "../components/AppShell";
 
 const PAGE = 100;
 
-/** 基础资料：物料主数据 + 供应商。这两张表是开单时的字典。 */
+/** 基础资料：物料主数据 + 供应商 + 字典（单位/类别/类型/出库部门/采购人）。 */
 export function MasterScreen({ onChanged }: { onChanged: () => void }) {
   const [tab, setTab] = useState<string>("items");
   const [stats, setStats] = useState<MasterStats | null>(null);
@@ -155,16 +159,25 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
             <Tab id="items">物料（{count(stats?.items ?? 0)}）</Tab>
             <Tab id="drawings">图号（{count(stats?.withDrawing ?? 0)}）</Tab>
             <Tab id="suppliers">供应商（{count(stats?.suppliers ?? 0)}）</Tab>
+            <Tab id="dict">字典</Tab>
           </TabList>
 
           <TabPanel id="items">
-            <ItemsPanel categories={stats?.categories.map((c) => c.category) ?? []} onChanged={loadStats} busy={busy} />
+            <ItemsPanel
+              categories={stats?.categories.map((c) => c.category) ?? []}
+              itemTypes={stats?.itemTypes.map((t) => t.category) ?? []}
+              onChanged={loadStats}
+              busy={busy}
+            />
           </TabPanel>
           <TabPanel id="drawings">
             <DrawingsPanel onChanged={loadStats} busy={busy} />
           </TabPanel>
           <TabPanel id="suppliers">
             <SuppliersPanel onChanged={loadStats} busy={busy} />
+          </TabPanel>
+          <TabPanel id="dict">
+            <DictPanel onChanged={loadStats} />
           </TabPanel>
         </Tabs>
       </div>
@@ -176,10 +189,12 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
 
 function ItemsPanel({
   categories,
+  itemTypes,
   onChanged,
   busy,
 }: {
   categories: string[];
+  itemTypes: string[];
   onChanged: () => void;
   busy: boolean;
 }) {
@@ -194,6 +209,14 @@ function ItemsPanel({
   const [editing, setEditing] = useState<Item | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   const seq = useRef(0);
+
+  const filterTypes = useMemo(
+    () =>
+      Array.from(
+        new Set(["外购件", "加工件", ...itemTypes.filter((t) => t && t.trim() !== "" && t.trim() !== "未分类")]),
+      ),
+    [itemTypes],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -248,8 +271,8 @@ function ItemsPanel({
     <div className="mt-3 flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
         <SearchField
-          aria-label="搜索物料编码或名称"
-          placeholder="编码 / 名称"
+          aria-label="搜索物料编码、名称、库位或规格"
+          placeholder="编码 / 名称 / 库位 / 规格"
           size="small"
           shape="rounded"
           value={keyword}
@@ -281,8 +304,11 @@ function ItemsPanel({
         >
           <>
             <SelectItem id="all">全部类型</SelectItem>
-            <SelectItem id="外购件">外购件</SelectItem>
-            <SelectItem id="加工件">加工件</SelectItem>
+            {filterTypes.map((t) => (
+              <SelectItem key={t} id={t}>
+                {t}
+              </SelectItem>
+            ))}
           </>
         </Select>
         <label className="flex items-center gap-2 text-body-2-regular text-text-secondary">
@@ -306,25 +332,27 @@ function ItemsPanel({
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[1080px] table-fixed border-collapse text-[0.8125rem]">
+        <table className="w-full min-w-[1360px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
-              <th className="w-[132px] px-3 py-2 text-start font-medium">物料编码</th>
-              <th className="px-3 py-2 text-start font-medium">物料名称</th>
-              <th className="w-[88px] px-3 py-2 text-start font-medium">类型</th>
-              <th className="w-[104px] px-3 py-2 text-start font-medium">类别</th>
-              <th className="w-[150px] px-3 py-2 text-start font-medium">图号</th>
-              <th className="w-[64px] px-3 py-2 text-start font-medium">单位</th>
-              <th className="w-[96px] px-3 py-2 text-end font-medium">参考单价</th>
-              <th className="w-[132px] px-3 py-2 text-start font-medium">默认供应商</th>
-              <th className="w-[72px] px-3 py-2 text-center font-medium">状态</th>
-              <th className="w-[88px] px-3 py-2 text-end font-medium">操作</th>
+              <th className="w-[148px] px-3 py-2 text-start font-medium whitespace-nowrap">物料编码</th>
+              <th className="w-[240px] px-3 py-2 text-start font-medium whitespace-nowrap">物料名称</th>
+              <th className="w-[104px] px-3 py-2 text-start font-medium whitespace-nowrap">库位</th>
+              <th className="w-[136px] px-3 py-2 text-start font-medium whitespace-nowrap">规格型号</th>
+              <th className="w-[76px] px-3 py-2 text-start font-medium whitespace-nowrap">单位</th>
+              <th className="w-[100px] px-3 py-2 text-start font-medium whitespace-nowrap">类型</th>
+              <th className="w-[110px] px-3 py-2 text-start font-medium whitespace-nowrap">类别</th>
+              <th className="w-[144px] px-3 py-2 text-start font-medium whitespace-nowrap">图号</th>
+              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">参考单价</th>
+              <th className="w-[168px] px-3 py-2 text-start font-medium whitespace-nowrap">默认供应商</th>
+              <th className="w-[76px] px-3 py-2 text-center font-medium whitespace-nowrap">状态</th>
+              <th className="w-[84px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={10} className="px-4 py-12">
+                <td colSpan={12} className="px-4 py-12">
                   <EmptyState
                     icon={RiSearchLine}
                     title={total === 0 ? "还没有物料资料" : "没有匹配的物料"}
@@ -335,19 +363,26 @@ function ItemsPanel({
             ) : (
               rows.map((item) => (
                 <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={item.itemCode}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap" title={item.itemCode}>
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
                     {item.itemName}
                   </td>
-                  <td className="truncate px-3 py-1.5">
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.location ?? ""}>
+                    {item.location ?? "—"}
+                  </td>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.spec ?? ""}>
+                    {item.spec ?? "—"}
+                  </td>
+                  <td className="px-3 py-1.5 text-text-tertiary whitespace-nowrap">{item.unit ?? "—"}</td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">
                     {item.itemType ? (
                       <span
                         className={
                           item.itemType === "外购件"
-                            ? "rounded bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
-                            : "rounded bg-amber-500/12 px-1.5 py-0.5 text-caption-1-semibold text-amber-500"
+                            ? "inline-block whitespace-nowrap rounded bg-sky-500/12 px-2 py-0.5 text-caption-1-semibold text-sky-400"
+                            : "inline-block whitespace-nowrap rounded bg-amber-500/12 px-2 py-0.5 text-caption-1-semibold text-amber-500"
                         }
                       >
                         {item.itemType}
@@ -356,21 +391,20 @@ function ItemsPanel({
                       <span className="text-text-tertiary">—</span>
                     )}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary">{item.category ?? "—"}</td>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>{item.category ?? "—"}</td>
                   <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.drawingNo ?? ""}>
                     {item.drawingNo ?? "—"}
                   </td>
-                  <td className="px-3 py-1.5 text-text-tertiary">{item.unit ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
+                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary whitespace-nowrap">
                     {item.priceMicros === null ? "—" : priceText(item.priceMicros)}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary">{item.supplier ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-center">
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.supplier ?? ""}>{item.supplier ?? "—"}</td>
+                  <td className="px-3 py-1.5 text-center whitespace-nowrap">
                     <span className={item.active ? "text-caption-1-semibold text-emerald-500" : "text-caption-1-regular text-text-tertiary"}>
                       {item.active ? "在用" : "停用"}
                     </span>
                   </td>
-                  <td className="px-3 py-1.5 text-end">
+                  <td className="px-3 py-1.5 text-end whitespace-nowrap">
                     <button
                       type="button"
                       aria-label={`编辑 ${item.itemCode}`}
@@ -413,6 +447,7 @@ function ItemsPanel({
         <ItemDialog
           item={editing === "new" ? null : editing}
           categories={categories}
+          itemTypes={itemTypes}
           onClose={() => setEditing(null)}
           onSaved={async () => {
             setEditing(null);
@@ -439,11 +474,13 @@ function ItemsPanel({
 function ItemDialog({
   item,
   categories,
+  itemTypes,
   onClose,
   onSaved,
 }: {
   item: Item | null;
   categories: string[];
+  itemTypes: string[];
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
@@ -453,15 +490,66 @@ function ItemDialog({
     category: item?.category ?? "",
     unit: item?.unit ?? "",
     priceMicros: item?.priceMicros ?? null,
+    // 这几个字段原来没进初值，编辑保存时会被当成「清空」写回去，
+    // 导入带进来的规格/类型/图号/库位一改物料就丢了。
+    spec: item?.spec ?? "",
+    itemType: item?.itemType === "未分类" ? "" : (item?.itemType ?? ""),
+    drawingNo: item?.drawingNo ?? "",
+    location: item?.location ?? "",
+    owner: item?.owner ?? "",
     supplier: item?.supplier ?? "",
     remark: item?.remark ?? "",
     active: item?.active ?? true,
   });
   const [busy, setBusy] = useState(false);
+  // 单位与类型从字典取候选；类别合并字典与 stats 里的实际分布（含未进字典的旧值）
+  const [unitOptions, setUnitOptions] = useState<string[]>([]);
+  const [typeOptions, setTypeOptions] = useState<string[]>([]);
+  const [dictCategories, setDictCategories] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const [units, types, cats] = await Promise.all([
+          listDict("unit", undefined, true),
+          listDict("item_type", undefined, true),
+          listDict("category", undefined, true),
+        ]);
+        if (!alive) return;
+        setUnitOptions(units.map((entry) => entry.value));
+        setTypeOptions(types.map((entry) => entry.value));
+        setDictCategories(cats.map((entry) => entry.value));
+      } catch {
+        // 读不到字典就只剩手输，不挡保存
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // 类别候选：只留真实类别（排除空值与历史污染），去重排序
   const categoryOptions = useMemo(
-    () => Array.from(new Set(categories.filter((c) => c && c.trim() !== "旧版基础信息"))).sort(),
-    [categories],
+    () =>
+      Array.from(
+        new Set([...dictCategories, ...categories].filter((c) => c && c.trim() !== "" && c.trim() !== "旧版基础信息")),
+      ).sort(),
+    [dictCategories, categories],
+  );
+  // 类型候选：合并常用类型、字典类型与已有物料类型
+  const mergedTypeOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          "外购件",
+          "加工件",
+          ...typeOptions,
+          ...itemTypes.filter((t) => t && t.trim() !== "" && t.trim() !== "未分类"),
+        ]),
+      ),
+    [typeOptions, itemTypes],
   );
   const set = <K extends keyof ItemInput>(key: K, value: ItemInput[K]) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -495,12 +583,36 @@ function ItemDialog({
                 />
               </Labeled>
               <Labeled label="单位">
-                <Input size="small" value={form.unit ?? ""} onChange={(v) => set("unit", v)} />
+                <CategoryDropdown
+                  label="单位"
+                  placeholder="选或输入新单位"
+                  value={form.unit ?? ""}
+                  options={unitOptions}
+                  onChange={(v) => set("unit", v)}
+                />
               </Labeled>
             </div>
             <Labeled label="物料名称">
               <Input size="small" value={form.itemName} onChange={(v) => set("itemName", v)} />
             </Labeled>
+            <div className="grid grid-cols-2 gap-3">
+              <Labeled label="库位">
+                <Input
+                  size="small"
+                  placeholder="如 D-01-02-4F"
+                  value={form.location ?? ""}
+                  onChange={(v) => set("location", v)}
+                />
+              </Labeled>
+              <Labeled label="规格型号">
+                <Input
+                  size="small"
+                  placeholder="如 5*5、M8X50"
+                  value={form.spec ?? ""}
+                  onChange={(v) => set("spec", v)}
+                />
+              </Labeled>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <Labeled label="图号">
                 <Input
@@ -511,29 +623,23 @@ function ItemDialog({
                 />
               </Labeled>
               <Labeled label="类型">
-                <Select
-                  aria-label="物料类型"
-                  size="sm"
-                  selectedKey={form.itemType || "none"}
-                  onSelectionChange={(key) => set("itemType", key === "none" ? "" : String(key))}
-                  className="w-full"
-                >
-                  <>
-                    <SelectItem id="none">未分类</SelectItem>
-                    <SelectItem id="外购件">外购件</SelectItem>
-                    <SelectItem id="加工件">加工件</SelectItem>
-                  </>
-                </Select>
+                <CategoryDropdown
+                  label="类型"
+                  placeholder="选或输入新类型"
+                  value={form.itemType ?? ""}
+                  options={mergedTypeOptions}
+                  onChange={(v) => set("itemType", v)}
+                />
               </Labeled>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Labeled label="类别">
-                <ComboPicker
-                  ariaLabel="物料类别"
-                  value={form.category ?? ""}
-                  onChange={(v) => set("category", v)}
-                  options={categoryOptions.map((c) => ({ value: c }))}
+                <CategoryDropdown
+                  label="类别"
                   placeholder="选或输入新类别"
+                  value={form.category ?? ""}
+                  options={categoryOptions}
+                  onChange={(v) => set("category", v)}
                 />
               </Labeled>
               <Labeled label="参考单价（元）">
@@ -658,16 +764,16 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[860px] table-fixed border-collapse text-[0.8125rem]">
+        <table className="w-full min-w-[960px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
-              <th className="w-[210px] px-3 py-2 text-start font-medium">图号</th>
-              <th className="w-[132px] px-3 py-2 text-start font-medium">物料编码</th>
-              <th className="px-3 py-2 text-start font-medium">物料名称</th>
-              <th className="w-[88px] px-3 py-2 text-start font-medium">类型</th>
-              <th className="w-[104px] px-3 py-2 text-start font-medium">类别</th>
-              <th className="w-[64px] px-3 py-2 text-start font-medium">单位</th>
-              <th className="w-[72px] px-3 py-2 text-end font-medium">操作</th>
+              <th className="w-[180px] px-3 py-2 text-start font-medium whitespace-nowrap">图号</th>
+              <th className="w-[148px] px-3 py-2 text-start font-medium whitespace-nowrap">物料编码</th>
+              <th className="w-[240px] px-3 py-2 text-start font-medium whitespace-nowrap">物料名称</th>
+              <th className="w-[100px] px-3 py-2 text-start font-medium whitespace-nowrap">类型</th>
+              <th className="w-[110px] px-3 py-2 text-start font-medium whitespace-nowrap">类别</th>
+              <th className="w-[76px] px-3 py-2 text-start font-medium whitespace-nowrap">单位</th>
+              <th className="w-[80px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -688,22 +794,22 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
             ) : (
               rows.map((item) => (
                 <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={item.drawingNo ?? ""}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap" title={item.drawingNo ?? ""}>
                     {item.drawingNo ?? <span className="text-text-tertiary">（未填）</span>}
                   </td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.itemCode}>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary whitespace-nowrap" title={item.itemCode}>
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
                     {item.itemName}
                   </td>
-                  <td className="truncate px-3 py-1.5">
+                  <td className="px-3 py-1.5 whitespace-nowrap">
                     {item.itemType ? (
                       <span
                         className={
                           item.itemType === "外购件"
-                            ? "rounded bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
-                            : "rounded bg-amber-500/12 px-1.5 py-0.5 text-caption-1-semibold text-amber-500"
+                            ? "inline-block whitespace-nowrap rounded bg-sky-500/12 px-2 py-0.5 text-caption-1-semibold text-sky-400"
+                            : "inline-block whitespace-nowrap rounded bg-amber-500/12 px-2 py-0.5 text-caption-1-semibold text-amber-500"
                         }
                       >
                         {item.itemType}
@@ -712,9 +818,9 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
                       <span className="text-text-tertiary">—</span>
                     )}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary">{item.category ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-text-tertiary">{item.unit ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-end">
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>{item.category ?? "—"}</td>
+                  <td className="px-3 py-1.5 text-text-tertiary whitespace-nowrap">{item.unit ?? "—"}</td>
+                  <td className="px-3 py-1.5 text-end whitespace-nowrap">
                     <button
                       type="button"
                       aria-label={`${item.drawingNo ? "改看" : "补"}"图号 ${item.itemCode}`}
@@ -783,8 +889,11 @@ function DrawingDialog({
         category: item.category,
         unit: item.unit,
         priceMicros: item.priceMicros,
+        spec: item.spec,
         itemType: item.itemType,
         drawingNo: drawingNo.trim() || null,
+        location: item.location,
+        owner: item.owner,
         supplier: item.supplier,
         remark: item.remark,
         active: item.active,
@@ -888,15 +997,15 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
-        <table className="w-full min-w-[720px] table-fixed border-collapse text-[0.8125rem]">
+        <table className="w-full min-w-[800px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
-              <th className="px-3 py-2 text-start font-medium">供应商名称</th>
-              <th className="w-[120px] px-3 py-2 text-start font-medium">联系人</th>
-              <th className="w-[140px] px-3 py-2 text-start font-medium">电话</th>
-              <th className="w-[96px] px-3 py-2 text-end font-medium">台账行数</th>
-              <th className="w-[72px] px-3 py-2 text-center font-medium">状态</th>
-              <th className="w-[88px] px-3 py-2 text-end font-medium">操作</th>
+              <th className="px-3 py-2 text-start font-medium whitespace-nowrap">供应商名称</th>
+              <th className="w-[130px] px-3 py-2 text-start font-medium whitespace-nowrap">联系人</th>
+              <th className="w-[150px] px-3 py-2 text-start font-medium whitespace-nowrap">电话</th>
+              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">台账行数</th>
+              <th className="w-[76px] px-3 py-2 text-center font-medium whitespace-nowrap">状态</th>
+              <th className="w-[88px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -909,16 +1018,16 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
             ) : (
               rows.map((supplier) => (
                 <tr key={supplier.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 text-text-primary">{supplier.name}</td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary">{supplier.contact ?? "—"}</td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary">{supplier.phone ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{count(supplier.hits)}</td>
-                  <td className="px-3 py-1.5 text-center">
+                  <td className="truncate px-3 py-1.5 text-text-primary" title={supplier.name}>{supplier.name}</td>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={supplier.contact ?? ""}>{supplier.contact ?? "—"}</td>
+                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={supplier.phone ?? ""}>{supplier.phone ?? "—"}</td>
+                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary whitespace-nowrap">{count(supplier.hits)}</td>
+                  <td className="px-3 py-1.5 text-center whitespace-nowrap">
                     <span className={supplier.active ? "text-caption-1-semibold text-emerald-500" : "text-caption-1-regular text-text-tertiary"}>
                       {supplier.active ? "在用" : "停用"}
                     </span>
                   </td>
-                  <td className="px-3 py-1.5 text-end">
+                  <td className="px-3 py-1.5 text-end whitespace-nowrap">
                     <button
                       type="button"
                       aria-label={`编辑 ${supplier.name}`}
@@ -1052,9 +1161,256 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 
 function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1">
       <span className="text-caption-1-semibold text-text-tertiary">{label}</span>
       {children}
-    </label>
+    </div>
+  );
+}
+
+
+/**
+ * 可输入下拉（弹窗内用于单位、类型、类别）。
+ *
+ * 下拉面板通过 createPortal 挂在弹窗容器（AriaModal）根节点下，脱离 ModalBody 的
+ * overflow-y-auto 滚动区（避免撑出弹窗滚动条或被裁剪），同时仍处在 Modal DOM 树内部
+ * （避免触发 react-aria 的点外部关闭弹窗）。
+ *
+ * 行为：输入即筛选；↑↓ 移动高亮、Enter 选中、Esc 或点击边框外收起；可直接输入新值。
+ */
+function CategoryDropdown({
+  label,
+  placeholder,
+  value,
+  options,
+  onChange,
+}: {
+  /** 用于 aria 标签与列表 id：同一弹窗里可能放多个（单位、类型、类别） */
+  label: string;
+  placeholder?: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  const listId = useId();
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(value);
+  const [active, setActive] = useState(0);
+  // 用户正在打字过滤。不能用 text === value 判断：打字时 onChange 会把 value 同步成同一串，
+  // 那样刚输入就被当成「已确认」，列表永远不过滤。
+  const [typing, setTyping] = useState(false);
+  const [, setTick] = useState(0);
+  const listRef = useRef<HTMLUListElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // 外部值变化（切换物料）时同步输入框
+  useEffect(() => {
+    // 打字时父组件会把 value 同步成同一串（onChange 已经传上去），
+    // 这时不能清 typing，否则过滤刚设上就被重置。
+    setText((prev) => (prev === value ? prev : value));
+    setTyping((prev) => (prev && text === value ? prev : false));
+  }, [value]);
+
+  // 打字中按包含关系筛；没在打字（刚聚焦、刚选中）就列全部
+  const filtered = useMemo(() => {
+    const keyword = typing ? text.trim() : "";
+    if (!keyword) return options;
+    return options.filter((c) => c.includes(keyword));
+  }, [typing, text, options]);
+
+  useEffect(() => {
+    if (!open) return;
+    const item = listRef.current?.querySelectorAll<HTMLElement>("[role='option']")[active];
+    item?.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
+
+  // 弹窗内部滚动或窗口缩放时重算浮层坐标
+  useEffect(() => {
+    if (!open) return;
+    const relayout = () => setTick((n) => n + 1);
+    window.addEventListener("scroll", relayout, true);
+    window.addEventListener("resize", relayout);
+    return () => {
+      window.removeEventListener("scroll", relayout, true);
+      window.removeEventListener("resize", relayout);
+    };
+  }, [open]);
+
+  // 点击边框外部收起下拉框
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (!wrapRef.current?.contains(target) && !listRef.current?.contains(target)) {
+        setOpen(false);
+        setTyping(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown, true);
+    return () => document.removeEventListener("mousedown", onPointerDown, true);
+  }, [open]);
+
+  // 下拉展开时，Esc 只收下拉，不能连带关掉整个弹窗。
+  // react-aria 的 Modal 在 document 上监听 keydown，React 合成事件拦不住它，
+  // 所以在 document 捕获阶段抢先用原生监听处理。
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setOpen(false);
+      setTyping(false);
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [open]);
+
+  const pick = (next: string) => {
+    setText(next);
+    onChange(next);
+    setTyping(false);
+    setOpen(false);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setOpen(true);
+      setActive((i) => Math.min(i + 1, Math.max(filtered.length - 1, 0)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter" && open) {
+      e.preventDefault();
+      if (filtered[active] !== undefined) pick(filtered[active]);
+      else setOpen(false);
+    } else if (e.key === "Escape" && open) {
+      e.preventDefault();
+      setOpen(false);
+      setTyping(false);
+    } else if (e.key === "Tab" && open) {
+      setOpen(false);
+      setTyping(false);
+    }
+  };
+
+  const el = open ? wrapRef.current : null;
+  const host = el
+    ? ((el.closest('[role="dialog"]')?.parentElement ?? el.closest('[role="dialog"]')) as HTMLElement | null)
+    : null;
+  const rect = el ? el.getBoundingClientRect() : null;
+  const hostRect = host ? host.getBoundingClientRect() : null;
+  const dropUp = rect ? window.innerHeight - rect.bottom - 16 < 180 && rect.top > window.innerHeight - rect.bottom : false;
+
+  const listbox = open ? (
+    <ul
+      ref={listRef}
+      id={listId}
+      role="listbox"
+      aria-label={`${label}选项`}
+      onWheel={(event) => {
+        const node = event.currentTarget;
+        if (node.scrollHeight <= node.clientHeight) return;
+        node.scrollTop += event.deltaY;
+        event.stopPropagation();
+      }}
+      style={
+        rect && hostRect
+          ? {
+              position: "absolute",
+              left: rect.left - hostRect.left,
+              width: rect.width,
+              ...(dropUp
+                ? { bottom: hostRect.bottom - rect.top + 4 }
+                : { top: rect.bottom - hostRect.top + 4 }),
+            }
+          : undefined
+      }
+      className={
+        "z-50 max-h-48 overflow-y-auto rounded-xl border border-border-button-hover bg-background-primary-default p-1 shadow-2xl ring-1 ring-black/40 dark:bg-neutral-900 " +
+        (rect && hostRect ? "" : "absolute inset-x-0 " + (dropUp ? "bottom-full mb-1" : "top-full mt-1"))
+      }
+    >
+      {filtered.length === 0 ? (
+        <li className="px-2.5 py-2 text-caption-1-regular text-text-tertiary">
+          没有匹配的{label}，回车或直接保存即可使用新{label}「{text.trim()}」
+        </li>
+      ) : (
+        filtered.map((c, index) => {
+          const selected = c === value;
+          const highlighted = index === active;
+          return (
+            <li
+              key={c}
+              role="option"
+              aria-selected={selected}
+              onMouseEnter={() => setActive(index)}
+              onMouseDown={(e) => {
+                // 用 mousedown 而不是 click：避免输入框先失焦、菜单先收起
+                e.preventDefault();
+                pick(c);
+              }}
+              className={
+                "flex cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-body-2-medium transition-colors " +
+                (highlighted ? "bg-dropdown-item-hover-background " : "") +
+                (selected ? "text-text-primary" : "text-text-secondary")
+              }
+            >
+              <span className="truncate">{c}</span>
+              {selected ? <RiCheckLine className="size-3.5 shrink-0 text-text-primary" aria-hidden /> : null}
+            </li>
+          );
+        })
+      )}
+    </ul>
+  ) : null;
+
+  return (
+    <div ref={wrapRef} className={"relative " + (open ? "z-40" : "")}>
+      <div className="relative">
+        <input
+          role="combobox"
+          aria-label={label}
+          aria-expanded={open}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          value={text}
+          placeholder={placeholder ?? `选或输入新${label}`}
+          onChange={(e) => {
+            setText(e.target.value);
+            onChange(e.target.value);
+            setActive(0);
+            setTyping(true);
+            setOpen(true);
+          }}
+          onFocus={() => {
+            setTyping(false);
+            setOpen(true);
+          }}
+          // 焦点一直停在输入框上时（比如刚按过 Enter），再点不会触发 onFocus，这里补上
+          onClick={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+          className={
+            "h-9 w-full rounded-lg border bg-background-primary-default ps-2.5 pe-8 text-body-regular text-text-primary outline-none placeholder:text-text-tertiary " +
+            (open
+              ? "border-border-focus-ring ring-2 ring-border-focus-ring/20"
+              : "border-border-button-default hover:border-border-button-hover")
+          }
+        />
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={`展开${label}列表`}
+          onClick={() => setOpen((v) => !v)}
+          className="absolute end-1 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded text-text-tertiary hover:text-text-primary"
+        >
+          <RiArrowDownSLine className={"size-4 transition-transform " + (open ? "rotate-180" : "")} aria-hidden />
+        </button>
+      </div>
+
+      {listbox ? (host ? createPortal(listbox, host) : listbox) : null}
+    </div>
   );
 }

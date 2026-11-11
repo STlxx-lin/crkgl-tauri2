@@ -28,6 +28,12 @@ export default defineConfig(({ mode }) => ({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1423 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:80",
+        changeOrigin: false,
+      },
+    },
   },
   build: {
     outDir: mode === "remote" ? "dist-remote" : "dist",

@@ -37,3 +37,33 @@ export function onBuyerChange(handler: (buyer: string) => void): () => void {
   window.addEventListener(EVENT, listener);
   return () => window.removeEventListener(EVENT, listener);
 }
+
+const PRINT_AFTER_SAVE_KEY = "ledger.printAfterSave";
+const PRINT_AFTER_SAVE_EVENT = "ledger:print-after-save-change";
+
+/** 保存后是否自动出打印视图；默认开。 */
+export function storedPrintAfterSave(): boolean {
+  try {
+    return window.localStorage.getItem(PRINT_AFTER_SAVE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function savePrintAfterSave(on: boolean): void {
+  try {
+    window.localStorage.setItem(PRINT_AFTER_SAVE_KEY, on ? "1" : "0");
+  } catch {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(PRINT_AFTER_SAVE_EVENT, { detail: on }));
+}
+
+export function onPrintAfterSaveChange(handler: (on: boolean) => void): () => void {
+  const listener = (event: Event) => {
+    const detail = (event as CustomEvent<boolean>).detail;
+    handler(typeof detail === "boolean" ? detail : storedPrintAfterSave());
+  };
+  window.addEventListener(PRINT_AFTER_SAVE_EVENT, listener);
+  return () => window.removeEventListener(PRINT_AFTER_SAVE_EVENT, listener);
+}

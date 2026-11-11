@@ -49,15 +49,33 @@ export function ItemPicker({
   // 下拉已经 portal 到 body，不在 boxRef 里，必须单独判断是否点了它
   const menuRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
-  // 表格容器是 overflow-x-auto，绝对定位的下拉会被裁掉，
-  // 所以改用 fixed 定位渲染到 body。
-  const [anchor, setAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
+  // 表格容器是 overflow-x-auto，绝对定位的下拉会被裁掉，所以默认 fixed 渲染到 body；
+  // 但在弹窗（react-aria Modal）内部时，如果 portal 到 body，点击下拉项会被 Modal 当成点到弹窗外部而直接关掉弹窗，
+  // 所以弹窗内挂到 dialog 宿主节点并使用相对它的绝对定位。
+  const [anchor, setAnchor] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    host: HTMLElement | null;
+  } | null>(null);
 
   const measure = () => {
     const el = boxRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setAnchor({ left: r.left, top: r.bottom + 4, width: Math.max(r.width, 320) });
+    const dialog = el.closest('[role="dialog"]');
+    const host = (dialog?.parentElement ?? dialog) as HTMLElement | null;
+    if (host) {
+      const hr = host.getBoundingClientRect();
+      setAnchor({
+        left: r.left - hr.left,
+        top: r.bottom - hr.top + 4,
+        width: Math.max(r.width, 320),
+        host,
+      });
+    } else {
+      setAnchor({ left: r.left, top: r.bottom + 4, width: Math.max(r.width, 320), host: null });
+    }
   };
 
   useEffect(() => {
@@ -96,7 +114,7 @@ export function ItemPicker({
     return () => window.clearTimeout(timer);
   }, [keyword, open, source, inStockOnly]);
 
-  // 点外面收起
+  // 点外面收起（用捕获阶段，避免被弹窗内部 stopPropagation 吞掉）
   useEffect(() => {
     if (!open) return;
     const onDown = (event: MouseEvent) => {
@@ -108,8 +126,8 @@ export function ItemPicker({
         onBlurClose?.();
       }
     };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
   }, [open, onBlurClose]);
 
   // 打开时显示正在输入的搜索词；收起时只显示编码（名称有单独一列）
@@ -120,6 +138,15 @@ export function ItemPicker({
     setOpen(false);
     setKeyword("");
   };
+
+  // 方向键移动 active 时，把选中项滚进可视区（弹窗里原生 scrollIntoView 也能用）
+  useEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const option = menu.querySelectorAll<HTMLElement>('[role="option"]')[active];
+    option?.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (!open) {
@@ -158,7 +185,7 @@ export function ItemPicker({
           disabled={disabled}
           placeholder={placeholder}
           className={cx(
-            "h-8 w-full rounded-md border pe-6 ps-1.5 text-[0.75rem] text-text-primary outline-none",
+            "h-8 w-full rounded-md border pe-6 ps-1.5 text-[0.75rem] text-text-primary placeholder:text-text-tertiary outline-none",
             open
               ? "border-border-focus-ring bg-background-primary-default"
               : "border-border-button-default bg-background-secondary-default hover:border-border-button-hover",
@@ -180,8 +207,21 @@ export function ItemPicker({
         ? createPortal(
             <div
               ref={menuRef}
-              style={{ position: "fixed", left: anchor.left, top: anchor.top, width: anchor.width }}
-              className="z-[999] max-h-72 overflow-auto rounded-lg border border-border-button-default bg-background-primary-default p-1 shadow-xl"
+              style={{
+                position: anchor.host ? "absolute" : "fixed",
+                left: anchor.left,
+                top: anchor.top,
+                width: anchor.width,
+              }}
+              // 弹窗（react-aria Modal）会给 body 加 overflow:hidden 并拦滚轮，
+              // 这里自己处理一次，让候选列表在弹窗里也能顺畅滚动。
+              onWheel={(event) => {
+                const el = event.currentTarget;
+                if (el.scrollHeight <= el.clientHeight) return;
+                el.scrollTop += event.deltaY;
+                event.stopPropagation();
+              }}
+              className="z-[999] max-h-72 overflow-auto rounded-lg border border-border-button-hover bg-background-primary-default p-1 shadow-2xl ring-1 ring-black/40 dark:bg-neutral-900"
             >
               <div className="sticky top-0 mb-1 flex items-center gap-1.5 rounded-md bg-background-secondary-default px-2 py-1 text-caption-1-regular text-text-tertiary">
                 <RiSearchLine className="size-3.5 shrink-0" aria-hidden />
@@ -204,7 +244,7 @@ export function ItemPicker({
                         onClick={() => pick(item)}
                         className={cx(
                           "flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-start",
-                          index === active ? "bg-background-secondary-hover" : "",
+                          index === active ? "bg-dropdown-item-hover-background" : "",
                         )}
                       >
                         <span className="flex items-center gap-2">
@@ -235,7 +275,7 @@ export function ItemPicker({
                 </ul>
               )}
             </div>,
-            document.body,
+            anchor.host ?? document.body,
           )
         : null}
     </div>
@@ -257,6 +297,7 @@ function inboundToItems(rows: ItemMaster[]): Item[] {
     owner: null,
     supplier: null,
     remark: null,
+    location: null,
     active: true,
     stockQty: row.stockQty,
   }));

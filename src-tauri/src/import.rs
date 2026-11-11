@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Reader};
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,6 +25,7 @@ pub const FIELDS: &[&str] = &[
     "delivery_no",
     "item_code",
     "item_name",
+    "spec",
     "unit",
     "qty",
     "price",
@@ -42,6 +44,7 @@ pub fn field_label(field: &str) -> &'static str {
         "delivery_no" => "送货单号",
         "item_code" => "物料编码",
         "item_name" => "物料名称",
+        "spec" => "规格型号",
         "unit" => "单位",
         "qty" => "数量",
         "price" => "单价",
@@ -62,6 +65,7 @@ const ALIASES: &[(&str, &[&str])] = &[
     ("delivery_no", &["送货单号", "送货单", "验收单号"]),
     ("item_code", &["物料编码", "编码", "物料编号", "物料编码序号", "图号"]),
     ("item_name", &["物料名称", "名称", "品名", "物料"]),
+    ("spec", &["规格型号", "规格", "型号"]),
     ("unit", &["单位", "计量单位"]),
     ("qty", &["数量", "入库数量", "出库数量"]),
     ("price", &["单价", "进货单价", "进货价", "价格"]),
@@ -164,7 +168,7 @@ pub fn guess_field(header: &str) -> Option<String> {
     None
 }
 
-fn cell_text(cell: &Data) -> String {
+pub(crate) fn cell_text(cell: &Data) -> String {
     match cell {
         Data::Empty => "".to_string(),
         Data::String(s) => s.trim().to_string(),
@@ -183,7 +187,7 @@ fn cell_text(cell: &Data) -> String {
     }
 }
 
-fn cell_float(cell: &Data) -> Option<f64> {
+pub(crate) fn cell_float(cell: &Data) -> Option<f64> {
     match cell {
         Data::Float(f) => Some(*f),
         Data::Int(i) => Some(*i as f64),
@@ -275,10 +279,36 @@ pub struct SheetReport {
     pub detail: bool,
     /// 主数据表（供应商名称 / 物料编号 / 基础信息），由 master 模块写入，不进台账
     pub master: bool,
+    /// 月度「库存进销存报表」宽表：一行一物料 + 逐日入库/出库网格。
+    /// 这类表由 `pivot` 模块拆成流水，不参与列映射。
+    pub pivot: bool,
+    /// 宽表态摘要（不是宽表时为空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pivot_info: Option<PivotSheetInfo>,
     pub note: String,
     pub headers: Vec<HeaderGuess>,
     /// 前 5 行原始值（截断到 20 列），给向导里看一眼
     pub sample: Vec<Vec<String>>,
+}
+
+/// 宽表在向导里能一眼看清的摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotSheetInfo {
+    /// 认出的月份；认不出就是 null，那张表会跳过
+    pub month: Option<u32>,
+    /// 逐日网格的天数
+    pub days: usize,
+    /// 真实物料行数（不含尾部填充行）
+    pub items: usize,
+    /// 尾部「编码=0」的填充行
+    pub filler_rows: usize,
+    /// 日格里的非零笔数
+    pub flow_cells: usize,
+    /// 有期初结存的物料数
+    pub opening_items: usize,
+    /// 源表「现结存」非零的物料数
+    pub closing_items: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,96 +320,401 @@ pub struct WorkbookReport {
     pub sheets: Vec<SheetReport>,
 }
 
+/// 向导里每张表最多显示前几列原始值。
 const SAMPLE_COLUMNS: usize = 20;
+
+#[inline]
+pub(crate) fn cell_is_empty(cell: &Data) -> bool {
+    match cell {
+        Data::Empty => true,
+        Data::String(s) => s.trim().is_empty(),
+        _ => false,
+    }
+}
+
+#[derive(Clone)]
+struct CachedWorkbook {
+    path: std::path::PathBuf,
+    size_bytes: u64,
+    modified: Option<std::time::SystemTime>,
+    report: WorkbookReport,
+    pivot_sheets: Vec<crate::pivot::PivotSheet>,
+    master_sheets: Vec<(String, calamine::Range<Data>)>,
+    flow_parsed: Vec<(SheetPlan, ParsedSheet)>,
+}
+
+static WORKBOOK_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedWorkbook>>> =
+    std::sync::OnceLock::new();
 
 /// 读工作簿里所有 sheet，按首行表头猜字段，标出哪些是明细表。
 pub fn inspect(path: &Path) -> Result<WorkbookReport, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件: {e}"))?;
-    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
-    let names = book.sheet_names().to_vec();
-    let mut sheets = Vec::new();
-    for name in names {
-        let range = match book.worksheet_range(&name) {
-            Ok(r) => r,
-            Err(err) => {
-                sheets.push(SheetReport {
+    let (report, _) = inspect_and_collect_cached(path)?;
+    Ok(report)
+}
+
+fn inspect_single_sheet(
+    name: String,
+    range_res: Result<calamine::Range<Data>, calamine::Error>,
+) -> (
+    SheetReport,
+    Option<crate::pivot::PivotSheet>,
+    Option<calamine::Range<Data>>,
+    Option<(SheetPlan, ParsedSheet)>,
+) {
+    let range = match range_res {
+        Ok(r) => r,
+        Err(err) => {
+            return (
+                SheetReport {
                     name,
                     rows: 0,
                     non_empty_rows: 0,
                     detail: false,
                     master: false,
+                    pivot: false,
+                    pivot_info: None,
                     note: format!("读取失败: {err}"),
                     headers: Vec::new(),
                     sample: Vec::new(),
-                });
-                continue;
-            }
+                },
+                None,
+                None,
+                None,
+            );
+        }
+    };
+    let rows_ref: Vec<&[Data]> = range.rows().collect();
+    let total = rows_ref.len();
+    let sample: Vec<Vec<String>> = rows_ref
+        .iter()
+        .take(5)
+        .map(|row| row.iter().take(SAMPLE_COLUMNS).map(cell_text).collect())
+        .collect();
+    let non_empty = rows_ref
+        .iter()
+        .filter(|row| row.iter().any(|c| !cell_is_empty(c)))
+        .count();
+    let headers: Vec<HeaderGuess> = rows_ref
+        .first()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(column, cell)| {
+                    let header = cell_text(cell);
+                    HeaderGuess {
+                        column,
+                        field: guess_field(&header),
+                        header,
+                    }
+                })
+                .filter(|h| !h.header.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 月度进销存宽表要先认，否则它也会落进「不像明细表」被跳过：
+    // 它的表头里没有日期列，只有「1日…31日」两两一对的网格。
+    if let Some(parsed) = crate::pivot::read_sheet(&name, &rows_ref) {
+        let flows: usize = parsed
+            .items
+            .iter()
+            .map(|i| {
+                i.days
+                    .iter()
+                    .filter(|(_, a, b)| a.is_some() || b.is_some())
+                    .count()
+            })
+            .sum();
+        let items = parsed.items.len();
+        let filler = parsed.filler_rows;
+        let opening = parsed
+            .items
+            .iter()
+            .filter(|i| i.opening.unwrap_or(0.0) != 0.0)
+            .count();
+        let closing = parsed
+            .items
+            .iter()
+            .filter(|i| i.closing.unwrap_or(0.0) != 0.0)
+            .count();
+        let month = parsed.month;
+        let day_count = parsed.day_count;
+        let note = match month {
+            Some(m) => format!(
+                "{m}月进销存宽表：{items} 个物料 · {day_count} 天网格 · {flows} 笔进出"
+            ),
+            None => format!(
+                "像月度进销存宽表，但表名认不出月份（应为「1月」~「12月」）：{items} 个物料，会跳过"
+            ),
         };
-        let total = range.height();
-        let mut non_empty = 0usize;
-        let mut sample: Vec<Vec<String>> = Vec::new();
-        for (index, row) in range.rows().enumerate() {
-            let texts: Vec<String> = row.iter().take(SAMPLE_COLUMNS).map(cell_text).collect();
-            if row.iter().any(|c| !cell_text(c).is_empty()) {
-                non_empty += 1;
-            }
-            if index < 5 {
-                sample.push(texts);
+        return (
+            SheetReport {
+                name,
+                rows: total,
+                non_empty_rows: non_empty,
+                detail: false,
+                master: false,
+                pivot: true,
+                pivot_info: Some(PivotSheetInfo {
+                    month,
+                    days: day_count,
+                    items,
+                    filler_rows: filler,
+                    flow_cells: flows,
+                    opening_items: opening,
+                    closing_items: closing,
+                }),
+                note,
+                headers,
+                sample,
+            },
+            Some(parsed),
+            None,
+            None,
+        );
+    }
+
+    let pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|h| h.field.clone().map(|f| (h.header.clone(), f)))
+        .collect();
+    let detail = looks_like_detail(&pairs);
+    let master_kind = if detail { None } else { master_sheet_kind(&name, &headers) };
+    let note = if detail {
+        format!("明细表：{} 行数据", non_empty.saturating_sub(1))
+    } else if let Some(kind) = master_kind {
+        format!("{kind}：{} 行，写入基础资料", non_empty.saturating_sub(1))
+    } else if non_empty == 0 {
+        "空表".to_string()
+    } else {
+        "不像明细表（缺日期/数量/物料列），不会导入".to_string()
+    };
+    let is_master = master_kind.is_some();
+    let master_range = if is_master { Some(range.clone()) } else { None };
+    let flow_item = if detail {
+        let mut default_mapping = BTreeMap::new();
+        for h in &headers {
+            if let Some(f) = &h.field {
+                default_mapping.insert(h.column, f.clone());
             }
         }
-        let headers: Vec<HeaderGuess> = range
-            .rows()
-            .next()
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .map(|(column, cell)| {
-                        let header = cell_text(cell);
-                        HeaderGuess {
-                            column,
-                            field: guess_field(&header),
-                            header,
-                        }
-                    })
-                    .filter(|h| !h.header.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let pairs: Vec<(String, String)> = headers
-            .iter()
-            .filter_map(|h| h.field.clone().map(|f| (h.header.clone(), f)))
-            .collect();
-        let detail = looks_like_detail(&pairs);
-        let master_kind = if detail { None } else { master_sheet_kind(&name, &headers) };
-        let note = if detail {
-            format!("明细表：{} 行数据", non_empty.saturating_sub(1))
-        } else if let Some(kind) = master_kind {
-            format!("{kind}：{} 行，写入基础资料", non_empty.saturating_sub(1))
-        } else if non_empty == 0 {
-            "空表".to_string()
-        } else {
-            "不像明细表（缺日期/数量/物料列），不会导入".to_string()
-        };
-        sheets.push(SheetReport {
+        let parsed = parse_sheet_from_range(&range, &name, &default_mapping);
+        Some((
+            SheetPlan {
+                name: name.clone(),
+                mapping: default_mapping,
+                mode: None,
+            },
+            parsed,
+        ))
+    } else {
+        None
+    };
+
+    (
+        SheetReport {
             name,
             rows: total,
             non_empty_rows: non_empty,
             detail,
-            master: master_kind.is_some(),
+            master: is_master,
+            pivot: false,
+            pivot_info: None,
             note,
             headers,
             sample,
-        });
+        },
+        None,
+        master_range,
+        flow_item,
+    )
+}
+
+/// 带文件状态校验与多线程加速的工作簿解析：
+/// - 同一文件在「选文件 → 预览 → 切换年份 → 导入」多步调用中直接命中缓存，不重复解压；
+/// - 首次打开大体积多表工作簿（如 123MB XML 的 12 个月宽表）时按 CPU 核心并行解压与解析。
+pub(crate) fn inspect_and_collect_cached(
+    path: &Path,
+) -> Result<(WorkbookReport, Vec<crate::pivot::PivotSheet>), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件: {e}"))?;
+    let size_bytes = meta.len();
+    let modified = meta.modified().ok();
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache_lock.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+                return Ok((cached.report.clone(), cached.pivot_sheets.clone()));
+            }
+        }
     }
-    Ok(WorkbookReport {
+
+    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+    let names = book.sheet_names().to_vec();
+    let mut sheets = Vec::with_capacity(names.len());
+    let mut pivot_parsed = Vec::new();
+    let mut master_sheets = Vec::new();
+    let mut flow_parsed = Vec::new();
+
+    if names.len() >= 4 && size_bytes > 512 * 1024 {
+        drop(book);
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(names.len())
+            .clamp(1, 8);
+        let indexed: Vec<(usize, String)> = names.into_iter().enumerate().collect();
+        let chunk_size = indexed.len().div_ceil(workers);
+        let mut results: Vec<(
+            usize,
+            SheetReport,
+            Option<crate::pivot::PivotSheet>,
+            Option<calamine::Range<Data>>,
+            Option<(SheetPlan, ParsedSheet)>,
+        )> = std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for chunk in indexed.chunks(chunk_size) {
+                handles.push(s.spawn(move || {
+                    let mut local_book = open_workbook_auto(path)
+                        .map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for (idx, name) in chunk {
+                        let range_res = local_book.worksheet_range(name);
+                        let (rep, piv, m_range, flow_item) =
+                            inspect_single_sheet(name.clone(), range_res);
+                        out.push((*idx, rep, piv, m_range, flow_item));
+                    }
+                    Ok::<_, String>(out)
+                }));
+            }
+            let mut merged = Vec::new();
+            for h in handles {
+                let part = h.join().map_err(|_| "并行解析工作表线程异常".to_string())??;
+                merged.extend(part);
+            }
+            Ok::<_, String>(merged)
+        })?;
+        results.sort_by_key(|(idx, _, _, _, _)| *idx);
+        for (_, rep, piv, m_range, flow_item) in results {
+            if let Some(mr) = m_range {
+                master_sheets.push((rep.name.clone(), mr));
+            }
+            if let Some(fi) = flow_item {
+                flow_parsed.push(fi);
+            }
+            sheets.push(rep);
+            if let Some(p) = piv {
+                pivot_parsed.push(p);
+            }
+        }
+    } else {
+        for name in names {
+            let range_res = book.worksheet_range(&name);
+            let (rep, piv, m_range, flow_item) = inspect_single_sheet(name, range_res);
+            if let Some(mr) = m_range {
+                master_sheets.push((rep.name.clone(), mr));
+            }
+            if let Some(fi) = flow_item {
+                flow_parsed.push(fi);
+            }
+            sheets.push(rep);
+            if let Some(p) = piv {
+                pivot_parsed.push(p);
+            }
+        }
+    }
+
+    let report = WorkbookReport {
         path: path.display().to_string(),
         file_name: path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default(),
-        size_bytes: meta.len(),
+        size_bytes,
         sheets,
-    })
+    };
+
+    if let Ok(mut guard) = cache_lock.lock() {
+        *guard = Some(CachedWorkbook {
+            path: path.to_path_buf(),
+            size_bytes,
+            modified,
+            report: report.clone(),
+            pivot_sheets: pivot_parsed.clone(),
+            master_sheets,
+            flow_parsed,
+        });
+    }
+
+    Ok((report, pivot_parsed))
+}
+
+pub(crate) fn get_cached_master_sheets(
+    path: &Path,
+) -> Option<Vec<(String, calamine::Range<Data>)>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let size_bytes = meta.len();
+    let modified = meta.modified().ok();
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache_lock.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+                if !cached.master_sheets.is_empty() {
+                    return Some(cached.master_sheets.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn update_cached_flow_parsed(
+    path: &Path,
+    parsed: Vec<(SheetPlan, ParsedSheet)>,
+) {
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cache_lock.lock() {
+        if let Some(cached) = guard.as_mut() {
+            if cached.path == path {
+                cached.flow_parsed = parsed;
+            }
+        }
+    }
+}
+
+pub(crate) fn get_cached_flow_parsed(
+    path: &Path,
+    plans: &[SheetPlan],
+) -> Option<Vec<ParsedSheet>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let size_bytes = meta.len();
+    let modified = meta.modified().ok();
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache_lock.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+                if cached.flow_parsed.len() == plans.len() && !plans.is_empty() {
+                    let all_match = plans.iter().all(|p| {
+                        cached
+                            .flow_parsed
+                            .iter()
+                            .any(|(cp, _)| cp.name == p.name && cp.mapping == p.mapping)
+                    });
+                    if all_match {
+                        let mut out = Vec::new();
+                        for p in plans {
+                            if let Some((_, parsed)) =
+                                cached.flow_parsed.iter().find(|(cp, _)| cp.name == p.name)
+                            {
+                                out.push(parsed.clone());
+                            }
+                        }
+                        return Some(out);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 一条问题：哪张表、哪一行、什么毛病。
@@ -403,6 +738,8 @@ pub struct DraftRow {
     pub delivery_no: String,
     pub item_code: String,
     pub item_name: String,
+    pub location: String,
+    pub spec: String,
     pub unit: String,
     pub qty: Option<f64>,
     pub price_micros: Option<i64>,
@@ -415,6 +752,7 @@ pub struct DraftRow {
     pub flags: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ParsedSheet {
     pub name: String,
     pub rows: Vec<DraftRow>,
@@ -456,13 +794,39 @@ pub fn parse_sheet<RS: std::io::Read + std::io::Seek>(
     let range = book
         .worksheet_range(sheet)
         .map_err(|e| format!("读取工作表 `{sheet}` 失败: {e:?}"))?;
-    let field_col: Vec<(&str, usize)> = mapping
-        .iter()
-        .filter(|(_, f)| !f.is_empty() && f.as_str() != "unused")
-        .map(|(column, field)| (field.as_str(), *column))
-        .collect();
+    Ok(parse_sheet_from_range(&range, sheet, mapping))
+}
 
-    let mut rows_out: Vec<DraftRow> = Vec::new();
+/// 直接从内存 Range 解析明细表，循环前预先提取列索引，避免每行重复线性搜索
+pub fn parse_sheet_from_range(
+    range: &calamine::Range<Data>,
+    sheet: &str,
+    mapping: &ColumnMap,
+) -> ParsedSheet {
+    let find_col = |f: &str| -> Option<usize> {
+        mapping
+            .iter()
+            .find(|(_, field)| field.as_str() == f)
+            .map(|(c, _)| *c)
+    };
+
+    let col_date = find_col("doc_date");
+    let col_code = find_col("item_code");
+    let col_name = find_col("item_name");
+    let col_spec = find_col("spec");
+    let col_unit = find_col("unit");
+    let col_qty = find_col("qty");
+    let col_price = find_col("price");
+    let col_amount = find_col("amount");
+    let col_remark = find_col("remark");
+    let col_partner = find_col("partner");
+    let col_buyer = find_col("buyer");
+    let col_owner = find_col("owner");
+    let col_receiver = find_col("receiver");
+    let col_doc_no = find_col("doc_no");
+    let col_delivery_no = find_col("delivery_no");
+
+    let mut rows_out: Vec<DraftRow> = Vec::with_capacity(range.height().saturating_sub(1));
     let mut issues: Vec<Issue> = Vec::new();
     let mut skipped = 0usize;
 
@@ -471,27 +835,22 @@ pub fn parse_sheet<RS: std::io::Read + std::io::Seek>(
             continue; // 表头
         }
         let row_no = (index + 1) as u64;
-        let get = |field: &str| -> Option<&Data> {
-            field_col
-                .iter()
-                .find(|(f, _)| *f == field)
-                .and_then(|(_, column)| row.get(*column))
-        };
-        let text = |field: &str| -> String { get(field).map(cell_text).unwrap_or_default() };
+        let get = |c: Option<usize>| -> Option<&Data> { c.and_then(|idx| row.get(idx)) };
+        let text = |c: Option<usize>| -> String { get(c).map(cell_text).unwrap_or_default() };
 
-        let date_raw = text("doc_date");
-        let code = text("item_code");
-        let name = text("item_name");
-        let qty_raw = get("qty").and_then(cell_float);
-        let qty_text = get("qty").map(cell_text).unwrap_or_default();
+        let date_raw = text(col_date);
+        let code = text(col_code);
+        let name = text(col_name);
+        let qty_raw = get(col_qty).and_then(cell_float);
+        let qty_text = get(col_qty).map(cell_text).unwrap_or_default();
 
         // 整行空：跳过但不算问题
         if date_raw.is_empty()
             && code.is_empty()
             && name.is_empty()
             && qty_text.is_empty()
-            && text("amount").is_empty()
-            && text("doc_no").is_empty()
+            && text(col_amount).is_empty()
+            && text(col_doc_no).is_empty()
         {
             skipped += 1;
             continue;
@@ -519,8 +878,8 @@ pub fn parse_sheet<RS: std::io::Read + std::io::Seek>(
         if code.is_empty() {
             flags.push("no_code".into());
         }
-        let price = get("price").and_then(cell_float).map(to_micros);
-        let amount = get("amount").and_then(cell_float).map(to_cents);
+        let price = get(col_price).and_then(cell_float).map(to_micros);
+        let amount = get(col_amount).and_then(cell_float).map(to_cents);
         if price.is_none() {
             flags.push("no_price".into());
         }
@@ -553,29 +912,31 @@ pub fn parse_sheet<RS: std::io::Read + std::io::Seek>(
             row_no,
             kind: String::new(), // 导入时按 infer_kind 统一填
             doc_date: date,
-            doc_no: text("doc_no"),
-            delivery_no: text("delivery_no"),
+            doc_no: text(col_doc_no),
+            delivery_no: text(col_delivery_no),
             item_code: code,
             item_name: name,
-            unit: text("unit"),
+            location: String::new(),
+            spec: text(col_spec),
+            unit: text(col_unit),
             qty: qty_raw,
             price_micros: price,
             amount_cents: amount,
-            remark: text("remark"),
-            partner: text("partner"),
-            buyer: text("buyer"),
-            owner: text("owner"),
-            receiver: text("receiver"),
+            remark: text(col_remark),
+            partner: text(col_partner),
+            buyer: text(col_buyer),
+            owner: text(col_owner),
+            receiver: text(col_receiver),
             flags,
         });
     }
 
-    Ok(ParsedSheet {
+    ParsedSheet {
         name: sheet.to_string(),
         rows: rows_out,
         issues,
         skipped,
-    })
+    }
 }
 
 /// 从解析报告的猜测结果生成默认映射。
@@ -589,7 +950,7 @@ pub fn mapping_from_report(sheet: &SheetReport) -> ColumnMap {
     map
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetPlan {
     pub name: String,
@@ -597,6 +958,22 @@ pub struct SheetPlan {
     /// `replace` = 先删这张表的旧行再导；`append` = 追加
     #[serde(default)]
     pub mode: Option<String>,
+}
+
+/// 月度进销存宽表拆解后的预览对账摘要。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotPreviewSummary {
+    pub months: Vec<u32>,
+    pub total_items: usize,
+    pub located_items: usize,
+    pub opening_rows: usize,
+    pub daily_rows: usize,
+    pub residual_rows: usize,
+    pub adjust_rows: usize,
+    pub correction_rows: usize,
+    pub filler_rows: usize,
+    pub corrections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -609,6 +986,8 @@ pub struct SheetPreview {
     pub flagged: usize,
     pub issues: Vec<Issue>,
     pub sample: Vec<DraftRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pivot_summary: Option<PivotPreviewSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -672,34 +1051,149 @@ fn plan_for(report: &WorkbookReport, requested: Option<Vec<SheetPlan>>) -> Resul
     Ok(plans)
 }
 
+/// 挑选宽表预览样本：兼顾期初结存、日常进出与盘点/校正行，避免前 20 行全是 1 月期初。
+fn sample_pivot_rows(rows: &[DraftRow], limit: usize) -> Vec<DraftRow> {
+    if rows.len() <= limit {
+        return rows.to_vec();
+    }
+    let qc_quota = (limit / 4).clamp(1, 3);
+    let mut out = Vec::with_capacity(limit);
+    for r in rows.iter().filter(|r| r.doc_no.ends_with("QC")).take(qc_quota) {
+        out.push(r.clone());
+    }
+    for r in rows.iter().filter(|r| !r.doc_no.ends_with("QC")) {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(r.clone());
+    }
+    if out.len() < limit {
+        for r in rows.iter().filter(|r| r.doc_no.ends_with("QC")).skip(qc_quota) {
+            if out.len() >= limit {
+                break;
+            }
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// 该工作簿里有几张宽表、各是哪几个月。
+fn pivot_sheets(report: &WorkbookReport) -> Vec<&SheetReport> {
+    report.sheets.iter().filter(|s| s.pivot).collect()
+}
+
 pub fn preview(path: &Path, plans: Option<Vec<SheetPlan>>, sample_limit: usize) -> Result<PreviewResult, String> {
-    let report = inspect(path)?;
-    let plans = plan_for(&report, plans)?;
-    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+    preview_with_year(path, plans, sample_limit, current_year())
+}
+
+pub fn preview_with_year(
+    path: &Path,
+    plans: Option<Vec<SheetPlan>>,
+    sample_limit: usize,
+    year: i32,
+) -> Result<PreviewResult, String> {
+    let (report, pivot_parsed) = inspect_and_collect_cached(path)?;
     let mut total_rows = 0usize;
     let mut total_issues = 0usize;
     let mut flagged_rows = 0usize;
     let mut sheets = Vec::new();
-    for plan in &plans {
-        let parsed = parse_sheet(&mut book, &plan.name, &plan.mapping)?;
-        let kind = if parsed.is_in() { "in" } else { "out" };
-        let flagged = parsed.rows.iter().filter(|r| !r.flags.is_empty()).count();
-        total_rows += parsed.rows.len();
-        total_issues += parsed.issues.len();
-        flagged_rows += flagged;
-        let sample: Vec<DraftRow> = parsed.rows.iter().take(sample_limit).cloned().collect();
-        let mut issues = parsed.issues;
-        issues.truncate(60);
+
+    // 宽表走 pivot：直接复用缓存/首次解析好的月度表，不二次解压 XML。
+    if !pivot_parsed.is_empty() {
+        let built = crate::pivot::build_with_hint(&pivot_parsed, year, Some(&report.file_name));
+        total_rows += built.rows.len();
+        total_issues += built.issues.len();
+        flagged_rows += built.correction_rows;
+        let issues: Vec<Issue> = built
+            .issues
+            .iter()
+            .take(60)
+            .map(|message| Issue {
+                sheet: "月度进销存".to_string(),
+                row_no: 0,
+                message: message.clone(),
+            })
+            .collect();
+        let located_items = built
+            .items
+            .iter()
+            .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+            .count();
         sheets.push(SheetPreview {
-            name: plan.name.clone(),
-            kind: kind.to_string(),
-            rows: parsed.rows.len(),
-            skipped: parsed.skipped,
-            flagged,
+            name: format!("月度进销存（{} 个月）", built.months.len()),
+            kind: "pivot".to_string(),
+            rows: built.rows.len(),
+            skipped: built.filler_rows,
+            flagged: built.correction_rows,
             issues,
-            sample,
+            sample: sample_pivot_rows(&built.rows, sample_limit),
+            pivot_summary: Some(PivotPreviewSummary {
+                months: built.months.clone(),
+                total_items: built.items.len(),
+                located_items,
+                opening_rows: built.opening_rows,
+                daily_rows: built.daily_rows,
+                residual_rows: built.residual_rows,
+                adjust_rows: built.adjust_rows,
+                correction_rows: built.correction_rows,
+                filler_rows: built.filler_rows,
+                corrections: built.corrections.clone(),
+            }),
         });
     }
+
+    // 同一本工作簿里如果还有常规明细表，照旧走列映射。
+    let flow_report = WorkbookReport {
+        sheets: report.sheets.iter().filter(|s| s.detail).cloned().collect(),
+        ..report.clone()
+    };
+    if !flow_report.sheets.is_empty() {
+        let flow_plans = plan_for(&flow_report, plans)?;
+        let parsed_sheets = if let Some(cached) = get_cached_flow_parsed(path, &flow_plans) {
+            cached
+        } else {
+            let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+            let mut list = Vec::new();
+            let mut cached_to_save = Vec::new();
+            for plan in &flow_plans {
+                let parsed = parse_sheet(&mut book, &plan.name, &plan.mapping)?;
+                cached_to_save.push((plan.clone(), parsed.clone()));
+                list.push(parsed);
+            }
+            update_cached_flow_parsed(path, cached_to_save);
+            list
+        };
+
+        for (plan, parsed) in flow_plans.iter().zip(parsed_sheets) {
+            let kind = if parsed.is_in() { "in" } else { "out" };
+            let flagged = parsed.rows.iter().filter(|r| !r.flags.is_empty()).count();
+            total_rows += parsed.rows.len();
+            total_issues += parsed.issues.len();
+            flagged_rows += flagged;
+            let sample: Vec<DraftRow> = parsed.rows.iter().take(sample_limit).cloned().collect();
+            let mut issues = parsed.issues;
+            issues.truncate(60);
+            sheets.push(SheetPreview {
+                name: plan.name.clone(),
+                kind: kind.to_string(),
+                rows: parsed.rows.len(),
+                skipped: parsed.skipped,
+                flagged,
+                issues,
+                sample,
+                pivot_summary: None,
+            });
+        }
+    }
+
+    if sheets.is_empty() {
+        return Err(
+            "这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。"
+                .to_string(),
+        );
+    }
+
     Ok(PreviewResult {
         sheets,
         total_rows,
@@ -764,16 +1258,57 @@ pub fn write_rows(
         )
         .map_err(DbError::from)?;
         let import_id = tx.last_insert_rowid();
+
+        // 预查已有物料的规格与单位（避免写完库后再全表扫描 UPDATE ledger 并做标量子查询）
+        let mut item_meta_cache: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+            std::collections::HashMap::new();
+        let need_meta_lookup = rows.iter().any(|r| {
+            !r.item_code.trim().is_empty() && (r.unit.trim().is_empty() || r.spec.trim().is_empty())
+        });
+        if need_meta_lookup {
+            if let Ok(mut stmt) = tx.prepare(
+                "SELECT item_code, NULLIF(TRIM(unit), ''), NULLIF(TRIM(spec), '') FROM items
+                 WHERE (unit IS NOT NULL AND TRIM(unit) != '') OR (spec IS NOT NULL AND TRIM(spec) != '')",
+            ) {
+                if let Ok(rows_iter) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, (r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))
+                }) {
+                    for entry in rows_iter.flatten() {
+                        item_meta_cache.insert(entry.0, entry.1);
+                    }
+                }
+            }
+        }
+
+        // 批量插入台账行
         {
             let mut stmt = tx
                 .prepare(
                     "INSERT INTO ledger (import_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
-                        item_code, item_name, unit, qty, price_micros, amount_cents, remark,
+                        item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
                         partner, buyer, owner, receiver, flags)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 )
                 .map_err(DbError::from)?;
+
             for row in rows {
+                let (spec, unit) = match item_meta_cache.get(&row.item_code) {
+                    Some((cached_unit, cached_spec)) => {
+                        let final_spec = if row.spec.trim().is_empty() {
+                            cached_spec.as_deref().unwrap_or(row.spec.as_str())
+                        } else {
+                            row.spec.as_str()
+                        };
+                        let final_unit = if row.unit.trim().is_empty() {
+                            cached_unit.as_deref().unwrap_or(row.unit.as_str())
+                        } else {
+                            row.unit.as_str()
+                        };
+                        (final_spec, final_unit)
+                    }
+                    None => (row.spec.as_str(), row.unit.as_str()),
+                };
+
                 stmt.execute(rusqlite::params![
                     import_id,
                     row.sheet,
@@ -784,7 +1319,8 @@ pub fn write_rows(
                     null_if_empty(&row.delivery_no),
                     null_if_empty(&row.item_code),
                     null_if_empty(&row.item_name),
-                    null_if_empty(&row.unit),
+                    null_if_empty(spec),
+                    null_if_empty(unit),
                     row.qty,
                     row.price_micros,
                     row.amount_cents,
@@ -798,6 +1334,33 @@ pub fn write_rows(
                 .map_err(DbError::from)?;
             }
         }
+
+        // 导入的文字字段在内存中聚合频次后批量写入字典，避免数万次单条 SQL 往返
+        let mut dict_counts: std::collections::HashMap<(&'static str, String), i64> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let unit = if row.unit.trim().is_empty() {
+                item_meta_cache
+                    .get(&row.item_code)
+                    .and_then(|(u, _)| u.as_deref())
+                    .unwrap_or("")
+            } else {
+                row.unit.trim()
+            };
+            if !unit.is_empty() {
+                *dict_counts.entry(("unit", unit.to_string())).or_insert(0) += 1;
+            }
+            let owner = row.owner.trim();
+            if !owner.is_empty() {
+                *dict_counts.entry(("owner", owner.to_string())).or_insert(0) += 1;
+            }
+            let buyer = row.buyer.trim();
+            if !buyer.is_empty() {
+                *dict_counts.entry(("buyer", buyer.to_string())).or_insert(0) += 1;
+            }
+        }
+        crate::dict::touch_many(&tx, dict_counts.iter().map(|((k, v), c)| (*k, v.as_str(), *c)));
+
         tx.commit().map_err(DbError::from)?;
         Ok((import_id, replaced))
     })
@@ -810,42 +1373,119 @@ pub fn run(
     plans: Option<Vec<SheetPlan>>,
     replace_all: bool,
 ) -> Result<ImportOutcome, String> {
-    let report = inspect(path)?;
-    let plans = plan_for(&report, plans)?;
-    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+    run_with_year(db, path, plans, replace_all, current_year())
+}
 
-    let mut parsed_sheets = Vec::new();
-    for plan in &plans {
-        parsed_sheets.push(parse_sheet(&mut book, &plan.name, &plan.mapping)?);
-    }
+/// 当前年份：宽表里没有年份，默认按今年算。
+pub fn current_year() -> i32 {
+    chrono::Local::now().year()
+}
 
+/// 带年份的完整导入。`year` 只对月度进销存宽表有意义。
+pub fn run_with_year(
+    db: &Db,
+    path: &Path,
+    plans: Option<Vec<SheetPlan>>,
+    replace_all: bool,
+    year: i32,
+) -> Result<ImportOutcome, String> {
+    let (report, pivot_parsed) = inspect_and_collect_cached(path)?;
     let mut all_rows: Vec<DraftRow> = Vec::new();
     let mut all_issues: Vec<Issue> = Vec::new();
     let mut summaries: Vec<SheetSummary> = Vec::new();
     let mut replace_sheets: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+    let mut pivot_master: Option<crate::pivot::PivotBuild> = None;
 
-    for (plan, parsed) in plans.iter().zip(parsed_sheets.iter()) {
-        let kind = if parsed.is_in() { "in" } else { "out" };
-        for row in &parsed.rows {
-            let mut row = row.clone();
-            row.kind = kind.to_string();
-            all_rows.push(row);
+    // ---- 月度进销存宽表 ----
+    if !pivot_parsed.is_empty() {
+        let built = crate::pivot::build_with_hint(&pivot_parsed, year, Some(&report.file_name));
+        if built.rows.is_empty() {
+            return Err(format!(
+                "月度进销存宽表里没有可导入的流水：表名要写成「1月」~「12月」，源表还要有逐日入库/出库格子。"
+            ));
         }
-        all_issues.extend(parsed.issues.iter().take(200).cloned());
+        all_issues.extend(built.issues.iter().take(200).map(|m| Issue {
+            sheet: "月度进销存".to_string(),
+            row_no: 0,
+            message: m.clone(),
+        }));
         summaries.push(SheetSummary {
-            name: parsed.name.clone(),
-            kind: kind.to_string(),
-            rows: parsed.rows.len(),
-            skipped: parsed.skipped,
+            name: format!("月度进销存 {} 个月", built.months.len()),
+            kind: "pivot".to_string(),
+            rows: built.rows.len(),
+            skipped: built.filler_rows,
         });
-        let mode = plan.mode.as_deref().unwrap_or("append");
-        if replace_all || mode == "replace" {
-            replace_sheets.push(parsed.name.clone());
+        skipped += built.filler_rows;
+        if replace_all {
+            // 整本宽表按「表名」逐页覆盖；先记下这些表名，写库时一起清
+            for sheet in pivot_sheets(&report) {
+                replace_sheets.push(sheet.name.clone());
+            }
+        }
+        all_rows.extend(built.rows.iter().cloned());
+        pivot_master = Some(built);
+    }
+
+    // ---- 常规出入库明细 ----
+    let flow_report = WorkbookReport {
+        sheets: report.sheets.iter().filter(|s| s.detail).cloned().collect(),
+        ..report.clone()
+    };
+    if !flow_report.sheets.is_empty() {
+        let flow_plans = plan_for(&flow_report, plans)?;
+        let parsed_sheets = if let Some(cached) = get_cached_flow_parsed(path, &flow_plans) {
+            cached
+        } else {
+            let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+            let mut list = Vec::new();
+            let mut to_save = Vec::new();
+            for plan in &flow_plans {
+                let parsed = parse_sheet(&mut book, &plan.name, &plan.mapping)?;
+                to_save.push((plan.clone(), parsed.clone()));
+                list.push(parsed);
+            }
+            update_cached_flow_parsed(path, to_save);
+            list
+        };
+
+        for parsed in parsed_sheets {
+            let kind = if parsed.is_in() { "in" } else { "out" };
+            for row in &parsed.rows {
+                let mut row = row.clone();
+                row.kind = kind.to_string();
+                all_rows.push(row);
+            }
+            all_issues.extend(parsed.issues.iter().take(200).cloned());
+            summaries.push(SheetSummary {
+                name: parsed.name.clone(),
+                kind: kind.to_string(),
+                rows: parsed.rows.len(),
+                skipped: parsed.skipped,
+            });
+            skipped += parsed.skipped;
+            let mode = flow_plans
+                .iter()
+                .find(|p| p.name == parsed.name)
+                .and_then(|p| p.mode.as_deref())
+                .unwrap_or("append");
+            if replace_all || mode == "replace" {
+                replace_sheets.push(parsed.name.clone());
+            }
         }
     }
 
-    let skipped: usize = parsed_sheets.iter().map(|p| p.skipped).sum();
-    let flagged = all_rows.iter().filter(|r| !r.flags.is_empty()).count();
+    if all_rows.is_empty() {
+        return Err(
+            "这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。"
+                .to_string(),
+        );
+    }
+
+    let mut flagged = all_rows.iter().filter(|r| !r.flags.is_empty()).count();
+    if let Some(built) = &pivot_master {
+        flagged += built.correction_rows;
+    }
     let hash = file_hash(path)?;
     let duplicate_of = find_import_by_hash(db, &hash)?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -866,6 +1506,45 @@ pub fn run(
         note,
     };
     let (import_id, replaced) = write_rows(db, &header, &all_rows, &replace_sheets)?;
+
+    // 宽表顺带把物料（含库位/规格/单位/类型）写进基础资料。
+    // 台账已经写成功，这一步失败只提示，不回滚。
+    let mut master_outcome = None;
+    let mut master_error = None;
+    if let Some(built) = &pivot_master {
+        if !built.items.is_empty() {
+            match db.with(|c| crate::pivot::upsert_items(c, &built.items).map_err(DbError)) {
+                Ok((added, updated)) => {
+                    log::info!("进销存宽表写入基础资料：物料 +{added} 更新 {updated}");
+                    let located = built
+                        .items
+                        .iter()
+                        .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                        .count();
+                    master_outcome = Some(crate::master::MasterImportOutcome {
+                        items_added: added,
+                        items_updated: updated,
+                        suppliers_added: 0,
+                        suppliers_skipped: 0,
+                        sheets_found: vec![format!(
+                            "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
+                            built.months.len(),
+                            built.items.len(),
+                            located
+                        )],
+                        message: format!(
+                            "物料 +{added} 更新 {updated}（同步库位 {located} 个）"
+                        ),
+                    });
+                }
+                Err(err) => {
+                    log::warn!("进销存宽表写基础资料失败: {err}");
+                    master_error = Some(err);
+                }
+            }
+        }
+    }
+
     Ok(ImportOutcome {
         import_id,
         file_name: report.file_name,
@@ -876,9 +1555,8 @@ pub fn run(
         issues: all_issues,
         sheets: summaries,
         duplicate_of,
-        // 基础资料由命令层单独调用 master 模块补进来
-        master: None,
-        master_error: None,
+        master: master_outcome,
+        master_error,
     })
 }
 
@@ -962,6 +1640,60 @@ mod tests {
                 header: header.to_string(),
             })
             .collect()
+    }
+
+    /// 月度进销存宽表也能被 `inspect` 认出来，且不会被当成明细表或主数据表。
+    #[test]
+    fn pivot_sheets_are_detected_as_pivot() {
+        // 造一张最小的月度宽表：表头在第 2 行，31 个日列
+        let mut header = vec![
+            "序号".to_string(),
+            "物料编码".to_string(),
+            "名称".to_string(),
+            "库位".to_string(),
+            "上月结存".to_string(),
+            "本月入库".to_string(),
+            "本月出库".to_string(),
+            "现结存".to_string(),
+        ];
+        for day in 1..=31 {
+            header.push(format!("{day}日"));
+            header.push(String::new());
+        }
+        let rows = vec![
+            vec!["".to_string(), "1 月 库  存  进  销  存  报  表".to_string()],
+            header,
+            vec!["".to_string(); 70],
+            {
+                let mut row = vec![
+                    "1".to_string(),
+                    "WG00002".to_string(),
+                    "电焊面罩".to_string(),
+                    "D-01-02-4F".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                ];
+                for day in 1..=31 {
+                    row.push(if day == 3 { "5".to_string() } else { String::new() });
+                    row.push(if day == 4 { "8".to_string() } else { String::new() });
+                }
+                row
+            },
+        ];
+        let head: Vec<Vec<String>> = rows.iter().take(6).cloned().collect();
+        let layout = crate::pivot::detect(&head).expect("应认出宽表");
+        assert_eq!(layout.day_count(), 31);
+        assert_eq!(layout.header_row, 1);
+        assert_eq!(layout.loc_col, Some(3));
+
+        // 宽表不带「日期」列，所以不会被误认成常规明细表
+        let pairs: Vec<(String, String)> = guesses(&["序号", "物料编码", "名称", "现结存"])
+            .iter()
+            .filter_map(|h| h.field.clone().map(|f| (h.header.clone(), f)))
+            .collect();
+        assert!(!looks_like_detail(&pairs));
     }
 
     #[test]

@@ -306,6 +306,22 @@ pub struct LedgerPatch {
     pub owner: Option<String>,
 }
 
+fn reconcile_vouchers(conn: &Connection) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM vouchers WHERE id NOT IN (SELECT DISTINCT voucher_id FROM ledger WHERE voucher_id IS NOT NULL)",
+        [],
+    )
+    .map_err(DbError::from)?;
+    conn.execute(
+        "UPDATE vouchers SET
+            row_count = (SELECT COUNT(*) FROM ledger l WHERE l.voucher_id = vouchers.id),
+            amount_cents = COALESCE((SELECT SUM(l.amount_cents) FROM ledger l WHERE l.voucher_id = vouchers.id), 0)",
+        [],
+    )
+    .map_err(DbError::from)?;
+    Ok(())
+}
+
 pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
     conn.execute(
         "UPDATE ledger SET
@@ -335,12 +351,14 @@ pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
         ],
     )
     .map_err(DbError::from)?;
+    reconcile_vouchers(conn)?;
     Ok(())
 }
 
 pub fn delete(conn: &Connection, id: i64) -> DbResult<()> {
     conn.execute("DELETE FROM ledger WHERE id = ?1", [id])
         .map_err(DbError::from)?;
+    reconcile_vouchers(conn)?;
     Ok(())
 }
 
@@ -408,12 +426,8 @@ pub fn bulk_delete(conn: &Connection, ids: &[i64]) -> DbResult<usize> {
             removed += stmt.execute([id]).map_err(DbError::from)?;
         }
     }
-    // 清掉明细已经空了的单据头
-    tx.execute(
-        "DELETE FROM vouchers WHERE id NOT IN (SELECT DISTINCT voucher_id FROM ledger WHERE voucher_id IS NOT NULL)",
-        [],
-    )
-    .map_err(DbError::from)?;
+    // 清掉明细已经空了的单据头，并重算剩余单据的行数与合计金额
+    reconcile_vouchers(&tx)?;
     tx.commit().map_err(DbError::from)?;
     Ok(removed)
 }

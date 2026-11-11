@@ -4,14 +4,16 @@ import {
   RiBookOpenLine,
   RiFileAddLine,
   RiFileList3Line,
+  RiInbox2Line,
   RiServerLine,
+  RiSettings3Line,
   RiUploadCloud2Line,
 } from "@remixicon/react";
 import { cx } from "@/utils/cx";
 import { ThemeToggle } from "./ThemeToggle";
 import { FontScaleToggle } from "./FontScaleToggle";
 
-export type PageKey = "ledger" | "voucher" | "master" | "summary" | "import" | "remote";
+export type PageKey = "ledger" | "voucher" | "master" | "summary" | "stock" | "import" | "remote" | "settings";
 
 interface NavItem {
   key: PageKey;
@@ -26,8 +28,10 @@ const ITEMS: NavItem[] = [
   { key: "ledger", label: "台账", icon: RiFileList3Line, hint: "入库与出库明细" },
   { key: "master", label: "基础资料", icon: RiBookOpenLine, hint: "物料与供应商" },
   { key: "summary", label: "汇总", icon: RiBarChart2Line, hint: "按月与按归属" },
+  { key: "stock", label: "库存", icon: RiInbox2Line, hint: "结存与数据核对" },
   { key: "import", label: "导入", icon: RiUploadCloud2Line, hint: "从 Excel 读明细" },
   { key: "remote", label: "只读站", icon: RiServerLine, hint: "局域网的同事看账" },
+  { key: "settings", label: "设置", icon: RiSettings3Line, hint: "打印与数据管理" },
 ];
 
 interface AppShellProps {

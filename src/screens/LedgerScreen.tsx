@@ -35,7 +35,19 @@ import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/AppShell";
 import { RowDetail } from "../components/RowDetail";
 
-const PAGE_SIZE = 100;
+// 每页行数可选：8 千行时 100 行/页要翻 77 页，看着累。
+const PAGE_SIZES = [50, 100, 200, 500] as const;
+const PAGE_SIZE_KEY = "ledger.pageSize";
+
+function storedPageSize(): number {
+  try {
+    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
+    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
+  } catch {
+    // 存不下就用默认
+  }
+  return 100;
+}
 // 行高随字号走：表格行是 h-9（2.25rem），字号调大后行也变高，
 // 虚拟滚动要按真实像素算，否则切片位置会偏。
 const ROW_HEIGHT_REM = 2.25;
@@ -88,6 +100,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   const [range, setRange] = useState("all");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<LedgerPage | null>(null);
+  const [pageSize, setPageSize] = useState(() => storedPageSize());
   const [facets, setFacets] = useState<Facets | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -121,7 +134,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     const current = ++requestId.current;
     setLoading(true);
     try {
-      const result = await fetchPage(filter, page, PAGE_SIZE);
+      const result = await fetchPage(filter, page, pageSize);
       if (current === requestId.current) {
         setData(result);
         // 换页/换筛选后旧的选择已经没有意义
@@ -132,7 +145,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     } finally {
       if (current === requestId.current) setLoading(false);
     }
-  }, [filter, page]);
+  }, [filter, page, pageSize]);
 
   useEffect(() => {
     load();
@@ -140,7 +153,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
 
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   // 窗口切片只在逐行模式用；合并状态下直接整页渲染
   // 字号变了行高也变，虚拟滚动按新行高重算
   const [rowHeight, setRowHeight] = useState(() => rowHeightPx());
@@ -441,11 +454,11 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
           <div ref={scrollRef} className="ledger-table h-full overflow-auto rounded-xl border border-separator-border bg-background-primary-default">
             <Table
               aria-label="出入库明细"
-              className="min-w-[87rem] table-fixed text-[0.8125rem]"
+              className="min-w-[92rem] table-fixed text-[0.8125rem]"
               containerClassName="min-w-0 overflow-visible"
             >
               <TableHeader>
-                <TableColumn id="select" className="w-[2.5rem]" aria-label="选择">
+                <TableColumn id="select" className="w-[2.5rem] whitespace-nowrap" aria-label="选择">
                   <input
                     type="checkbox"
                     aria-label="全选本页"
@@ -459,24 +472,24 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                     className="size-3.5 cursor-pointer accent-accent-500"
                   />
                 </TableColumn>
-                <TableColumn id="kind" className="w-[4rem]">类型</TableColumn>
-                <TableColumn id="date" className="w-[6.5rem]">
+                <TableColumn id="kind" className="w-[4rem] whitespace-nowrap">类型</TableColumn>
+                <TableColumn id="date" className="w-[6.5rem] whitespace-nowrap">
                   <SortHeader label="日期" active={filter.sort === 'date'} desc={Boolean(filter.desc)} onClick={() => toggleSort('date')} />
                 </TableColumn>
-                <TableColumn id="doc" className="w-[8rem]">单据编号</TableColumn>
-                <TableColumn id="code" className="w-[8.25rem]">物料编码</TableColumn>
-                <TableColumn id="name" isRowHeader className="w-[16.25rem]">物料名称</TableColumn>
-                <TableColumn id="unit" className="w-[3.5rem]">单位</TableColumn>
-                <TableColumn id="qty" className="w-[5.25rem] text-end">
+                <TableColumn id="doc" className="w-[8rem] whitespace-nowrap">单据编号</TableColumn>
+                <TableColumn id="code" className="w-[8.5rem] whitespace-nowrap">物料编码</TableColumn>
+                <TableColumn id="name" isRowHeader className="w-[16.5rem] whitespace-nowrap">物料名称</TableColumn>
+                <TableColumn id="unit" className="w-[4.25rem] whitespace-nowrap">单位</TableColumn>
+                <TableColumn id="qty" className="w-[5.75rem] text-end whitespace-nowrap">
                   <SortHeader label="数量" active={filter.sort === 'qty'} desc={Boolean(filter.desc)} onClick={() => toggleSort('qty')} />
                 </TableColumn>
-                <TableColumn id="price" className="w-[5.5rem] text-end">单价</TableColumn>
-                <TableColumn id="amount" className="w-[6.5rem] text-end">
+                <TableColumn id="price" className="w-[5.75rem] text-end whitespace-nowrap">单价</TableColumn>
+                <TableColumn id="amount" className="w-[7.25rem] text-end whitespace-nowrap">
                   <SortHeader label="合计" active={filter.sort === 'amount'} desc={Boolean(filter.desc)} onClick={() => toggleSort('amount')} />
                 </TableColumn>
-                <TableColumn id="partner" className="w-[7.5rem]">供应商</TableColumn>
-                <TableColumn id="owner" className="w-[7.5rem]">归属</TableColumn>
-                <TableColumn id="flags" className="w-[5.75rem]">提醒</TableColumn>
+                <TableColumn id="partner" className="w-[8.5rem] whitespace-nowrap">供应商</TableColumn>
+                <TableColumn id="owner" className="w-[7.5rem] whitespace-nowrap">归属</TableColumn>
+                <TableColumn id="flags" className="w-[6.25rem] whitespace-nowrap">提醒</TableColumn>
               </TableHeader>
               <TableBody
                 renderEmptyState={() => (
@@ -598,23 +611,51 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
               </>
             ) : (
               <>
-                第 {count((page - 1) * PAGE_SIZE + 1)}–{count(Math.min(page * PAGE_SIZE, total))} 行，共 {count(total)} 行
+                第 {count((page - 1) * pageSize + 1)}–{count(Math.min(page * pageSize, total))} 行，共 {count(total)} 行
                 <span className="mx-2 text-text-tertiary/40">·</span>
                 单击一行看完整字段
               </>
             )}
           </p>
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            onChange={(next) => {
-              setPage(next);
-              scrollRef.current?.scrollTo({ top: 0 });
-            }}
-            previousLabel="上一页"
-            nextLabel="下一页"
-            aria-label="台账分页"
-          />
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+              每页
+              <select
+                aria-label="每页行数"
+                value={pageSize}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setPageSize(next);
+                  try {
+                    window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
+                  } catch {
+                    // 存不下不影响本页
+                  }
+                  setPage(1);
+                  scrollRef.current?.scrollTo({ top: 0 });
+                }}
+                className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+              >
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              行
+            </label>
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              onChange={(next) => {
+                setPage(next);
+                scrollRef.current?.scrollTo({ top: 0 });
+              }}
+              previousLabel="上一页"
+              nextLabel="下一页"
+              aria-label="台账分页"
+            />
+          </div>
         </div>
       </div>
 

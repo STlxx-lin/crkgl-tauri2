@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RiAddLine,
+  RiArrowDownLine,
   RiDeleteBinLine,
   RiFileAddLine,
   RiFileList3Line,
@@ -17,6 +18,7 @@ import {
   getVoucher,
   isTauri,
   fetchDocLines,
+  listDict,
   listVouchers,
   nextDocNo,
   searchDocs,
@@ -33,7 +35,14 @@ import { PageHeader } from "../components/AppShell";
 import { ItemPicker } from "../components/ItemPicker";
 import { ComboPicker } from "../components/ComboPicker";
 import { PrintVoucher } from "../components/PrintVoucher";
-import { saveBuyer, storedBuyer, onBuyerChange } from "../lib/voucherPrefs";
+import {
+  onBuyerChange,
+  onPrintAfterSaveChange,
+  saveBuyer,
+  savePrintAfterSave,
+  storedBuyer,
+  storedPrintAfterSave,
+} from "../lib/voucherPrefs";
 
 type Mode = { kind: Kind; id: number | null };
 
@@ -116,7 +125,15 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   const [head, setHead] = useState<HeadDraft>(() => blankHead("in"));
   const [lines, setLines] = useState<DraftLine[]>(() => [blankLine()]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  // 字典候选：单位按行选，出库部门与采购人在表头选
+  const [unitOptions, setUnitOptions] = useState<string[]>([]);
+  const [ownerOptions, setOwnerOptions] = useState<string[]>([]);
+  const [buyerOptions, setBuyerOptions] = useState<string[]>([]);
   const [history, setHistory] = useState<VoucherSummary[]>([]);
+  // 列表分页：默认 50，点「加载更多」一次多取 50
+  const [historyLimit, setHistoryLimit] = useState(50);
+  // 保存后是否自动打印（打印完毕后原单继续留在表单里，方便接着编号）
+  const [printAfterSave, setPrintAfterSave] = useState(() => storedPrintAfterSave());
   // 本机开单列表：按编号/供应商筛 + 入库出库筛选
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyKind, setHistoryKind] = useState<"all" | "in" | "out">("all");
@@ -135,15 +152,17 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   // 正在查看详情的打印稿
   const [printingView, setPrintingView] = useState<Voucher | null>(null);
   const dirty = useRef(false);
+  // 快捷键里要调用 submit，但它定义在后面：用 ref 存最新引用，监听只挂一次
+  const submitRef = useRef<() => void>(() => {});
 
   const loadHistory = useCallback(async () => {
     if (!isTauri) return;
     try {
-      setHistory(await listVouchers(null, 50));
+      setHistory(await listVouchers(null, historyLimit));
     } catch (err) {
       toast("单据列表读取失败", { description: String(err), status: "error" });
     }
-  }, []);
+  }, [historyLimit]);
 
   const loadSuppliers = useCallback(async () => {
     if (!isTauri) return;
@@ -153,6 +172,23 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
     } catch {
       // 供应商只是便利功能，读不到不影响手填
     }
+  }, []);
+
+  /** 字典候选：单位、出库部门、采购人。读不到就退回手输，不挡开单。 */
+  const loadDicts = useCallback(async () => {
+    if (!isTauri) return;
+    const read = async (kind: "unit" | "owner" | "buyer") => {
+      try {
+        const list = await listDict(kind, undefined, true);
+        return list.map((entry) => entry.value);
+      } catch {
+        return [] as string[];
+      }
+    };
+    const [units, owners, buyers] = await Promise.all([read("unit"), read("owner"), read("buyer")]);
+    setUnitOptions(units);
+    setOwnerOptions(owners);
+    setBuyerOptions(buyers);
   }, []);
 
   const freshDocNo = useCallback(async (kind: Kind, docDate: string) => {
@@ -166,8 +202,53 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
 
   useEffect(() => {
     loadSuppliers();
+    loadDicts();
     loadHistory();
-  }, [loadSuppliers, loadHistory]);
+  }, [loadSuppliers, loadDicts, loadHistory]);
+
+  // 设置里改了「保存后打印」，编辑器跟着换
+  useEffect(() => onPrintAfterSaveChange(setPrintAfterSave), []);
+
+  // 每次渲染后把最新的 submit 挂到 ref 上，快捷键永远调到当前闭包
+  useEffect(() => {
+    submitRef.current = () => {
+      void submit();
+    };
+  });
+
+  /**
+   * 录入快捷键：
+   * · Ctrl/⌘+S 保存（和点「保存单据」等价）
+   * · 在明细输入框里按回车，跳到本行下一个输入框；最后一个跳到下一行
+   * 都在录入区生效，列表里的输入框不受影响。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const meta = event.ctrlKey || event.metaKey;
+      if (meta && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        submitRef.current();
+        return;
+      }
+      if (event.key !== "Enter" || meta || event.shiftKey || event.altKey) return;
+
+      const target = event.target as HTMLElement | null;
+      if (!target || target.tagName !== "INPUT") return;
+      if (!target.closest("tbody")) return;
+
+      // 同一表格内的可输入框按 DOM 顺序往后找
+      const table = target.closest("table");
+      if (!table) return;
+      const inputs = Array.from(table.querySelectorAll<HTMLInputElement>("tbody input:not([disabled])"));
+      const index = inputs.indexOf(target as HTMLInputElement);
+      if (index < 0 || index === inputs.length - 1) return;
+      event.preventDefault();
+      inputs[index + 1]?.focus();
+      inputs[index + 1]?.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // 保存过新采购人后，正在编辑的空白新单跟着换默认值（已填的不动）
   useEffect(() => onBuyerChange((buyer) => {
@@ -369,7 +450,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
       kind: mode.kind,
       docNo: head.docNo.trim() || null,
       docDate: head.docDate,
-      partner: head.partner.trim() || null,
+      partner: mode.kind === "in" ? head.partner.trim() || null : null,
       buyer: mode.kind === "in" ? head.buyer.trim() || null : null,
       owner: mode.kind === "out" ? head.owner.trim() || null : null,
       receiver: mode.kind === "out" ? head.receiver.trim() || null : null,
@@ -398,7 +479,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
 
       // 保存成功立刻出稿：拿去签字归档是紧接着的下一步。
       // 新单刚建好，回读一次拿到带 id 的明细，打印内容和库里一致。
-      if (savedId !== null) {
+      if (savedId !== null && printAfterSave) {
         try {
           const fresh = await getVoucher(savedId);
           if (fresh) setPrintingView(fresh);
@@ -540,7 +621,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
               </h2>
               {mode.id !== null ? (
                 <p className="mt-0.5 font-mono text-caption-1-regular tabular-nums text-text-tertiary">
-                  编辑 #${mode.id}
+                  编辑 #{mode.id}
                 </p>
               ) : null}
             </div>
@@ -551,10 +632,10 @@ const runDocSearch = useCallback(async (keyword: string) => {
               {isIn ? (
                 <span className="self-center text-body-2-medium text-text-secondary">供应商名称：</span>
               ) : (
-                <span className="self-center text-body-2-medium text-text-secondary">归属：</span>
+                <span className="self-center text-body-2-medium text-text-secondary">出库部门：</span>
               )}
               <ComboPicker
-                ariaLabel={isIn ? "供应商" : "归属"}
+                ariaLabel={isIn ? "供应商" : "出库部门"}
                 value={isIn ? head.partner : head.owner}
                 onChange={(v) =>
                   setHead((prev) => (isIn ? { ...prev, partner: v } : { ...prev, owner: v }))
@@ -562,10 +643,11 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 options={
                   isIn
                     ? suppliers.map((sup) => ({ value: sup.name, hint: sup.hits > 0 ? `${sup.hits} 行` : undefined }))
-                    : []
+                    : ownerOptions.map((name) => ({ value: name }))
                 }
                 allowCustom
-                placeholder={isIn ? "选或输入供应商" : "选或输入归属"}
+                placeholder={isIn ? "选或输入供应商" : "选或输入部门"}
+                emptyText={isIn ? "没有匹配项" : "没有这个部门，直接输入即可"}
               />
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">{isIn ? "入库时间：" : "出库时间："}</span>
@@ -599,7 +681,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                     {isIn ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
                     <th className="w-32 whitespace-nowrap px-2 py-2 text-start font-medium">物料编码</th>
                     <th className="w-[20rem] min-w-[20rem] whitespace-nowrap px-2 py-2 text-start font-medium">物料名称</th>
-                    <th className="w-14 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
+                    <th className="w-20 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
                     <th className="w-16 px-2 py-2 text-end font-medium">数量</th>
                     {isIn ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
                     {isIn ? <th className="w-28 px-2 py-2 text-end font-medium">合计</th> : null}
@@ -644,15 +726,19 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             value={line.itemName}
                             onChange={(e) => setLine(line.key, { itemName: e.target.value })}
                             placeholder="物料名称"
-                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
                         <td className="px-1 py-1">
-                          <input
+                          <ComboPicker
+                            ariaLabel={`第 ${index + 1} 行单位`}
                             value={line.unit}
-                            onChange={(e) => setLine(line.key, { unit: e.target.value })}
+                            onChange={(v) => setLine(line.key, { unit: v })}
+                            options={unitOptions.map((u) => ({ value: u }))}
+                            allowCustom
+                            compact
                             placeholder="单位"
-                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            emptyText="没有这个单位，直接回车新增"
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -732,11 +818,15 @@ const runDocSearch = useCallback(async (keyword: string) => {
             <div className="grid grid-cols-1 gap-3 border-t border-separator-border px-5 py-3 md:grid-cols-3">
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">采购人：</span>
-                <input
-                  aria-label="采购人"
+                <ComboPicker
+                  ariaLabel="采购人"
                   value={head.buyer}
-                  onChange={(e) => setHead((prev) => ({ ...prev, buyer: e.target.value }))}
-                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                  onChange={(v) => setHead((prev) => ({ ...prev, buyer: v }))}
+                  options={buyerOptions.map((name) => ({ value: name }))}
+                  allowCustom
+                  placeholder="选或输入"
+                  emptyText="没这个人，直接输入即可"
+                  className="min-w-0 flex-1"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -746,7 +836,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   value={head.storekeeper}
                   onChange={(e) => setHead((prev) => ({ ...prev, storekeeper: e.target.value }))}
                   placeholder="签字"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -779,6 +869,22 @@ const runDocSearch = useCallback(async (keyword: string) => {
               </span>
               <div className="ms-auto flex items-center gap-2">
                 {busy ? <Spinner size="xs" aria-label="保存中" /> : null}
+                <label
+                  className="flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 py-1 text-caption-1-regular text-text-tertiary hover:text-text-secondary"
+                  title="勾上后，每次保存成功都会自动打开 A4 打印（Ctrl+S 保存同样生效）"
+                >
+                  <input
+                    type="checkbox"
+                    checked={printAfterSave}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      setPrintAfterSave(next);
+                      savePrintAfterSave(next);
+                    }}
+                    className="size-3.5 cursor-pointer accent-accent-500"
+                  />
+                  保存后打印
+                </label>
                 <Button size="small" variant="secondary" leadingIcon={RiPrinterLine} onClick={() => setPrinting(true)}>
                   A4 打印
                 </Button>
@@ -977,14 +1083,24 @@ const runDocSearch = useCallback(async (keyword: string) => {
               </ul>
             )}
             {shownHistory.length > 0 ? (
-              <div className="flex items-center justify-between border-t border-separator-border px-4 py-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-separator-border px-4 py-2">
                 <span className="text-caption-1-regular text-text-tertiary">
                   当前列表 入库 {count(shownHistory.filter((v) => v.kind === "in").length)} 张 · 出库{" "}
                   {count(shownHistory.filter((v) => v.kind === "out").length)} 张
                 </span>
-                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                <span className="ms-auto font-mono text-body-2-medium tabular-nums text-text-primary">
                   合计 {money(shownAmount)}
                 </span>
+                {history.length >= historyLimit && historyLimit < 500 ? (
+                  <Button
+                    size="small"
+                    variant="ghost"
+                    leadingIcon={RiArrowDownLine}
+                    onClick={() => setHistoryLimit((n) => Math.min(500, n + 50))}
+                  >
+                    加载更多
+                  </Button>
+                ) : null}
               </div>
             ) : null}
           </section>

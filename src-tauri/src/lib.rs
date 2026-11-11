@@ -4,10 +4,15 @@
 
 pub mod commands;
 pub mod db;
+pub mod dict;
 pub mod import;
 pub mod ledger;
 pub mod master;
 pub mod paths;
+pub mod pivot;
+#[cfg(test)]
+mod pivot_e2e;
+pub mod stock;
 pub mod summary;
 pub mod voucher;
 pub mod web;
@@ -81,6 +86,10 @@ pub fn run() {
             commands::import_run,
             commands::import_history,
             commands::import_delete,
+            commands::stock_report,
+            commands::stock_count,
+            commands::stock_check,
+            commands::stock_check_summary,
             commands::summary_bundle,
             commands::summary_group,
             commands::web_status,
@@ -102,6 +111,12 @@ pub fn run() {
             commands::item_update,
             commands::item_delete,
             commands::item_lookup,
+            commands::dict_list,
+            commands::dict_counts,
+            commands::dict_create,
+            commands::dict_update,
+            commands::dict_delete,
+            commands::dict_sync,
             commands::suppliers_list,
             commands::supplier_create,
             commands::supplier_update,
@@ -111,6 +126,7 @@ pub fn run() {
             commands::master_backfill,
             commands::ledger_bulk_update,
             commands::ledger_bulk_delete,
+            commands::data_clear,
             commands::local_addresses,
             commands::client_log,
         ])

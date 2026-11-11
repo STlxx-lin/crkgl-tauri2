@@ -161,36 +161,48 @@ pub fn item_master(
         .filter(|k| !k.is_empty())
         .map(|k| format!("%{}%", k));
     let limit = limit.clamp(1, 500);
-    let kind_filter = if inbound_only { "AND l.kind = 'in'" } else { "" };
+    let (hits_expr, kind_sub) = if inbound_only {
+        ("SUM(CASE WHEN kind = 'in' THEN 1 ELSE 0 END)", "AND l2.kind = 'in'")
+    } else {
+        ("COUNT(*)", "")
+    };
     let sql = format!(
         "
-        SELECT item_code,
-               COALESCE(NULLIF(TRIM(item_name), ''), '') AS item_name,
-               MAX(NULLIF(TRIM(unit), '')) AS unit,
-               COUNT(*) AS hits,
+        WITH top_items AS (
+            SELECT item_code,
+                   COALESCE(MAX(NULLIF(TRIM(item_name), '')), '') AS item_name,
+                   MAX(NULLIF(TRIM(unit), '')) AS unit,
+                   {hits_expr} AS hits,
+                   COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock_qty
+            FROM ledger
+            WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
+              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1)
+            GROUP BY item_code
+            HAVING (?3 = 0 OR hits > 0)
+               AND (?4 = 0 OR stock_qty > 0)
+            ORDER BY hits DESC, item_code
+            LIMIT ?2
+        )
+        SELECT t.item_code,
+               t.item_name,
+               t.unit,
+               t.hits,
                (SELECT l2.price_micros FROM ledger l2
-                 WHERE l2.item_code = l.item_code AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
+                 WHERE l2.item_code = t.item_code AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
                    {kind_sub}
                  ORDER BY l2.doc_date DESC, l2.id DESC LIMIT 1) AS last_price,
-               -- 结存 = 入库 - 出库；同一编码在两种单据里都能对上
-               COALESCE((SELECT SUM(CASE WHEN s.kind = 'in' THEN s.qty ELSE -s.qty END)
-                           FROM ledger s
-                          WHERE s.item_code = l.item_code), 0) AS stock_qty
-        FROM ledger l
-        WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
-          {kind_filter}
-          AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1)
-        GROUP BY item_code
-        HAVING (?3 = 0 OR COALESCE((SELECT SUM(CASE WHEN s.kind = 'in' THEN s.qty ELSE -s.qty END)
-                                     FROM ledger s WHERE s.item_code = l.item_code), 0) > 0)
-        ORDER BY hits DESC, item_code
-        LIMIT ?2",
-        kind_sub = if inbound_only { "AND l2.kind = 'in'" } else { "" },
+               t.stock_qty
+        FROM top_items t",
     );
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
         .query_map(
-            rusqlite::params![like, limit, if in_stock_only { 1i64 } else { 0i64 }],
+            rusqlite::params![
+                like,
+                limit,
+                if inbound_only { 1i64 } else { 0i64 },
+                if in_stock_only { 1i64 } else { 0i64 },
+            ],
             |r| {
             let name: String = r.get(1)?;
             let code: String = r.get(0)?;
@@ -567,6 +579,12 @@ pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
         rusqlite::params![row_count, total_cents, voucher_id],
     )
     .map_err(DbError::from)?;
+    // 开单时现输的单位/部门/采购人自动进字典，下次就有候选
+    for line in &input.lines {
+        crate::dict::touch(&tx, "unit", line.unit.as_deref().unwrap_or(""), 1);
+    }
+    crate::dict::touch(&tx, "owner", input.owner.as_deref().unwrap_or(""), 1);
+    crate::dict::touch(&tx, "buyer", input.buyer.as_deref().unwrap_or(""), 1);
     tx.commit().map_err(DbError::from)?;
     Ok(voucher_id)
 }
@@ -590,6 +608,16 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
             .query_row("SELECT doc_no FROM vouchers WHERE id = ?1", [id], |r| r.get(0))
             .map_err(DbError::from)?,
     };
+    let dup: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM vouchers WHERE kind = ?1 AND doc_no = ?2 AND id <> ?3",
+            rusqlite::params![kind, doc_no, id],
+            |r| r.get(0),
+        )
+        .map_err(DbError::from)?;
+    if dup > 0 {
+        return Err(format!("单据编号 {doc_no} 已经存在"));
+    }
     tx.execute(
         "UPDATE vouchers SET kind=?1, doc_no=?2, doc_date=?3, partner=?4, delivery_no=?5, buyer=?6,
                 owner=?7, receiver=?8, remark=?9, updated_at=datetime('now','localtime')
@@ -653,6 +681,11 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
         rusqlite::params![input.lines.len() as i64, total, id],
     )
     .map_err(DbError::from)?;
+    for line in &input.lines {
+        crate::dict::touch(&tx, "unit", line.unit.as_deref().unwrap_or(""), 1);
+    }
+    crate::dict::touch(&tx, "owner", input.owner.as_deref().unwrap_or(""), 1);
+    crate::dict::touch(&tx, "buyer", input.buyer.as_deref().unwrap_or(""), 1);
     tx.commit().map_err(DbError::from)?;
     Ok(())
 }

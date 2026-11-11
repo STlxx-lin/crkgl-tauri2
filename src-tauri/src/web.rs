@@ -327,6 +327,9 @@ pub fn router(state: WebState) -> Router {
         .route("/api/summary/monthly", get(monthly))
         .route("/api/summary/top", get(top_items))
         .route("/api/summary/compare", get(compare))
+        .route("/api/stock", get(stock_handler))
+        .route("/api/stock/count", get(stock_count_handler))
+        .route("/api/stock/check", get(stock_check_handler))
         // 未注册的 /api 路径：明确 404，绝不回落成页面
         .route("/api/{*rest}", any(api_not_found))
         // 未知路径回落到单页入口（前端没有路由，但保留 deep-link 能力）
@@ -482,6 +485,60 @@ async fn export_csv(State(state): State<WebState>, Query(query): Query<PageQuery
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StockQuery {
+    #[serde(default)]
+    keyword: Option<String>,
+    #[serde(default)]
+    only_negative: Option<bool>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+async fn stock_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
+    match state.db.with(|c| {
+        crate::stock::stock_report(
+            c,
+            query.keyword.as_deref(),
+            query.only_negative.unwrap_or(false),
+            query.limit.unwrap_or(500),
+            query.offset.unwrap_or(0),
+        )
+        .map_err(crate::db::DbError::from)
+    }) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
+async fn stock_count_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
+    match state.db.with(|c| {
+        crate::stock::stock_count(
+            c,
+            query.keyword.as_deref(),
+            query.only_negative.unwrap_or(false),
+        )
+        .map_err(crate::db::DbError::from)
+    }) {
+        Ok(n) => Json(n).into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
+async fn stock_check_handler(State(state): State<WebState>) -> Response {
+    match state.db.with(|c| {
+        let issues = crate::stock::check_issues(c, 300).map_err(crate::db::DbError::from)?;
+        let summary = crate::stock::check_summary(c).map_err(crate::db::DbError::from)?;
+        Ok(serde_json::json!({ "issues": issues, "summary": summary }))
+    }) {
+        Ok(body) => Json(body).into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
 async fn summary_handler(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let group_by = query.group_by.clone().unwrap_or_else(|| "month".into());
     match state.db.with(|c| summary::grouped(c, &query.filter(), &group_by, 50).map_err(crate::db::DbError::from)) {
@@ -559,8 +616,20 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                         Ok(v6_listener) => {
                             let v6_app = router(state.clone())
                                 .into_make_service_with_connect_info::<SocketAddr>();
+                            let v6_stop = stop.clone();
                             tauri::async_runtime::spawn(async move {
-                                if let Err(err) = axum::serve(v6_listener, v6_app).await {
+                                let v6_shutdown = async move {
+                                    loop {
+                                        if v6_stop.load(Ordering::SeqCst) {
+                                            break;
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                    }
+                                };
+                                if let Err(err) = axum::serve(v6_listener, v6_app)
+                                    .with_graceful_shutdown(v6_shutdown)
+                                    .await
+                                {
                                     log::warn!("IPv6 监听结束: {err}");
                                 }
                             });

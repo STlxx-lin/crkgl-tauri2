@@ -42,6 +42,7 @@ const FIELDS: { id: string; label: string }[] = [
   { id: "delivery_no", label: "送货单号" },
   { id: "item_code", label: "物料编码" },
   { id: "item_name", label: "物料名称" },
+  { id: "spec", label: "规格型号" },
   { id: "unit", label: "单位" },
   { id: "qty", label: "数量" },
   { id: "price", label: "单价" },
@@ -73,11 +74,20 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
   const [busyLabel, setBusyLabel] = useState("");
   // 主数据表：走 master 模块写基础资料，不参与列映射
   const masterSheets = report?.sheets.filter((sheet) => sheet.master) ?? [];
+  // 月度进销存宽表：一行一物料 + 逐日网格，由后端拆成流水，也不参与列映射
+  const pivotSheets = report?.sheets.filter((sheet) => sheet.pivot) ?? [];
+  const pivotMonths = new Set(
+    pivotSheets
+      .map((sheet) => sheet.pivotInfo?.month)
+      .filter((month): month is number => typeof month === "number"),
+  );
   // 单据模板、空表、库存结存这类，既不进台账也不进基础资料，只列名字说明为什么跳过
-  const skippedSheets = report?.sheets.filter((sheet) => !sheet.master && !sheet.detail) ?? [];
+  const skippedSheets = report?.sheets.filter((sheet) => !sheet.master && !sheet.detail && !sheet.pivot) ?? [];
   const [history, setHistory] = useState<ImportRecord[]>([]);
   const [pendingDelete, setPendingDelete] = useState<ImportRecord | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // 宽表里只有「1月…12月」没有年份，导入前要问一次
+  const [year, setYear] = useState(() => new Date().getFullYear());
   const fileInput = useRef<HTMLInputElement>(null);
 
   const loadHistory = useCallback(async () => {
@@ -116,7 +126,8 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
     try {
       const result = await inspectWorkbook(path);
       const detailSheets = result.sheets.filter((sheet) => sheet.detail);
-      if (detailSheets.length === 0) {
+      const hasPivot = result.sheets.some((sheet) => sheet.pivot);
+      if (detailSheets.length === 0 && !hasPivot) {
         setReport(result);
         setPlans([]);
         setStep("map");
@@ -155,7 +166,7 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
     setBusy(true);
     setBusyLabel("正在核对每一行");
     try {
-      const result = await previewImport(report.path, sheetPlans());
+      const result = await previewImport(report.path, sheetPlans(), year);
       setPreview(result);
     } catch (err) {
       toast("预览失败", { description: String(err), status: "error" });
@@ -170,7 +181,7 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
     setBusy(true);
     setBusyLabel("正在写入台账");
     try {
-      const result = await runImport(report.path, sheetPlans(), replace);
+      const result = await runImport(report.path, sheetPlans(), replace, true, year);
       setOutcome(result);
       setStep("done");
       await loadHistory();
@@ -310,6 +321,8 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
               {report.sheets.map((sheet) => {
                 // 主数据表不做列映射，统一写进基础资料，下面单独列摘要
                 if (sheet.master) return null;
+                // 宽表由 pivot 模块整本拆，也不做列映射
+                if (sheet.pivot) return null;
                 // 单据模板 / 空表这类不参与导入的，收成一行，别占整张卡片
                 if (!sheet.detail) return null;
                 const plan = plans.find((item) => item.name === sheet.name);
@@ -328,6 +341,10 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
                 );
               })}
             </div>
+
+            {pivotSheets.length > 0 ? (
+              <PivotPanel sheets={pivotSheets} year={year} onYearChange={setYear} monthCount={pivotMonths.size} />
+            ) : null}
 
             {skippedSheets.length > 0 ? (
               <p className="text-caption-1-regular text-text-tertiary">
@@ -360,11 +377,19 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
             ) : null}
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="small" variant="secondary" leadingIcon={RiArrowRightLine} onClick={doPreview} disabled={busy || sheetPlans().length === 0}>
+              <Button
+                size="small"
+                variant="secondary"
+                leadingIcon={RiArrowRightLine}
+                onClick={doPreview}
+                disabled={busy || (sheetPlans().length === 0 && pivotSheets.length === 0)}
+              >
                 预览并校验
               </Button>
               <span className="text-caption-1-regular text-text-tertiary">
-                先核对前几行与问题清单，再决定写入。
+                {pivotSheets.length > 0 && sheetPlans().length === 0
+                  ? "月度进销存会按你选的年份拆成每日流水，先看一眼再写入。"
+                  : "先核对前几行与问题清单，再决定写入。"}
               </span>
             </div>
 
@@ -572,6 +597,88 @@ function SheetCard({
   );
 }
 
+/**
+ * 月度进销存宽表：一行一物料 + 逐日入库/出库网格。
+ *
+ * 这类表没有日期列，讲不了「哪一列是数量」，只能整本按月份拆——
+ * 所以这里不做列映射，只让用户确认年份，再点上面的「预览并校验」。
+ */
+function PivotPanel({
+  sheets,
+  year,
+  onYearChange,
+  monthCount,
+}: {
+  sheets: SheetReport[];
+  year: number;
+  onYearChange: (year: number) => void;
+  monthCount: number;
+}) {
+  const maxItems = Math.max(0, ...sheets.map((sheet) => sheet.pivotInfo?.items ?? 0));
+  const totalFlows = sheets.reduce((sum, sheet) => sum + (sheet.pivotInfo?.flowCells ?? 0), 0);
+  const totalFiller = sheets.reduce((sum, sheet) => sum + (sheet.pivotInfo?.fillerRows ?? 0), 0);
+  const unnamed = sheets.filter((sheet) => sheet.pivotInfo && sheet.pivotInfo.month === null);
+  const years = [year - 1, year, year + 1].filter((value, index, all) => all.indexOf(value) === index).sort((a, b) => b - a);
+
+  return (
+    <div className="rounded-2xl border border-border-button-default bg-background-primary-default">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-separator-border px-4 py-3">
+        <RiFileExcel2Line className="size-4 text-text-secondary" aria-hidden />
+        <span className="text-body-medium text-text-primary">月度进销存宽表</span>
+        <span className="rounded-md bg-violet-500/12 px-1.5 py-0.5 text-caption-1-semibold text-violet-400">
+          {monthCount} 个月
+        </span>
+        <span className="font-mono text-caption-1-regular tabular-nums text-text-tertiary">
+          {count(maxItems)} 个物料 · 全年 {count(totalFlows)} 笔日常进出
+        </span>
+        <div className="ms-auto flex items-center gap-2">
+          <span className="text-caption-1-regular text-text-tertiary">所属年份</span>
+          <Select
+            aria-label="月度进销存所属年份"
+            size="sm"
+            selectedKey={String(year)}
+            onSelectionChange={(key) => onYearChange(Number(key))}
+            className="w-24"
+          >
+            {years.map((value) => (
+              <SelectItem key={value} id={String(value)}>
+                {value}
+              </SelectItem>
+            ))}
+          </Select>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2 px-4 py-3">
+        <p className="text-body-2-regular text-text-secondary">
+          逐日网格会拆成每天一行流水（日期用「{year} 年 + 该月 + 该日」），并补上期初结存、月末补差和盘点调整，
+          让台账结存与源表的「现结存」逐月相等。物料名称、规格、单位、库位及类型同时写进基础资料。
+        </p>
+        <ul className="flex flex-wrap gap-x-4 gap-y-1 text-caption-1-regular text-text-tertiary">
+          {sheets
+            .filter((sheet) => sheet.pivotInfo?.month !== null && sheet.pivotInfo?.month !== undefined)
+            .sort((a, b) => (a.pivotInfo!.month ?? 0) - (b.pivotInfo!.month ?? 0))
+            .map((sheet) => (
+              <li key={sheet.name}>
+                {sheet.name} · {count(sheet.pivotInfo?.items ?? 0)} 物料 · {count(sheet.pivotInfo?.flowCells ?? 0)} 笔
+              </li>
+            ))}
+        </ul>
+        {totalFiller > 0 ? (
+          <p className="text-caption-1-regular text-text-tertiary">
+            另跳过 {count(totalFiller)} 行尾部填充行（物料编码是 0 或空，不是真物料）。
+          </p>
+        ) : null}
+        {unnamed.length > 0 ? (
+          <p className="text-caption-1-regular text-amber-500">
+            {unnamed.map((sheet) => sheet.name).join("、")} 认不出月份，不会导入；表名需要写成「1月」~「12月」。
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function PreviewPanel({
   preview,
   onImport,
@@ -600,34 +707,80 @@ function PreviewPanel({
               {count(sheet.rows)} 行 · 跳过 {count(sheet.skipped)} · 提醒 {count(sheet.flagged)}
             </span>
           </div>
+          {sheet.pivotSummary ? (
+            <div className="flex flex-col gap-2 border-b border-separator-border bg-background-secondary-default px-3 py-2.5">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-caption-1-regular tabular-nums text-text-secondary">
+                <span>期初结存(QC) {count(sheet.pivotSummary.openingRows)} 笔</span>
+                <span>日常进出 {count(sheet.pivotSummary.dailyRows)} 笔</span>
+                {sheet.pivotSummary.residualRows > 0 ? (
+                  <span>月末补差(BC) {count(sheet.pivotSummary.residualRows)} 笔</span>
+                ) : null}
+                {sheet.pivotSummary.adjustRows > 0 ? (
+                  <span>盘点调整(PD) {count(sheet.pivotSummary.adjustRows)} 笔</span>
+                ) : null}
+                {sheet.pivotSummary.correctionRows > 0 ? (
+                  <span className="text-amber-500">结存校正(JZ) {count(sheet.pivotSummary.correctionRows)} 笔</span>
+                ) : null}
+                <span className="text-text-tertiary">
+                  基础资料 {count(sheet.pivotSummary.totalItems)} 个物料（带库位 {count(sheet.pivotSummary.locatedItems)} 个）
+                </span>
+              </div>
+              {sheet.pivotSummary.corrections.length > 0 ? (
+                <div className="text-caption-1-regular text-text-tertiary">
+                  <span className="text-amber-500">源表公式偏差自动校正：</span>
+                  {sheet.pivotSummary.corrections.join("；")}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-[0.75rem]">
               <thead>
                 <tr className="text-caption-1-semibold text-text-tertiary">
                   <th className="px-3 py-1.5 text-start font-medium">日期</th>
                   <th className="px-3 py-1.5 text-start font-medium">单据</th>
-                  <th className="px-3 py-1.5 text-start font-medium">物料</th>
+                  <th className="px-3 py-1.5 text-start font-medium">物料编码</th>
+                  <th className="px-3 py-1.5 text-start font-medium">名称</th>
+                  <th className="px-3 py-1.5 text-start font-medium">库位</th>
+                  <th className="px-3 py-1.5 text-start font-medium">规格型号</th>
+                  <th className="px-3 py-1.5 text-start font-medium">单位</th>
                   <th className="px-3 py-1.5 text-end font-medium">数量</th>
                   <th className="px-3 py-1.5 text-end font-medium">合计（元）</th>
-                  <th className="px-3 py-1.5 text-start font-medium">提醒</th>
+                  <th className="px-3 py-1.5 text-start font-medium">备注 / 提醒</th>
                 </tr>
               </thead>
               <tbody>
-                {sheet.sample.map((row) => (
-                  <tr key={row.rowNo} className="border-t border-separator-border">
+                {sheet.sample.map((row, index) => (
+                  <tr key={`${row.sheet}-${row.docNo}-${row.rowNo}-${index}`} className="border-t border-separator-border">
                     <td className="px-3 py-1.5 font-mono tabular-nums text-text-secondary">{date(row.docDate)}</td>
                     <td className="px-3 py-1.5 font-mono tabular-nums text-text-tertiary">{row.docNo || "—"}</td>
-                    <td className="max-w-[260px] truncate px-3 py-1.5 text-text-primary" title={row.itemName}>
-                      {row.itemCode ? `${row.itemCode} ` : ""}
-                      {row.itemName}
+                    <td className="px-3 py-1.5 font-mono text-text-secondary" title={row.itemCode}>
+                      {row.itemCode || "—"}
+                    </td>
+                    <td className="max-w-[220px] truncate px-3 py-1.5 text-text-primary" title={row.itemName}>
+                      {row.itemName || "—"}
+                    </td>
+                    <td className="max-w-[120px] truncate px-3 py-1.5 font-mono text-text-tertiary" title={row.location}>
+                      {row.location || "—"}
+                    </td>
+                    <td className="max-w-[140px] truncate px-3 py-1.5 font-mono text-text-tertiary" title={row.spec}>
+                      {row.spec || "—"}
+                    </td>
+                    <td className="px-3 py-1.5 text-text-tertiary">
+                      {row.unit || "—"}
                     </td>
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
-                      {row.qty === null ? "—" : row.qty}
+                      {row.qty === null ? "—" : `${row.kind === "out" ? "-" : ""}${row.qty}`}
                     </td>
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
                       {row.amountCents === null ? "—" : (row.amountCents / 100).toFixed(2)}
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-[0.6875rem] text-amber-500">{row.flags.join(" ") || "—"}</td>
+                    <td className="max-w-[220px] truncate px-3 py-1.5 text-[0.6875rem] text-text-tertiary" title={row.remark}>
+                      {row.flags.length > 0 ? (
+                        <span className="font-mono text-amber-500">{row.flags.join(" ")} </span>
+                      ) : null}
+                      {row.remark || (row.flags.length === 0 ? "—" : "")}
+                    </td>
                   </tr>
                 ))}
               </tbody>

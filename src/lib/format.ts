@@ -86,7 +86,11 @@ export function flagLabel(flag: string): string {
 }
 
 export function kindLabel(kind: string): string {
-  return kind === "in" ? "入库" : "出库";
+  if (kind === "in") return "入库";
+  if (kind === "out") return "出库";
+  // 月度进销存宽表拆出来的流水，方向逐行不同
+  if (kind === "pivot") return "进销存";
+  return kind;
 }
 
 export function fileSize(bytes: number): string {

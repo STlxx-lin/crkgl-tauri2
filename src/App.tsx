@@ -11,8 +11,10 @@ import { LedgerScreen } from "./screens/LedgerScreen";
 import { VoucherScreen } from "./screens/VoucherScreen";
 import { MasterScreen } from "./screens/MasterScreen";
 import { SummaryScreen } from "./screens/SummaryScreen";
+import { StockScreen } from "./screens/StockScreen";
 import { ImportScreen } from "./screens/ImportScreen";
 import { RemoteScreen } from "./screens/RemoteScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 
 type Phase = "boot" | "ready" | "error";
 
@@ -73,7 +75,11 @@ export default function App() {
   const nav = useMemo(() => {
     if (!isTauri) {
       // 只读站只给能看的页：开单、导入、只读站设置都需要桌面端
-      return [{ key: "ledger" as PageKey, label: "台账" }, { key: "summary" as PageKey, label: "汇总" }];
+      return [
+        { key: "ledger" as PageKey, label: "台账" },
+        { key: "summary" as PageKey, label: "汇总" },
+        { key: "stock" as PageKey, label: "库存" },
+      ];
     }
     return undefined;
   }, []);
@@ -156,8 +162,12 @@ export default function App() {
           <MasterScreen onChanged={refreshBoot} />
         ) : page === "summary" ? (
           <SummaryScreen boot={boot} />
+        ) : page === "stock" ? (
+          <StockScreen onChanged={refreshBoot} />
         ) : page === "import" ? (
           <ImportScreen onImported={refreshBoot} />
+        ) : page === "settings" ? (
+          <SettingsScreen boot={boot} onChanged={refreshBoot} />
         ) : (
           <RemoteScreen boot={boot} onChanged={refreshBoot} />
         )}

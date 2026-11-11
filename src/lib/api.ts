@@ -5,6 +5,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccessEntry,
   BulkPatch,
+  ClearOutcome,
+  DictEntry,
+  DictInput,
+  DictKind,
+  DictKindCount,
   ItemMaster,
   Item,
   ItemInput,
@@ -27,6 +32,9 @@ import type {
   LedgerRow,
   PreviewResult,
   SheetPlan,
+  StockCheckSummary,
+  StockIssue,
+  StockRow,
   SummaryBundle,
   WebStatus,
   WorkbookReport,
@@ -155,8 +163,8 @@ export function inspectWorkbook(path: string): Promise<WorkbookReport> {
   return call<WorkbookReport>("import_inspect", { path });
 }
 
-export function previewImport(path: string, plans?: SheetPlan[]): Promise<PreviewResult> {
-  return call<PreviewResult>("import_preview", { args: { path, plans, sampleLimit: 8 } });
+export function previewImport(path: string, plans?: SheetPlan[], year?: number): Promise<PreviewResult> {
+  return call<PreviewResult>("import_preview", { args: { path, plans, sampleLimit: 8, year } });
 }
 
 export function runImport(
@@ -164,8 +172,9 @@ export function runImport(
   plans: SheetPlan[] | undefined,
   replace: boolean,
   master = true,
+  year?: number,
 ): Promise<ImportOutcome> {
-  return call<ImportOutcome>("import_run", { args: { path, plans, replace, master } });
+  return call<ImportOutcome>("import_run", { args: { path, plans, replace, master, year } });
 }
 
 export function importHistory(): Promise<ImportRecord[]> {
@@ -273,12 +282,14 @@ export function listItems(opts: {
 export function countItems(opts: {
   keyword?: string;
   category?: string | null;
+  itemType?: string | null;
   onlyActive?: boolean;
   withDrawing?: boolean | null;
 }): Promise<number> {
   return call<number>("items_count", {
     keyword: opts.keyword ?? null,
     category: opts.category ?? null,
+    itemType: opts.itemType ?? null,
     onlyActive: opts.onlyActive ?? false,
     withDrawing: opts.withDrawing ?? null,
   });
@@ -328,6 +339,37 @@ export function backfillMaster(): Promise<[number, number]> {
   return call<[number, number]>("master_backfill");
 }
 
+// ---------- 字典（单位 / 类别 / 类型 / 出库部门 / 采购人） ----------
+
+export function listDict(kind: DictKind, keyword?: string, onlyActive = false): Promise<DictEntry[]> {
+  return call<DictEntry[]>("dict_list", {
+    kind,
+    keyword: keyword ?? null,
+    onlyActive,
+  });
+}
+
+export function dictCounts(): Promise<DictKindCount[]> {
+  return call<DictKindCount[]>("dict_counts");
+}
+
+export function createDict(input: DictInput): Promise<number> {
+  return call<number>("dict_create", { args: input });
+}
+
+/** 改字典值会同步改写台账/物料里用到它的行，返回受影响行数。 */
+export function updateDict(id: number, input: DictInput): Promise<number> {
+  return call<number>("dict_update", { id, args: input });
+}
+
+export function deleteDict(id: number): Promise<void> {
+  return call<void>("dict_delete", { id });
+}
+
+export function syncDict(): Promise<number> {
+  return call<number>("dict_sync");
+}
+
 // ---------- 单据查询 ----------
 
 export function searchDocs(keyword: string, kind?: Kind | null, limit = 50): Promise<DocHit[]> {
@@ -336,4 +378,56 @@ export function searchDocs(keyword: string, kind?: Kind | null, limit = 50): Pro
 
 export function fetchDocLines(docNo: string, kind: Kind): Promise<LedgerRow[]> {
   return call<LedgerRow[]>("doc_lines", { docNo, kind });
+}
+
+// ---------- 库存 ----------
+
+export function fetchStockReport(opts: {
+  keyword?: string;
+  onlyNegative?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<StockRow[]> {
+  if (!isTauri) {
+    const params = new URLSearchParams();
+    if (opts.keyword) params.set("keyword", opts.keyword);
+    if (opts.onlyNegative) params.set("onlyNegative", "true");
+    params.set("limit", String(opts.limit ?? 500));
+    params.set("offset", String(opts.offset ?? 0));
+    return getJson<StockRow[]>(`/api/stock?${params}`);
+  }
+  return call<StockRow[]>("stock_report", {
+    args: {
+      keyword: opts.keyword ?? null,
+      onlyNegative: opts.onlyNegative ?? false,
+      limit: opts.limit ?? 500,
+      offset: opts.offset ?? 0,
+    },
+  });
+}
+
+export function countStock(keyword?: string, onlyNegative = false): Promise<number> {
+  if (!isTauri) {
+    const params = new URLSearchParams();
+    if (keyword) params.set("keyword", keyword);
+    if (onlyNegative) params.set("onlyNegative", "true");
+    return getJson<number>(`/api/stock/count?${params}`);
+  }
+  return call<number>("stock_count", { keyword: keyword ?? null, onlyNegative });
+}
+
+/** 只读站一次拿回清单与汇总，省一次请求。 */
+export async function fetchStockCheck(): Promise<{ issues: StockIssue[]; summary: StockCheckSummary }> {
+  if (!isTauri) return getJson<{ issues: StockIssue[]; summary: StockCheckSummary }>("/api/stock/check");
+  const [issues, summary] = await Promise.all([
+    call<StockIssue[]>("stock_check", { limit: 300 }),
+    call<StockCheckSummary>("stock_check_summary"),
+  ]);
+  return { issues, summary };
+}
+
+// ---------- 数据管理 ----------
+
+export function clearData(includeMaster = false): Promise<ClearOutcome> {
+  return call<ClearOutcome>("data_clear", { includeMaster });
 }

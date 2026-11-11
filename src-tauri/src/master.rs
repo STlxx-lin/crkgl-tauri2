@@ -28,6 +28,8 @@ pub struct Item {
     pub item_type: Option<String>,
     /// 图号
     pub drawing_no: Option<String>,
+    /// 库位（D-01-02-4F），来自月度进销存宽表
+    pub location: Option<String>,
     pub owner: Option<String>,
     pub supplier: Option<String>,
     pub remark: Option<String>,
@@ -48,6 +50,8 @@ pub struct ItemInput {
     pub item_type: Option<String>,
     #[serde(default)]
     pub drawing_no: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
     pub owner: Option<String>,
     pub supplier: Option<String>,
     pub remark: Option<String>,
@@ -125,6 +129,7 @@ fn bind_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         spec: row.get("spec")?,
         item_type: row.get("item_type")?,
         drawing_no: row.get("drawing_no")?,
+        location: row.get("location")?,
         owner: row.get("owner")?,
         supplier: row.get("supplier")?,
         remark: row.get("remark")?,
@@ -132,7 +137,7 @@ fn bind_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     })
 }
 
-const ITEM_COLUMNS: &str = "id, item_code, item_name, category, unit, price_micros, spec, item_type, drawing_no, owner, supplier, remark, active";
+const ITEM_COLUMNS: &str = "id, item_code, item_name, category, unit, price_micros, spec, item_type, drawing_no, location, owner, supplier, remark, active";
 
 /// 物料列表：按编码或名称模糊搜，可按类别过滤。
 pub fn list_items(
@@ -154,7 +159,7 @@ pub fn list_items(
     let sql = format!(
         "SELECT {ITEM_COLUMNS} FROM items
          WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                OR drawing_no LIKE ?1 OR spec LIKE ?1)
+                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
            AND (?2 IS NULL OR category = ?2)
            AND (?6 IS NULL OR item_type = ?6)
            AND (?3 = 0 OR active = 1)
@@ -192,6 +197,7 @@ pub fn count_items(
     conn: &Connection,
     keyword: Option<&str>,
     category: Option<&str>,
+    item_type: Option<&str>,
     only_active: bool,
     with_drawing: Option<bool>,
 ) -> DbResult<i64> {
@@ -200,11 +206,13 @@ pub fn count_items(
         .filter(|k| !k.is_empty())
         .map(|k| format!("%{k}%"));
     let category = category.map(str::trim).filter(|c| !c.is_empty());
+    let item_type = item_type.map(str::trim).filter(|t| !t.is_empty());
     conn.query_row(
         "SELECT COUNT(*) FROM items
          WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                OR drawing_no LIKE ?1 OR spec LIKE ?1)
+                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
            AND (?2 IS NULL OR category = ?2)
+           AND (?5 IS NULL OR item_type = ?5)
            AND (?3 = 0 OR active = 1)
            AND TRIM(item_code) NOT IN ('-', '0')
            AND (
@@ -212,7 +220,13 @@ pub fn count_items(
              OR (?4 = 1 AND TRIM(COALESCE(drawing_no,'')) <> '')
              OR (?4 = 0 AND TRIM(COALESCE(drawing_no,'')) = '')
            )",
-        rusqlite::params![like, category, only_active as i64, with_drawing.map(|v| v as i64)],
+        rusqlite::params![
+            like,
+            category,
+            only_active as i64,
+            with_drawing.map(|v| v as i64),
+            item_type,
+        ],
         |r| r.get(0),
     )
     .map_err(|e| DbError::from(e).0)
@@ -237,6 +251,24 @@ pub fn find_item_by_code(conn: &Connection, code: &str) -> DbResult<Option<Item>
     }
 }
 
+fn register_item_dict(conn: &Connection, input: &ItemInput) {
+    for (kind, raw) in [
+        ("unit", &input.unit),
+        ("category", &input.category),
+        ("item_type", &input.item_type),
+    ] {
+        if let Some(val) = trim_opt(raw) {
+            if val != "未分类" && val != "旧版基础信息" {
+                let _ = conn.execute(
+                    "INSERT INTO dict (kind, value, hits) VALUES (?1, ?2, 1)
+                     ON CONFLICT(kind, value) DO NOTHING",
+                    rusqlite::params![kind, val],
+                );
+            }
+        }
+    }
+}
+
 pub fn create_item(conn: &Connection, input: &ItemInput) -> DbResult<i64> {
     let code = input.item_code.trim();
     let name = input.item_name.trim();
@@ -253,8 +285,8 @@ pub fn create_item(conn: &Connection, input: &ItemInput) -> DbResult<i64> {
         return Err(format!("物料编码 {code} 已存在"));
     }
     conn.execute(
-        "INSERT INTO items (item_code, item_name, category, unit, price_micros, spec, item_type, drawing_no, owner, supplier, remark, active)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        "INSERT INTO items (item_code, item_name, category, unit, price_micros, spec, item_type, drawing_no, location, owner, supplier, remark, active)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         rusqlite::params![
             code,
             name,
@@ -264,6 +296,7 @@ pub fn create_item(conn: &Connection, input: &ItemInput) -> DbResult<i64> {
             trim_opt(&input.spec),
             trim_opt(&input.item_type),
             trim_opt(&input.drawing_no),
+            trim_opt(&input.location),
             trim_opt(&input.owner),
             trim_opt(&input.supplier),
             trim_opt(&input.remark),
@@ -271,7 +304,9 @@ pub fn create_item(conn: &Connection, input: &ItemInput) -> DbResult<i64> {
         ],
     )
     .map_err(|e| DbError::from(e).0)?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    register_item_dict(conn, input);
+    Ok(id)
 }
 
 pub fn update_item(conn: &Connection, id: i64, input: &ItemInput) -> DbResult<()> {
@@ -293,9 +328,10 @@ pub fn update_item(conn: &Connection, id: i64, input: &ItemInput) -> DbResult<()
     let changed = conn
         .execute(
             "UPDATE items SET item_code=?1, item_name=?2, category=?3, unit=?4, price_micros=?5,
-                    spec=?6, item_type=?7, drawing_no=?8, owner=?9, supplier=?10, remark=?11, active=?12,
+                    spec=?6, item_type=?7, drawing_no=?8, location=?9, owner=?10, supplier=?11,
+                    remark=?12, active=?13,
                     updated_at=datetime('now','localtime')
-             WHERE id=?13",
+             WHERE id=?14",
             rusqlite::params![
                 code,
                 name,
@@ -305,6 +341,7 @@ pub fn update_item(conn: &Connection, id: i64, input: &ItemInput) -> DbResult<()
                 trim_opt(&input.spec),
                 trim_opt(&input.item_type),
                 trim_opt(&input.drawing_no),
+                trim_opt(&input.location),
                 trim_opt(&input.owner),
                 trim_opt(&input.supplier),
                 trim_opt(&input.remark),
@@ -316,6 +353,7 @@ pub fn update_item(conn: &Connection, id: i64, input: &ItemInput) -> DbResult<()
     if changed == 0 {
         return Err("物料不存在".into());
     }
+    register_item_dict(conn, input);
     Ok(())
 }
 
@@ -542,31 +580,81 @@ pub struct MasterImportOutcome {
     pub message: String,
 }
 
-/// 从工作簿里找「物料编号」「供应商名称」两张表并导入。
+/// 从工作簿里找「物料编号」「供应商名称」或「月度进销存宽表」并导入。
 /// 表头按列名认，不依赖 sheet 顺序；已有编码则更新价格/单位，不覆盖手填的备注。
 pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResult<MasterImportOutcome> {
     let mut outcome = MasterImportOutcome::default();
-    let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
-    let mut names = book.sheet_names().to_vec();
+    if let Ok((report, pivot_sheets)) = crate::import::inspect_and_collect_cached(path) {
+        let has_master_sheet = report.sheets.iter().any(|s| s.master);
+        if !has_master_sheet && !pivot_sheets.is_empty() {
+            let built = crate::pivot::build_with_hint(
+                &pivot_sheets,
+                crate::import::current_year(),
+                Some(&report.file_name),
+            );
+            if !built.items.is_empty() {
+                let (added, updated) = crate::pivot::upsert_items(conn, &built.items)?;
+                let located = built
+                    .items
+                    .iter()
+                    .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                    .count();
+                outcome.items_added = added;
+                outcome.items_updated = updated;
+                outcome.sheets_found.push(format!(
+                    "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
+                    built.months.len(),
+                    built.items.len(),
+                    located
+                ));
+                outcome.message = format!(
+                    "物料 +{} 更新{}，供应商 +0 跳过0",
+                    outcome.items_added, outcome.items_updated
+                );
+                return Ok(outcome);
+            }
+        }
+    }
+
+    let mut master_entries: Vec<(String, calamine::Range<Data>)> =
+        if let Some(cached) = crate::import::get_cached_master_sheets(path) {
+            log::debug!("master_from_workbook: 命中缓存 master_sheets，包含 {} 张表", cached.len());
+            cached
+        } else {
+            log::debug!("master_from_workbook: 未命中缓存，重新打开文件");
+            let mut book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+            let mut list = Vec::new();
+            for name in book.sheet_names() {
+                if let Ok(r) = book.worksheet_range(&name) {
+                    list.push((name.clone(), r));
+                }
+            }
+            list
+        };
+
     // 排序：带「物料编码」的表先处理，只有名称的旧表（基础信息）后处理，
     // 这样旧表能按名称给已有物料回填类型/图号，而不是造出重复行。
-    names.sort_by_key(|n| {
+    master_entries.sort_by_key(|(n, _)| {
         let has_code_sheet = n.contains("物料编号") || n.contains("编号");
         (if has_code_sheet { 0 } else { 1 }, n.clone())
     });
 
+    let mut pivot_sheets = Vec::new();
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
 
-    for name in &names {
-        let range = match book.worksheet_range(name) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let header: Vec<String> = range
-            .rows()
-            .next()
-            .map(|row| row.iter().map(cell_text).collect())
-            .unwrap_or_default();
+    for (name, range) in &master_entries {
+        let rows_ref: Vec<&[Data]> = range.rows().collect();
+        if rows_ref.is_empty() {
+            continue;
+        }
+        // 月度「库存进销存报表」宽表（表头通常在第 2 行）：
+        // 若用户在「基础资料」页直接选了进销存宽表工作簿，收集起来统一按跨月字典导入物料与库位。
+        if let Some(parsed) = crate::pivot::read_sheet(name, &rows_ref) {
+            pivot_sheets.push(parsed);
+            continue;
+        }
+
+        let header: Vec<String> = rows_ref[0].iter().map(cell_text).collect();
         if header.is_empty() {
             continue;
         }
@@ -607,6 +695,29 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                 // 从 1 重数会和上一轮导入占下的「基础-N」撞号，ON CONFLICT 一忽略，
                 // 这一行就既没建出来、也没算进统计，重跑还会继续错位。
                 let mut placeholder_seq = next_placeholder_seq(&tx)?;
+                let mut stmt_find = tx
+                    .prepare(
+                        "SELECT id FROM items WHERE TRIM(item_name) = ?1
+                         ORDER BY (item_type IS NULL) DESC, id LIMIT 1",
+                    )
+                    .map_err(DbError::from)?;
+                let mut stmt_update = tx
+                    .prepare(
+                        "UPDATE items SET
+                            item_type = COALESCE(NULLIF(?1,''), item_type),
+                            drawing_no = COALESCE(NULLIF(?2,''), drawing_no),
+                            unit = COALESCE(NULLIF(unit,''), NULLIF(?3,'')),
+                            price_micros = COALESCE(price_micros, ?4)
+                         WHERE id = ?5",
+                    )
+                    .map_err(DbError::from)?;
+                let mut stmt_insert = tx
+                    .prepare(
+                        "INSERT INTO items (item_code, item_name, category, unit, price_micros, item_type, drawing_no)
+                         VALUES (?1,?2,NULL,?3,?4,?5,?6)",
+                    )
+                    .map_err(DbError::from)?;
+
                 for (row_index, row) in range.rows().enumerate() {
                     if row_index == 0 {
                         continue;
@@ -633,44 +744,29 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                         .and_then(cell_f64)
                         .map(to_micros);
                     // 先按同名找；同名有多条时优先补最缺类型的那条（通常是上一轮占位出来的）
-                    let existing: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM items WHERE TRIM(item_name) = ?1
-                             ORDER BY (item_type IS NULL) DESC, id LIMIT 1",
-                            [&item_name],
-                            |r| r.get(0),
-                        )
+                    let existing: Option<i64> = stmt_find
+                        .query_row([&item_name], |r| r.get(0))
                         .ok();
                     match existing {
                         Some(id) => {
-                            tx.execute(
-                                "UPDATE items SET
-                                    item_type = COALESCE(NULLIF(?1,''), item_type),
-                                    drawing_no = COALESCE(NULLIF(?2,''), drawing_no),
-                                    unit = COALESCE(NULLIF(unit,''), NULLIF(?3,'')),
-                                    price_micros = COALESCE(price_micros, ?4)
-                                 WHERE id = ?5",
-                                rusqlite::params![item_type, drawing, unit, price, id],
-                            )
-                            .map_err(DbError::from)?;
+                            stmt_update
+                                .execute(rusqlite::params![item_type, drawing, unit, price, id])
+                                .map_err(DbError::from)?;
                             outcome.items_updated += 1;
                         }
                         None => {
                             let placeholder_code = format!("基础-{placeholder_seq}");
                             placeholder_seq += 1;
-                            tx.execute(
-                                "INSERT INTO items (item_code, item_name, category, unit, price_micros, item_type, drawing_no)
-                                 VALUES (?1,?2,NULL,?3,?4,?5,?6)",
-                                rusqlite::params![
+                            stmt_insert
+                                .execute(rusqlite::params![
                                     placeholder_code,
                                     item_name,
                                     if unit.is_empty() { None } else { Some(unit) },
                                     price,
                                     if item_type.is_empty() { None } else { Some(item_type) },
                                     if drawing.is_empty() { None } else { Some(drawing) },
-                                ],
-                            )
-                            .map_err(DbError::from)?;
+                                ])
+                                .map_err(DbError::from)?;
                             outcome.items_added += 1;
                         }
                     }
@@ -694,6 +790,35 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
             let supplier_col = index_of(&["供应商名称", "供应商"]);
             let remark_col = index_of(&["备注"]);
 
+            let mut existing_map: std::collections::HashMap<String, i64> = {
+                let mut stmt = tx
+                    .prepare("SELECT item_code, id FROM items")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                    .map_err(DbError::from)?;
+                rows.filter_map(Result::ok).collect()
+            };
+            let mut stmt_update = tx
+                .prepare(
+                    "UPDATE items SET item_name=?1,
+                        category=COALESCE(NULLIF(?2,''), category),
+                        unit=COALESCE(NULLIF(?3,''), unit),
+                        price_micros=COALESCE(?4, price_micros),
+                        owner=COALESCE(NULLIF(?5,''), owner),
+                        supplier=COALESCE(NULLIF(?6,''), supplier),
+                        remark=COALESCE(NULLIF(remark,''), NULLIF(?7,'')),
+                        updated_at=datetime('now','localtime')
+                     WHERE id=?8",
+                )
+                .map_err(DbError::from)?;
+            let mut stmt_insert = tx
+                .prepare(
+                    "INSERT INTO items (item_code, item_name, category, unit, price_micros, owner, supplier, remark)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                )
+                .map_err(DbError::from)?;
+
             let mut touched = 0usize;
             for (row_index, row) in range.rows().enumerate() {
                 if row_index == 0 {
@@ -715,23 +840,11 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                 let supplier = get(supplier_col);
                 let remark = get(remark_col);
 
-                let existing: Option<i64> = tx
-                    .query_row("SELECT id FROM items WHERE item_code = ?1", [&code], |r| r.get(0))
-                    .ok();
-                match existing {
-                    Some(id) => {
+                match existing_map.get(&code) {
+                    Some(&id) => {
                         // 更新「字典」字段；备注保留用户填过的
-                        tx.execute(
-                            "UPDATE items SET item_name=?1,
-                                category=COALESCE(NULLIF(?2,''), category),
-                                unit=COALESCE(NULLIF(?3,''), unit),
-                                price_micros=COALESCE(?4, price_micros),
-                                owner=COALESCE(NULLIF(?5,''), owner),
-                                supplier=COALESCE(NULLIF(?6,''), supplier),
-                                remark=COALESCE(NULLIF(remark,''), NULLIF(?7,'')),
-                                updated_at=datetime('now','localtime')
-                             WHERE id=?8",
-                            rusqlite::params![
+                        stmt_update
+                            .execute(rusqlite::params![
                                 item_name,
                                 category,
                                 unit,
@@ -740,16 +853,13 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                                 supplier,
                                 remark,
                                 id
-                            ],
-                        )
-                        .map_err(DbError::from)?;
+                            ])
+                            .map_err(DbError::from)?;
                         outcome.items_updated += 1;
                     }
                     None => {
-                        tx.execute(
-                            "INSERT INTO items (item_code, item_name, category, unit, price_micros, owner, supplier, remark)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                            rusqlite::params![
+                        stmt_insert
+                            .execute(rusqlite::params![
                                 code,
                                 item_name,
                                 if category.is_empty() { None } else { Some(category) },
@@ -758,9 +868,10 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                                 if owner.is_empty() { None } else { Some(owner) },
                                 if supplier.is_empty() { None } else { Some(supplier) },
                                 if remark.is_empty() { None } else { Some(remark) },
-                            ],
-                        )
-                        .map_err(DbError::from)?;
+                            ])
+                            .map_err(DbError::from)?;
+                        let new_id = tx.last_insert_rowid();
+                        existing_map.insert(code, new_id);
                         outcome.items_added += 1;
                     }
                 }
@@ -776,6 +887,19 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         // ---- 供应商表：只有一列名称也能认 ----
         let supplier_col = index_of(&["供应商名称", "供应商"]);
         if let Some(supplier_col) = supplier_col {
+            let mut existing_suppliers: std::collections::HashSet<String> = {
+                let mut stmt = tx
+                    .prepare("SELECT name FROM suppliers")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(DbError::from)?;
+                rows.filter_map(Result::ok).collect()
+            };
+            let mut stmt_insert_supplier = tx
+                .prepare("INSERT INTO suppliers (name) VALUES (?1)")
+                .map_err(DbError::from)?;
+
             let mut touched = 0usize;
             for (row_index, row) in range.rows().enumerate() {
                 if row_index == 0 {
@@ -786,11 +910,9 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                     outcome.suppliers_skipped += 1;
                     continue;
                 }
-                let exists: i64 = tx
-                    .query_row("SELECT COUNT(*) FROM suppliers WHERE name = ?1", [&name], |r| r.get(0))
-                    .map_err(DbError::from)?;
-                if exists == 0 {
-                    tx.execute("INSERT INTO suppliers (name) VALUES (?1)", [&name])
+                if existing_suppliers.insert(name.clone()) {
+                    stmt_insert_supplier
+                        .execute([&name])
                         .map_err(DbError::from)?;
                     outcome.suppliers_added += 1;
                 } else {
@@ -805,6 +927,32 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
     }
 
     tx.commit().map_err(DbError::from)?;
+
+    if !pivot_sheets.is_empty() {
+        let file_hint = path.file_name().and_then(|n| n.to_str());
+        let built = crate::pivot::build_with_hint(
+            &pivot_sheets,
+            crate::import::current_year(),
+            file_hint,
+        );
+        if !built.items.is_empty() {
+            let (added, updated) = crate::pivot::upsert_items(conn, &built.items)?;
+            let located = built
+                .items
+                .iter()
+                .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                .count();
+            outcome.items_added += added;
+            outcome.items_updated += updated;
+            outcome.sheets_found.push(format!(
+                "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
+                built.months.len(),
+                built.items.len(),
+                located
+            ));
+        }
+    }
+
     outcome.message = if outcome.sheets_found.is_empty() {
         "工作簿里没有找到物料编号/供应商名称表".to_string()
     } else {
@@ -836,9 +984,10 @@ pub fn backfill_items_from_ledger(conn: &Connection) -> DbResult<usize> {
         .execute(
             // 台账里有些行只有编码没有名称（老数据），用编码兜底，
             // 否则 item_name NOT NULL 会让整批补漏失败。
-            "INSERT INTO items (item_code, item_name, unit, price_micros)
+            "INSERT INTO items (item_code, item_name, spec, unit, price_micros)
              SELECT item_code,
                     COALESCE(NULLIF(TRIM(MAX(item_name)), ''), item_code),
+                    MAX(spec),
                     MAX(unit),
                     (SELECT price_micros FROM ledger l2
                       WHERE l2.item_code = l.item_code AND l2.price_micros > 0
@@ -872,10 +1021,11 @@ pub fn count_items_db(
     db: &Db,
     keyword: Option<&str>,
     category: Option<&str>,
+    item_type: Option<&str>,
     only_active: bool,
     with_drawing: Option<bool>,
 ) -> DbResult<i64> {
-    db.with(|c| count_items(c, keyword, category, only_active, with_drawing).map_err(DbError))
+    db.with(|c| count_items(c, keyword, category, item_type, only_active, with_drawing).map_err(DbError))
 }
 
 pub fn create_item_db(db: &Db, input: &ItemInput) -> DbResult<i64> {
@@ -944,6 +1094,7 @@ mod tests {
             spec: None,
             item_type: None,
             drawing_no: None,
+            location: None,
             owner: None,
             supplier: None,
             remark: None,

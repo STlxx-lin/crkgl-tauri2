@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   RiExternalLinkLine,
   RiPlayCircleLine,
-  RiPrinterLine,
   RiRefreshLine,
   RiServerLine,
   RiStopCircleLine,
@@ -10,14 +9,6 @@ import {
 import { accessLog, startWeb, stopWeb, webStatus } from "../lib/api";
 import type { AccessEntry, BootstrapInfo, WebStatus } from "../lib/types";
 import { count, shortTs } from "../lib/format";
-import {
-  PRINT_ROWS_DEFAULT,
-  PRINT_ROWS_MAX,
-  PRINT_ROWS_MIN,
-  onPrintRowsChange,
-  savePrintRows,
-  storedPrintRows,
-} from "../lib/printPrefs";
 import { Button } from "@/components/base/buttons/button";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { Switch } from "@/components/base/switch/switch";
@@ -176,8 +167,6 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
             </div>
           </section>
 
-          <PrintSetup />
-
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
             <div className="flex items-baseline justify-between gap-2 px-5 pb-3 pt-4">
               <h2 className="text-title-4-semibold text-text-primary">访问记录</h2>
@@ -233,70 +222,5 @@ function Row({ label, value }: { label: string; value: string }) {
         {value}
       </dd>
     </div>
-  );
-}
-
-/**
- * 打印设置：A4 打印视图每页预留几行明细。
- * 纸单固定 8 行；不够手写就调到 10/12，超出的部分自动分页。
- */
-function PrintSetup() {
-  const [rows, setRows] = useState(() => storedPrintRows());
-  const [draft, setDraft] = useState(() => String(storedPrintRows()));
-
-  useEffect(
-    () =>
-      onPrintRowsChange((next) => {
-        setRows(next);
-        setDraft(String(next));
-      }),
-    [],
-  );
-
-  const commit = () => {
-    const n = Number(draft);
-    if (!Number.isInteger(n) || n < PRINT_ROWS_MIN || n > PRINT_ROWS_MAX) {
-      toast("行数超出范围", {
-        description: `填 ${PRINT_ROWS_MIN}–${PRINT_ROWS_MAX} 之间的整数`,
-        status: "error",
-      });
-      setDraft(String(rows));
-      return;
-    }
-    if (n === rows) return;
-    savePrintRows(n);
-    setRows(n);
-    toast("每页上限已更新", { description: `每页最多 ${n} 行`, status: "success" });
-  };
-
-  return (
-    <section className="flex flex-col gap-3 rounded-2xl border border-border-button-default bg-background-primary-default p-5">
-      <div className="flex items-center gap-2">
-        <RiPrinterLine className="size-[18px] text-text-secondary" aria-hidden />
-        <h2 className="text-title-4-semibold text-text-primary">打印</h2>
-      </div>
-      <div className="flex items-end gap-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-caption-1-semibold text-text-tertiary">A4 每页行数上限</span>
-          <input
-            aria-label="A4 每页行数上限"
-            inputMode="numeric"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ""))}
-            onBlur={commit}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commit();
-            }}
-            className="h-9 w-24 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-body-regular tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
-          />
-        </label>
-        <span className="pb-2 text-body-2-regular text-text-tertiary">
-          默认 {PRINT_ROWS_DEFAULT}，可填 {PRINT_ROWS_MIN}–{PRINT_ROWS_MAX}
-        </span>
-      </div>
-      <p className="text-caption-1-regular text-text-tertiary">
-        打印按单据实际行数出稿：有几行打几行，不补空行；只有超过这个上限才分成多页。
-      </p>
-    </section>
   );
 }
