@@ -47,7 +47,6 @@ import { DictPanel } from "../components/DictPanel";
 import { ItemCatalog } from "../components/ItemCatalog";
 import { PageHeader } from "../components/AppShell";
 
-const PAGE = 100;
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "master.pageSize";
 
@@ -59,6 +58,15 @@ function storedPageSize(): number {
     // 存不下就用默认
   }
   return 100;
+}
+
+/** 记住本机的每页条数；存不下也不影响本次使用。 */
+function savePageSize(size: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_KEY, String(size));
+  } catch {
+    // 隐私模式或存储被禁：下次退回默认
+  }
 }
 
 /** 基础资料：物料主数据 + 供应商 + 字典（单位/类别/类型/出库部门/采购人）。 */
