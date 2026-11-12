@@ -12,6 +12,7 @@ import {
   RiSaveLine,
 } from "@remixicon/react";
 import {
+  createSupplier,
   createVoucher,
   deleteVoucher,
   listSuppliers,
@@ -33,7 +34,7 @@ import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/AppShell";
 import { ItemPicker } from "../components/ItemPicker";
-import { ComboPicker } from "../components/ComboPicker";
+import { ComboPicker, type PickerOption } from "../components/ComboPicker";
 import { PrintVoucher } from "../components/PrintVoucher";
 import {
   onBuyerChange,
@@ -474,6 +475,8 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
       dirty.current = false;
       // 下次新开单沿用这次填的采购人
       if (mode.kind === "in" && head.buyer.trim()) saveBuyer(head.buyer);
+      // 手输的新供应商存进基础资料，下次输两个字就能关联出来
+      if (mode.kind === "in" && head.partner.trim()) await rememberSupplier(head.partner);
       await loadHistory();
       onChanged();
 
@@ -558,7 +561,40 @@ const runDocSearch = useCallback(async (keyword: string) => {
     }
   };
 
+  /**
+   * 手输了一个库里没有的供应商：存单成功后顺手写进基础资料，
+   * 下次开单就能直接打前两个字关联出来。失败不影响已存好的单。
+   */
+  const rememberSupplier = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (suppliers.some((sup) => sup.name.trim().toLowerCase() === trimmed.toLowerCase())) return;
+    try {
+      await createSupplier({ name: trimmed, active: true });
+      await loadSuppliers();
+    } catch {
+      // 与基础资料里已有（只是大小写/空格不同）的名称重复时后端会拒绝，此时不打扰用户
+    }
+  };
+
   const isIn = mode.kind === "in";
+
+  // 供应商候选：按常用度（台账行数）排出常用名单，输入时再按「连号 > 按词 > 逐字」重排，
+  // 这样打「亚德」「亚德客」都能落到「亚德客（中国）有限公司」。
+  const supplierOptions = useMemo<PickerOption[]>(
+    () => suppliers.map((sup) => ({ value: sup.name, hint: sup.hits > 0 ? `${sup.hits} 行` : undefined })),
+    [suppliers],
+  );
+  const supplierHits = useMemo(() => {
+    const map = new Map<string, number>();
+    suppliers.forEach((sup) => map.set(sup.name, sup.hits));
+    return map;
+  }, [suppliers]);
+
+  const rankSupplier = useCallback(
+    (option: PickerOption, keyword: string) => matchSupplier(option.value, keyword, supplierHits.get(option.value) ?? 0),
+    [supplierHits],
+  );
 
   return (
     <>
@@ -641,13 +677,13 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   setHead((prev) => (isIn ? { ...prev, partner: v } : { ...prev, owner: v }))
                 }
                 options={
-                  isIn
-                    ? suppliers.map((sup) => ({ value: sup.name, hint: sup.hits > 0 ? `${sup.hits} 行` : undefined }))
-                    : ownerOptions.map((name) => ({ value: name }))
+                  isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))
                 }
+                rank={isIn ? rankSupplier : undefined}
+                autoCommitExact={isIn}
                 allowCustom
-                placeholder={isIn ? "选或输入供应商" : "选或输入部门"}
-                emptyText={isIn ? "没有匹配项" : "没有这个部门，直接输入即可"}
+                placeholder={isIn ? "输两个字关联供应商" : "选或输入部门"}
+                emptyText={isIn ? "没有匹配的供应商，直接回车按新名称保存" : "没有这个部门，直接输入即可"}
               />
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">{isIn ? "入库时间：" : "出库时间："}</span>
@@ -1281,5 +1317,45 @@ const runDocSearch = useCallback(async (keyword: string) => {
       {printing ? <PrintVoucher voucher={printDraft} onClose={() => setPrinting(false)} /> : null}
     </>
   );
+}
+
+/**
+ * 供应商模糊匹配打分。返回 0 表示不命中。
+ *
+ * 分层：连号名称（「亚德」对「亚德客…」）最硬，其次是按空格拆开的词逐个命中，
+ * 最后才是散落字（「自」对「…中国…」）。同档内先看名称里命中的占比——
+ * 越短的名字越「专一」——再看台账行数，免得常用大供应商把更贴切的短名压下去。
+ */
+function matchSupplier(name: string, rawKeyword: string, hits: number): number {
+  const keyword = rawKeyword.trim().toLowerCase().replace(/\s+/g, " ");
+  const hay = name.toLowerCase();
+  if (!keyword) return 1;
+
+  let tier: number;
+  let gap = 0;
+  if (hay.includes(keyword)) {
+    tier = 60;
+  } else {
+    const words = keyword.split(" ").filter(Boolean);
+    if (words.length > 1 && words.every((w) => hay.includes(w))) {
+      tier = 45;
+    } else {
+      // 逐字顺序命中（允许跳字），「自」「亚德客中」都能走到这一层
+      let cursor = 0;
+      for (const ch of keyword.replace(/\s+/g, "")) {
+        const at = hay.indexOf(ch, cursor);
+        if (at < 0) return 0;
+        gap += at - cursor;
+        cursor = at + ch.length;
+      }
+      tier = gap <= 2 ? 25 : 20;
+    }
+  }
+
+  const density = keyword.replace(/\s+/g, "").length / Math.max(hay.length, 1);
+  // 前缀命中永远优先于同档的后缀命中
+  const prefixBonus = hay.startsWith(keyword) ? 10 : 0;
+  const hitsBonus = Math.min(hits, 500) / 100; // 最多 5 分，只用来打破同档平局
+  return tier + prefixBonus + density * 10 + hitsBonus;
 }
 

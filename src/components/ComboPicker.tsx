@@ -7,6 +7,31 @@ export interface PickerOption {
   value: string;
   /** 副标题，可空 */
   hint?: string;
+  /** 搜索用的额外文本（别名、简称、拼音首字母），不显示，只参与匹配 */
+  search?: string;
+}
+
+/**
+ * 默认匹配：包含即命中，逐字/逐词兜底。
+ *
+ * 只按「连续子串」比，用户打「自」时「亚德客（中国）…」这种词压根进不了候选；
+ * 所以这里改成逐字打分，只在用户真的开始输入时才重排，没输入时保持后端顺序。
+ */
+export function fuzzyScore(text: string, keyword: string): number {
+  const hay = text.toLowerCase();
+  const needle = keyword.trim().toLowerCase();
+  if (!needle) return 1;
+  const at = hay.indexOf(needle);
+  // 前缀命中排最前，其次子串命中，最后逐字命中
+  if (at === 0) return 3;
+  if (at > 0) return 2;
+  let cursor = 0;
+  for (const ch of needle.replace(/\s+/g, "")) {
+    cursor = hay.indexOf(ch, cursor);
+    if (cursor < 0) return 0;
+    cursor += ch.length;
+  }
+  return 1;
 }
 
 interface ComboPickerProps {
@@ -34,6 +59,16 @@ interface ComboPickerProps {
    * 代价是要自己处理被裁剪——所以外层的滚动容器不能有 overflow:hidden。
    */
   inline?: boolean;
+  /**
+   * 候选排序。默认保持传入顺序（后端已按行数排好）；
+   * 给了匹配函数的场景（供应商联动）会按用户输入重排，并带缓存。
+   */
+  rank?: (option: PickerOption, keyword: string) => number;
+  /**
+   * 输入满整段名称时自动选中并退出输入，不再让用户多按一次回车。
+   * 只对大小写/全半角/空格的差异放行，不做别的猜测。
+   */
+  autoCommitExact?: boolean;
 }
 
 /**
@@ -58,9 +93,14 @@ export function ComboPicker({
   emptyText = "没有匹配项",
   compact = false,
   inline = false,
+  rank,
+  autoCommitExact = false,
 }: ComboPickerProps) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(value);
+  // 正在输入尚未选定的关键字。非空时输入框显示它（好让用户看到自己打了什么、好继续删），
+  // 收起或选中后清掉，显示回 value 的完整名称。
+  const [typing, setTyping] = useState("");
   const [active, setActive] = useState(0);
   const boxRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -74,16 +114,34 @@ export function ComboPicker({
     bottom: number | null;
   } | null>(null);
 
-  // 外部值变化时同步输入框（例如切换单据、重置表单）
+  // 外部值变化时同步输入框（例如切换单据、重置表单）。
+  // 注意：自己敲字时 onChange 也会把 value 改掉，这时不能把 typing 清空，
+  // 否则刚打进去的字立刻被抹掉，候选列表跟着退回全量。
+  const lastTyped = useRef<string | null>(null);
   useEffect(() => {
+    const isOwnTyping = lastTyped.current !== null && value === lastTyped.current;
+    lastTyped.current = null;
+    if (isOwnTyping) return;
     setText(value);
+    setTyping("");
   }, [value]);
 
   const filtered = useMemo(() => {
-    const keyword = (open ? text : "").trim();
-    if (!keyword || keyword === value) return options;
-    return options.filter((o) => o.value.includes(keyword));
-  }, [open, text, value, options]);
+    const keyword = typing.trim();
+    if (!keyword) return options;
+    // 默认用内置模糊匹配；传了 rank 的场景（供应商）用场景自己的打分
+    const score = rank ?? ((o: PickerOption, k: string) => fuzzyScore(`${o.value} ${o.search ?? ""}`, k));
+    const scored = options
+      .map((o) => ({ o, score: score(o, keyword) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.o);
+    // 打出来的字正好就是库里的某一条时，把它顶上来，回车即可收
+    const low = keyword.toLowerCase();
+    const exact = scored.filter((o) => o.value.trim().toLowerCase() === low);
+    const out = exact.length ? [...exact, ...scored.filter((o) => !exact.includes(o))] : scored;
+    return out;
+  }, [typing, options, rank]);
 
   const measure = () => {
     const el = boxRef.current;
@@ -130,6 +188,8 @@ export function ComboPicker({
       const target = event.target as Node;
       if (!boxRef.current?.contains(target) && !menuRef.current?.contains(target)) {
         setOpen(false);
+        setTyping("");
+        setText(value);
       }
     };
     document.addEventListener("mousedown", onDown, true);
@@ -138,13 +198,31 @@ export function ComboPicker({
 
   const pick = (option: PickerOption) => {
     setText(option.value);
+    setTyping("");
     onChange(option.value);
     setOpen(false);
   };
 
-  const commitText = (next: string) => {
+  // 用户逐字输入：值先跟着手输走（允许自定义供应商），但输入框保留关键字，
+  // 免得只敲了「自」就把供应商字段整个改成「自」。
+  const typeText = (next: string) => {
+    setTyping(next);
     setText(next);
-    if (allowCustom) onChange(next);
+    if (allowCustom) {
+      const committed = next.trim().length ? next : "";
+      lastTyped.current = committed;
+      onChange(committed);
+    }
+    const exact = autoCommitExact
+      ? options.find((o) => o.value.trim().toLowerCase() === next.trim().toLowerCase())
+      : undefined;
+    if (exact) pick(exact);
+  };
+
+  const closeMenu = () => {
+    setOpen(false);
+    setTyping("");
+    setText(value);
   };
 
   const list = (
@@ -209,6 +287,12 @@ export function ComboPicker({
           );
         })
       )}
+      {typing.trim() && !filtered.some((o) => o.value.trim().toLowerCase() === typing.trim().toLowerCase()) ? (
+        // 库里没有整条命中时，明确提示回车就按手输的名字新建，避免误以为选错了
+        <p className="mt-1 border-t border-separator-border px-2 pt-1.5 text-caption-1-regular text-text-tertiary">
+          {allowCustom ? `回车按「${typing.trim()}」新建` : "没有完全一致的项"}
+        </p>
+      ) : null}
     </div>
   );
 
@@ -217,14 +301,23 @@ export function ComboPicker({
       <div className="relative flex items-center">
         <input
           aria-label={ariaLabel}
-          value={text}
+          value={open && typing ? typing : text}
           disabled={disabled}
           placeholder={placeholder}
           onChange={(e) => {
-            commitText(e.target.value);
+            typeText(e.target.value);
+            setActive(0);
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
+          onBlur={() => {
+            // 焦点移进下拉（点候选项）时先不还原文本，等 pick 处理
+            window.setTimeout(() => {
+              if (menuRef.current?.matches(":hover")) return;
+              setTyping("");
+              setText(value);
+            }, 0);
+          }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
@@ -237,9 +330,9 @@ export function ComboPicker({
               e.preventDefault();
               // 已经手输了下拉里没有的值时，别把它换回候选项——只收起下拉。
               if (filtered[active] && filtered[active].value !== text) pick(filtered[active]);
-              else setOpen(false);
+              else closeMenu();
             } else if (e.key === "Escape") {
-              setOpen(false);
+              closeMenu();
             }
           }}
           className={cx(
@@ -253,7 +346,11 @@ export function ComboPicker({
           type="button"
           aria-label={`展开${ariaLabel}`}
           tabIndex={-1}
-          onClick={() => setOpen((v) => !v)}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            if (open) closeMenu();
+            else setOpen(true);
+          }}
           className={cx(
             "absolute flex items-center justify-center rounded text-text-tertiary hover:text-text-primary",
             compact ? "end-0.5 size-5" : "end-1 size-6",
