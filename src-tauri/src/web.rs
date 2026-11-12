@@ -89,8 +89,11 @@ impl Drop for WebHandle {
 }
 
 /// 本机所有私网地址，拼成给同事发的链接。
+///
+/// 不含回环地址（127.0.0.1 / localhost）：这一栏是发给同事的，
+/// 他们那头打开 127.0.0.1 只会访问到自己电脑。本机自查走程序窗口即可。
 pub fn local_urls(port: u16) -> Vec<String> {
-    let mut urls = vec![format!("http://127.0.0.1:{port}/")];
+    let mut urls: Vec<String> = Vec::new();
     let mut has_private = false;
     if let Ok(interfaces) = if_addrs::get_if_addrs() {
         for iface in interfaces {
@@ -114,16 +117,11 @@ pub fn local_urls(port: u16) -> Vec<String> {
     }
     urls.sort();
     urls.dedup();
-    // 电脑名地址排在第一个局域网 IP 后面：同事记不住 IP 时用主机名更顺手。
+    // 电脑名地址排在第一个局域网 IP 前面：同事记不住 IP 时用主机名更顺手。
     // 只有真监听在局域网接口时才加，否则这条地址是连不通的。
     if has_private {
         if let Some(host) = computer_name() {
-            let by_name = format!("http://{}:{port}/", host.to_ascii_lowercase());
-            if let Some(pos) = urls.iter().position(|u| u != &format!("http://127.0.0.1:{port}/")) {
-                urls.insert(pos, by_name);
-            } else {
-                urls.push(by_name);
-            }
+            urls.insert(0, format!("http://{}:{port}/", host.to_ascii_lowercase()));
             urls.dedup();
         }
     }
@@ -719,9 +717,13 @@ mod tests {
     }
 
     #[test]
-    fn url_list_has_loopback_first() {
+    fn url_list_has_no_loopback() {
         let urls = local_urls(8080);
-        assert_eq!(urls.first().map(String::as_str), Some("http://127.0.0.1:8080/"));
+        // 这一栏发给同事，回环地址在他们那边打开只会指向自己的电脑
+        for url in &urls {
+            assert!(!url.contains("127.0.0.1"), "不应出现本机回环地址: {urls:?}");
+            assert!(!url.contains("localhost"), "不应出现 localhost: {urls:?}");
+        }
         // 所有地址都是合法 http 链接、端口一致
         for url in &urls {
             assert!(url.starts_with("http://"), "{url}");

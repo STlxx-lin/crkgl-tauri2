@@ -130,7 +130,7 @@ export function ItemPicker({
     return () => document.removeEventListener("mousedown", onDown, true);
   }, [open, onBlurClose]);
 
-  // 打开时显示正在输入的搜索词；收起时只显示编码（名称有单独一列）
+  // 打开时显示正在输入的搜索词；收起时显示当前列的值（编码列显示编码，名称列显示名称）
   const display = useMemo(() => (open ? keyword : value), [open, keyword, value]);
 
   const pick = (item: Item) => {
@@ -302,7 +302,6 @@ function inboundToItems(rows: ItemMaster[]): Item[] {
     stockQty: row.stockQty,
   }));
 }
-
 /** 库存量：去掉无意义的尾零，最多三位小数。 */
 function formatStock(value: number): string {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(value);

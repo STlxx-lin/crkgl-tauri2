@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  RiComputerLine,
   RiDatabase2Line,
   RiDeleteBinLine,
   RiPrinterLine,
 } from "@remixicon/react";
-import { clearData, isTauri } from "../lib/api";
+import { autostartSet, autostartStatus, clearData, isTauri } from "../lib/api";
 import type { BootstrapInfo } from "../lib/types";
 import { count } from "../lib/format";
 import {
@@ -76,6 +77,7 @@ export function SettingsScreen({
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         <div className="grid max-w-4xl grid-cols-1 gap-4 md:grid-cols-2">
           <PrintSetup />
+          <BackgroundSetup />
 
           <section className="flex flex-col gap-4 rounded-2xl border border-border-button-default bg-background-primary-default p-5">
             <div className="flex items-center gap-2">
@@ -186,6 +188,98 @@ export function SettingsScreen({
         </Modal>
       ) : null}
     </>
+  );
+}
+
+/**
+ * 后台运行与开机自启。
+ *
+ * 关闭窗口不再退出程序：进程收进托盘，局域网只读站和后台资料照常工作；
+ * 真正退出要点托盘的「退出」。开机自启打开后，登录 Windows 就会静悄悄拉起后台，
+ * 不弹窗口，同事随时能打开只读站查账。
+ */
+function BackgroundSetup() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let alive = true;
+    autostartStatus()
+      .then((on) => {
+        if (alive) setEnabled(on);
+      })
+      .catch(() => {
+        if (alive) setEnabled(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    try {
+      const real = await autostartSet(next);
+      setEnabled(real);
+      if (real === next) {
+        toast(next ? "已开启开机自动启动" : "已关闭开机自动启动", {
+          description: next ? "下次登录 Windows 会直接在后台运行，不弹窗口。" : "关闭不影响当前正在运行的后台。",
+          status: "success",
+        });
+      } else {
+        toast("开机自启没有生效", {
+          description: "注册表写入被拦下了，检查组策略或安全软件后重试。",
+          status: "error",
+        });
+      }
+    } catch (err) {
+      toast("设置失败", { description: String(err), status: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const on = enabled === true;
+
+  return (
+    <section className="flex flex-col gap-3 rounded-2xl border border-border-button-default bg-background-primary-default p-5">
+      <div className="flex items-center gap-2">
+        <RiComputerLine className="size-[18px] text-text-secondary" aria-hidden />
+        <h2 className="text-title-4-semibold text-text-primary">后台运行</h2>
+      </div>
+
+      <label
+        className={
+          "flex cursor-pointer select-none items-start gap-2.5 rounded-xl border border-border-button-default px-3.5 py-3 hover:border-border-button-hover" +
+          (!isTauri || busy ? " cursor-not-allowed opacity-60" : "")
+        }
+      >
+        <input
+          type="checkbox"
+          role="switch"
+          aria-label="开机自动启动并在后台运行"
+          checked={on}
+          disabled={!isTauri || busy || enabled === null}
+          onChange={(e) => toggle(e.target.checked)}
+          className="mt-0.5 size-4 cursor-pointer accent-accent-500 disabled:cursor-not-allowed"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-body-2-medium text-text-primary">
+            开机自动启动，后台运行
+            {busy ? <span className="ms-2 text-caption-1-regular text-text-tertiary">正在写入…</span> : null}
+          </span>
+          <span className="text-caption-1-regular text-text-tertiary">
+            登录 Windows 后在后台悄悄启动，不弹窗口；局域网只读站随即可用。要重新打开程序，双击托盘图标。
+          </span>
+        </span>
+      </label>
+
+      <p className="text-caption-1-regular text-text-tertiary">
+        关闭窗口只是收进右下角托盘，程序继续在后台运行；彻底退出请右键托盘图标选「退出」。
+        {isTauri ? null : " 浏览器里不能设置开机自启。"}
+      </p>
+    </section>
   );
 }
 

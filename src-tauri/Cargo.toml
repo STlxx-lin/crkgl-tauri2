@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
@@ -30,6 +30,13 @@ sha2 = "0.10"
 if-addrs = "0.13"
 log = "0.4"
 mime_guess = "2"
+
+# 只有开机自启要碰注册表；用已在依赖图里的 0.59，不额外拉新版本
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+] }
 
 [profile.release]
 codegen-units = 1

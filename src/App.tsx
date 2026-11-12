@@ -32,8 +32,11 @@ export default function App() {
   });
   const loaded = useRef(false);
 
-  const load = useCallback(async () => {
-    setPhase("boot");
+  const load = useCallback(async (silent = false) => {
+    // silentRefresh：页面已经开着时只换数据，不进「正在读取台账」那一屏。
+    // 进了那一屏 App 会 return 加载页，当前页面被卸载，页内 state（例如保存后弹的
+    // 打印视图）会全部丢失。
+    if (!silent) setPhase("boot");
     setError(null);
     try {
       if (isTauri) {
@@ -69,7 +72,8 @@ export default function App() {
   const refreshBoot = useCallback(() => {
     setReloadKey((key) => key + 1);
     loaded["current"] = true;
-    load();
+    // 已经在用的时候静默刷新：数据会更新，但页面不重建
+    void load(true);
   }, [load]);
 
   const nav = useMemo(() => {

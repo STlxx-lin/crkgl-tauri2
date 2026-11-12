@@ -35,6 +35,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/AppShell";
 import { ItemPicker } from "../components/ItemPicker";
 import { ComboPicker, type PickerOption } from "../components/ComboPicker";
+import { QuickAddDialog, type QuickAddKind } from "../components/QuickAddDialog";
 import { PrintVoucher } from "../components/PrintVoucher";
 import {
   onBuyerChange,
@@ -142,6 +143,10 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   const [pendingDelete, setPendingDelete] = useState<VoucherSummary | null>(null);
   // A4 打印：用当前录入内容出稿，未保存也能先打一份校样
   const [printing, setPrinting] = useState(false);
+  // 快速新增：录单到一半补一条物料/供应商
+  const [quickAdd, setQuickAdd] = useState<QuickAddKind | null>(null);
+  // 新建物料后要填进哪一行（null 表示新加一行）
+  const quickAddTargetLine = useRef<string | null>(null);
   // 单据查询：跨「本机开单」与「Excel 导入」两种来源
   const [showDocSearch, setShowDocSearch] = useState(() => storedDocSearchOpen());
   const [docQuery, setDocQuery] = useState("");
@@ -478,10 +483,13 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
       // 手输的新供应商存进基础资料，下次输两个字就能关联出来
       if (mode.kind === "in" && head.partner.trim()) await rememberSupplier(head.partner);
       await loadHistory();
-      onChanged();
 
       // 保存成功立刻出稿：拿去签字归档是紧接着的下一步。
       // 新单刚建好，回读一次拿到带 id 的明细，打印内容和库里一致。
+      //
+      // 顺序很重要：先把打印视图挂出来，再 onChanged()。
+      // onChanged 会让 App 回到「正在读取台账」那一屏，整个开单页被卸载重建，
+      // 先跳出去的话 printingView 这个 state 会跟着一起丢掉，打印就永远不出来了。
       if (savedId !== null && printAfterSave) {
         try {
           const fresh = await getVoucher(savedId);
@@ -492,6 +500,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
           setPrinting(true);
         }
       }
+      onChanged();
     } catch (err) {
       toast("保存失败", { description: String(err), status: "error", duration: 7000 });
     } finally {
@@ -670,21 +679,35 @@ const runDocSearch = useCallback(async (keyword: string) => {
               ) : (
                 <span className="self-center text-body-2-medium text-text-secondary">出库部门：</span>
               )}
-              <ComboPicker
-                ariaLabel={isIn ? "供应商" : "出库部门"}
-                value={isIn ? head.partner : head.owner}
-                onChange={(v) =>
-                  setHead((prev) => (isIn ? { ...prev, partner: v } : { ...prev, owner: v }))
-                }
-                options={
-                  isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))
-                }
-                rank={isIn ? rankSupplier : undefined}
-                autoCommitExact={isIn}
-                allowCustom
-                placeholder={isIn ? "输两个字关联供应商" : "选或输入部门"}
-                emptyText={isIn ? "没有匹配的供应商，直接回车按新名称保存" : "没有这个部门，直接输入即可"}
-              />
+              <div className="flex items-center gap-1.5">
+                <ComboPicker
+                  ariaLabel={isIn ? "供应商" : "出库部门"}
+                  value={isIn ? head.partner : head.owner}
+                  onChange={(v) =>
+                    setHead((prev) => (isIn ? { ...prev, partner: v } : { ...prev, owner: v }))
+                  }
+                  options={
+                    isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))
+                  }
+                  rank={isIn ? rankSupplier : undefined}
+                  autoCommitExact={isIn}
+                  allowCustom
+                  placeholder={isIn ? "输两个字关联供应商" : "选或输入部门"}
+                  emptyText={isIn ? "没有匹配的供应商，直接回车按新名称保存" : "没有这个部门，直接输入即可"}
+                />
+                {isIn ? (
+                  <Button
+                    size="small"
+                    variant="ghost"
+                    leadingIcon={RiAddLine}
+                    title="新增供应商"
+                    aria-label="快速新增供应商"
+                    onClick={() => setQuickAdd("supplier")}
+                  >
+                    新增
+                  </Button>
+                ) : null}
+              </div>
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">{isIn ? "入库时间：" : "出库时间："}</span>
                 <input
@@ -758,11 +781,13 @@ const runDocSearch = useCallback(async (keyword: string) => {
                           />
                         </td>
                         <td className="px-1 py-1">
-                          <input
+                          {/* 名称列同样引用基础资料：选中一条会一并带出编码、单位与最近单价 */}
+                          <ItemPicker
                             value={line.itemName}
-                            onChange={(e) => setLine(line.key, { itemName: e.target.value })}
-                            placeholder="物料名称"
-                            className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
+                            onPick={(item) => applyMaster(line.key, item)}
+                            onChangeText={(text) => setLine(line.key, { itemName: text })}
+                            inStockOnly={!isIn}
+                            placeholder={isIn ? "选或输入名称" : "选有库存的物料"}
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -899,6 +924,20 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 }}
               >
                 加一行
+              </Button>
+              <Button
+                size="small"
+                variant="secondary"
+                leadingIcon={RiAddLine}
+                title="新增物料到基础资料，并填进一行明细"
+                onClick={() => {
+                  // 记住当前最后一行：新增完直接把新物料填进去，不用再去编码列选一遍
+                  quickAddTargetLine.current = lines[lines.length - 1]?.key ?? null;
+                  setQuickAdd("item");
+                }}
+                disabled={!isTauri}
+              >
+                新增物料
               </Button>
               <span className="text-caption-1-regular text-text-tertiary">
                 选物料编码会自动带出名称、单位与最近单价
@@ -1313,6 +1352,43 @@ const runDocSearch = useCallback(async (keyword: string) => {
         onOpenChange={(open: boolean) => !open && setPendingDelete(null)}
         variant="danger"
       />
+
+      {quickAdd ? (
+        <QuickAddDialog
+          kind={quickAdd}
+          onClose={() => setQuickAdd(null)}
+          onCreated={(record) => {
+            if (record.supplier) {
+              // 新供应商直接填进单头
+              setHead((prev) => ({ ...prev, partner: record.supplier!.name }));
+              void loadSuppliers();
+              return;
+            }
+            if (record.item) {
+              const item = record.item;
+              const target = quickAddTargetLine.current;
+              const row = target === null ? undefined : lines.find((line) => line.key === target);
+              // 只有「还是空着」的那一行才直接填；已经填过内容就另起一行，绝不覆盖已录的数据
+              const isBlank =
+                row !== undefined &&
+                !row.itemCode.trim() &&
+                !row.itemName.trim() &&
+                !row.qty.trim() &&
+                !row.price.trim();
+              if (isBlank) {
+                applyMaster(row!.key, item);
+              } else {
+                const fresh = blankLine();
+                dirty.current = true;
+                setLines((prev) => [
+                  ...prev,
+                  { ...fresh, itemCode: item.itemCode, itemName: item.itemName, unit: item.unit ?? "" },
+                ]);
+              }
+            }
+          }}
+        />
+      ) : null}
 
       {printing ? <PrintVoucher voucher={printDraft} onClose={() => setPrinting(false)} /> : null}
     </>

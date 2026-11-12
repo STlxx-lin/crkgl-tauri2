@@ -380,6 +380,36 @@ pub fn local_addresses() -> Vec<String> {
     web::local_urls(web::DEFAULT_PORT)
 }
 
+/// 当前 exe 路径：开机自启项要指向它。
+fn current_exe() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|e| format!("取不到程序路径：{e}"))
+}
+
+#[tauri::command]
+pub fn autostart_status() -> Result<bool, String> {
+    Ok(crate::autostart::is_enabled(&current_exe()?))
+}
+
+#[tauri::command]
+pub fn autostart_set(enabled: bool) -> Result<bool, String> {
+    let exe = current_exe()?;
+    crate::autostart::set_enabled(&exe, enabled)?;
+    // 读回真实状态：写注册表可能被组策略拦下，以磁盘上的结果为准
+    Ok(crate::autostart::is_enabled(&exe))
+}
+
+/// 把主窗口从托盘里叫回来。
+#[tauri::command]
+pub fn window_show(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let win = app.get_webview_window("main").ok_or("主窗口不存在")?;
+    win.show().map_err(|e| e.to_string())?;
+    win.unminimize().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+
 #[tauri::command]
 pub fn client_log(level: Option<String>, message: String) {
     match level.as_deref() {
@@ -567,6 +597,10 @@ pub fn items_list(
     with_drawing: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
+    // true 时按建档时间倒序（最新在前），新增物料的候选清单用
+    recent: Option<bool>,
+    // 排序键：code（默认）/ newest / oldest / name / code_desc
+    order: Option<String>,
 ) -> Result<Vec<master::Item>, String> {
     master::list_items_db(
         &state.db,
@@ -577,6 +611,8 @@ pub fn items_list(
         with_drawing,
         limit.unwrap_or(200),
         offset.unwrap_or(0),
+        recent.unwrap_or(false),
+        master::ItemOrder::parse(order.as_deref()),
     )
 }
 

@@ -132,6 +132,18 @@ export function priceInput(micros: number | null | undefined): string {
   return fixed.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
+/**
+ * 主数据里参考单价的编辑框文本：最多四位小数、去掉尾零。
+ *
+ * 和 priceInput 的区别：物料参考单价本来就是按万分之一元存的，
+ * 大量厘级价（0.202、0.216）用两位小数会被截成 0.2，看着像丢了数字。
+ */
+export function priceInput4(micros: number | null | undefined): string {
+  if (micros === null || micros === undefined) return "";
+  const fixed = (micros / 10_000).toFixed(4);
+  return fixed.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
 /** 输入框文本（元）→ 万分之一元。 */
 export function parsePriceToMicros(text: string): number | null {
   const cleaned = text.replace(/[,，¥￥\s]/g, "");

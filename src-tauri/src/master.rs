@@ -140,6 +140,45 @@ fn bind_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
 const ITEM_COLUMNS: &str = "id, item_code, item_name, category, unit, price_micros, spec, item_type, drawing_no, location, owner, supplier, remark, active";
 
 /// 物料列表：按编码或名称模糊搜，可按类别过滤。
+/// 物料列表的排序方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemOrder {
+    /// 按编码升序（默认，方便按编号找）
+    CodeAsc,
+    /// 按建档先后倒序（最新建的在最前）
+    NewestFirst,
+    /// 按建档先后正序（最早建的在最前）
+    OldestFirst,
+    /// 按名称升序
+    NameAsc,
+    /// 按编码降序
+    CodeDesc,
+}
+
+impl ItemOrder {
+    /// 解析前端传来的排序键；认不出来就回落到编码升序。
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some("newest") => ItemOrder::NewestFirst,
+            Some("oldest") => ItemOrder::OldestFirst,
+            Some("name") => ItemOrder::NameAsc,
+            Some("code_desc") => ItemOrder::CodeDesc,
+            _ => ItemOrder::CodeAsc,
+        }
+    }
+
+    fn clause(self) -> &'static str {
+        match self {
+            ItemOrder::CodeAsc => "ORDER BY item_code",
+            // seq 是自增建档序号：created_at 只到秒，整批导入时分不出先后
+            ItemOrder::NewestFirst => "ORDER BY seq DESC",
+            ItemOrder::OldestFirst => "ORDER BY seq ASC",
+            ItemOrder::NameAsc => "ORDER BY item_name COLLATE NOCASE, item_code",
+            ItemOrder::CodeDesc => "ORDER BY item_code DESC",
+        }
+    }
+}
+
 pub fn list_items(
     conn: &Connection,
     keyword: Option<&str>,
@@ -150,12 +189,45 @@ pub fn list_items(
     limit: i64,
     offset: i64,
 ) -> DbResult<Vec<Item>> {
+    list_items_ordered(conn, keyword, category, item_type, only_active, with_drawing, limit, offset, false)
+}
+
+/// `recent` 为真时按建档时间倒序（最新建的排最前），用于「新增物料」时挑刚建的那几条；
+/// 基础资料列表仍按编码排，方便按编号找。
+pub fn list_items_ordered(
+    conn: &Connection,
+    keyword: Option<&str>,
+    category: Option<&str>,
+    item_type: Option<&str>,
+    only_active: bool,
+    with_drawing: Option<bool>,
+    limit: i64,
+    offset: i64,
+    recent: bool,
+) -> DbResult<Vec<Item>> {
+    let order = if recent { ItemOrder::NewestFirst } else { ItemOrder::CodeAsc };
+    list_items_sorted(conn, keyword, category, item_type, only_active, with_drawing, limit, offset, order)
+}
+
+/// 带排序的版本：基础资料列表的列头排序走这里。
+pub fn list_items_sorted(
+    conn: &Connection,
+    keyword: Option<&str>,
+    category: Option<&str>,
+    item_type: Option<&str>,
+    only_active: bool,
+    with_drawing: Option<bool>,
+    limit: i64,
+    offset: i64,
+    order: ItemOrder,
+) -> DbResult<Vec<Item>> {
     let like = keyword
         .map(str::trim)
         .filter(|k| !k.is_empty())
         .map(|k| format!("%{k}%"));
     let category = category.map(str::trim).filter(|c| !c.is_empty());
     let limit = limit.clamp(1, 500);
+    let order = order.clause();
     let sql = format!(
         "SELECT {ITEM_COLUMNS} FROM items
          WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
@@ -171,7 +243,7 @@ pub fn list_items(
              OR (?7 = 1 AND TRIM(COALESCE(drawing_no,'')) <> '')
              OR (?7 = 0 AND TRIM(COALESCE(drawing_no,'')) = '')
            )
-         ORDER BY item_code
+         {order}
          LIMIT ?4 OFFSET ?5"
     );
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
@@ -1013,8 +1085,19 @@ pub fn list_items_db(
     with_drawing: Option<bool>,
     limit: i64,
     offset: i64,
+    recent: bool,
+    order: ItemOrder,
 ) -> DbResult<Vec<Item>> {
-    db.with(|c| list_items(c, keyword, category, item_type, only_active, with_drawing, limit, offset).map_err(DbError))
+    db.with(|c| {
+        // 显式排序优先；没给就用 recent 决定默认顺序
+        let pick = if order == ItemOrder::CodeAsc && recent {
+            ItemOrder::NewestFirst
+        } else {
+            order
+        };
+        list_items_sorted(c, keyword, category, item_type, only_active, with_drawing, limit, offset, pick)
+            .map_err(DbError)
+    })
 }
 
 pub fn count_items_db(
@@ -1100,6 +1183,122 @@ mod tests {
             remark: None,
             active: true,
         }
+    }
+
+    #[test]
+    fn recent_order_puts_newest_first() {
+        let db = db();
+        // 编码故意与建立顺序无关，确认排的是建档先后不是编码
+        for (code, name) in [("WG-Z-001", "最后建"), ("WG-A-001", "最先建"), ("WG-M-001", "中间建")] {
+            db.with(|c| create_item(c, &item(code, name)).map_err(DbError)).unwrap();
+        }
+        // created_at 只到秒，这批全在同一秒内——正好验证 seq 能分先后
+        let recent = db
+            .with(|c| list_items_ordered(c, None, None, None, true, None, 50, 0, true).map_err(DbError))
+            .unwrap();
+        let codes: Vec<&str> = recent.iter().map(|i| i.item_code.as_str()).collect();
+        assert_eq!(
+            codes,
+            vec!["WG-M-001", "WG-A-001", "WG-Z-001"],
+            "应按建档先后倒序（最后建的 WG-M-001 在最前）"
+        );
+
+        // 再加一条，必须排到最前
+        db.with(|c| create_item(c, &item("WG-B-002", "刚建的")).map_err(DbError)).unwrap();
+        let recent = db
+            .with(|c| list_items_ordered(c, None, None, None, true, None, 50, 0, true).map_err(DbError))
+            .unwrap();
+        assert_eq!(recent[0].item_code, "WG-B-002", "最新建的要在第一条");
+
+        // 默认仍按编码排，基础资料列表不受影响
+        let by_code = db
+            .with(|c| list_items_ordered(c, None, None, None, true, None, 50, 0, false).map_err(DbError))
+            .unwrap();
+        let codes: Vec<&str> = by_code.iter().map(|i| i.item_code.as_str()).collect();
+        assert_eq!(codes, vec!["WG-A-001", "WG-B-002", "WG-M-001", "WG-Z-001"]);
+    }
+
+    #[test]
+    fn migration_backfills_seq_for_existing_rows() {
+        let db = db();
+        // 模拟老数据：三条 created_at 完全相同（同一批导入），seq 为空
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO items (item_code, item_name, created_at) VALUES
+                 ('OLD-1','最早','2026-01-01 09:00:00'),
+                 ('OLD-2','其次','2026-01-01 09:00:00'),
+                 ('OLD-3','最晚','2026-01-01 09:00:00')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .unwrap();
+        db.with(|c| {
+            c.execute(
+                "UPDATE items SET seq = (
+                    SELECT COUNT(*) FROM items AS earlier
+                    WHERE earlier.created_at < items.created_at
+                       OR (earlier.created_at = items.created_at AND earlier.id <= items.id)
+                 )",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .unwrap();
+
+        // 回填后同秒的三条按 id 定先后，seq 必须互不相同
+        let seqs: Vec<i64> = db
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT seq FROM items ORDER BY id")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, i64>(0))
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(seqs, vec![1, 2, 3], "老数据回填成 1 2 3");
+    }
+
+    #[test]
+    fn sort_orders_cover_all_modes() {
+        let db = db();
+        for (code, name) in [("WG-C", "丙"), ("WG-A", "甲"), ("WG-B", "乙")] {
+            db.with(|c| create_item(c, &item(code, name)).map_err(DbError)).unwrap();
+        }
+        let codes = |order: ItemOrder| -> Vec<String> {
+            db.with(|c| {
+                list_items_sorted(c, None, None, None, true, None, 50, 0, order).map_err(DbError)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.item_code)
+            .collect()
+        };
+
+        assert_eq!(codes(ItemOrder::CodeAsc), vec!["WG-A", "WG-B", "WG-C"]);
+        assert_eq!(codes(ItemOrder::CodeDesc), vec!["WG-C", "WG-B", "WG-A"]);
+        // 建档顺序就是插入顺序 WG-C → WG-A → WG-B
+        assert_eq!(codes(ItemOrder::NewestFirst), vec!["WG-B", "WG-A", "WG-C"]);
+        assert_eq!(codes(ItemOrder::OldestFirst), vec!["WG-C", "WG-A", "WG-B"]);
+        // 按名称：丙 乙 甲 的码位顺序
+        assert_eq!(codes(ItemOrder::NameAsc), vec!["WG-C", "WG-B", "WG-A"]);
+    }
+
+    #[test]
+    fn sort_key_parsing_falls_back_to_code() {
+        assert_eq!(ItemOrder::parse(Some("newest")), ItemOrder::NewestFirst);
+        assert_eq!(ItemOrder::parse(Some("oldest")), ItemOrder::OldestFirst);
+        assert_eq!(ItemOrder::parse(Some("name")), ItemOrder::NameAsc);
+        assert_eq!(ItemOrder::parse(Some("code_desc")), ItemOrder::CodeDesc);
+        // 认不出来的值不能乱排，回落到编码升序
+        assert_eq!(ItemOrder::parse(Some("bogus")), ItemOrder::CodeAsc);
+        assert_eq!(ItemOrder::parse(None), ItemOrder::CodeAsc);
     }
 
     #[test]

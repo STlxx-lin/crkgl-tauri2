@@ -4523,6 +4523,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "tower-http",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

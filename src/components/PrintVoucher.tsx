@@ -44,12 +44,35 @@ export function PrintVoucher({
   const totalAmount = voucher.lines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0);
   const totalQty = voucher.lines.reduce((sum, line) => sum + (line.qty ?? 0), 0);
 
+  /**
+   * 打开系统打印对话框，回来后自动收掉预览。
+   *
+   * `window.print()` 在同一次调用里是阻塞的：用户点了「打印」或「取消」并返回程序，
+   * 它才继续往下走，所以函数返回就代表这一轮打印结束了。
+   * 这里先让出一帧，把「正在打印」的按钮状态画出来，再调 print()。
+   */
+  const [printing, setPrinting] = useState(false);
+  const handlePrint = () => {
+    setPrinting(true);
+    // 两帧：一帧把按钮置为禁用，一帧等绘制完成，避免对话框盖住之前界面还没更新
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        try {
+          window.print();
+        } finally {
+          setPrinting(false);
+          onClose();
+        }
+      }),
+    );
+  };
+
   // 挂到 body 上：AppShell 的滚动容器会裁剪高度，打印时三张纸会被压成一页
   return createPortal(
     <div className="print-overlay" role="dialog" aria-modal aria-label="A4 打印视图">
       <div className="mb-4 flex items-center justify-center gap-2 print:hidden">
-        <Button size="small" leadingIcon={RiPrinterLine} onClick={() => window.print()}>
-          打印
+        <Button size="small" leadingIcon={RiPrinterLine} onClick={handlePrint} disabled={printing}>
+          {printing ? "正在打印…" : "打印"}
         </Button>
         <span className="rounded-lg bg-background-primary-default px-3 py-1.5 text-body-2-regular text-text-secondary">
           {voucher.lines.length} 行明细 · 共 {pages.length} 页 · 每页最多 {perPage} 行

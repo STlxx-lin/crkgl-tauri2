@@ -48,7 +48,10 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
         const next = await startWeb();
         setStatus(next);
         if (next.listening) {
-          toast("只读站已开启", { description: next.urls[0] ?? "" });
+          // 只报局域网地址；没有局域网时说明本机能用但同事连不上
+          toast("只读站已开启", {
+            description: next.urls[0] ?? "这台电脑暂时没有局域网地址，连上网络后下方会出现同事可用的链接",
+          });
         } else {
           toast("没能监听端口", { description: next.error ?? "端口被占用", status: "error", duration: 8000 });
         }
@@ -111,6 +114,11 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
             {listening ? (
               <div className="flex flex-col gap-2">
                 <p className="text-caption-1-semibold text-text-tertiary">把这几个地址发给同事</p>
+                {(status?.urls ?? []).length === 0 ? (
+                  <p className="rounded-lg border border-separator-border bg-background-secondary-default px-3 py-2 text-caption-1-regular text-text-tertiary">
+                    这台电脑现在没有可供局域网访问的地址（网线没插或没连上同一个网络），连上局域网后这里会显示同事能打开的链接。
+                  </p>
+                ) : null}
                 {(status?.urls ?? []).map((url) => {
                   // 非 IP 形式的地址就是电脑名地址
                   const isHostName = !/\/\/(\d{1,3}\.){3}\d{1,3}:/.test(url);

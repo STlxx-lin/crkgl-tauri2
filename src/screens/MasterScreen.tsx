@@ -23,15 +23,18 @@ import {
   listDict,
   listItems,
   listSuppliers,
+  lookupItem,
   masterStats,
   updateItem,
   updateSupplier,
 } from "../lib/api";
 import type { Item, ItemInput, MasterStats, Supplier, SupplierInput } from "../lib/types";
-import { count, priceText } from "../lib/format";
+import { count, parsePriceToMicros, priceInput4, priceText } from "../lib/format";
+import { onItemSortChange, saveItemSort, storedItemSort, type ItemSort } from "../lib/itemSortPrefs";
 import { Button } from "@/components/base/buttons/button";
 import { Input } from "@/components/base/input/input";
 import { SearchField } from "@/components/base/search-field/search-field";
+import { Pagination } from "@/components/base/pagination/pagination";
 import { Select, SelectItem } from "@/components/base/select/select";
 import { Switch } from "@/components/base/switch/switch";
 import { SegmentedControl, SegmentedControlItem } from "@/components/base/segmented-control/segmented-control";
@@ -41,9 +44,22 @@ import { toast } from "@/components/base/toast/toast";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
 import { DictPanel } from "../components/DictPanel";
+import { ItemCatalog } from "../components/ItemCatalog";
 import { PageHeader } from "../components/AppShell";
 
 const PAGE = 100;
+const PAGE_SIZES = [50, 100, 200, 500] as const;
+const PAGE_SIZE_KEY = "master.pageSize";
+
+function storedPageSize(): number {
+  try {
+    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
+    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
+  } catch {
+    // 存不下就用默认
+  }
+  return 100;
+}
 
 /** 基础资料：物料主数据 + 供应商 + 字典（单位/类别/类型/出库部门/采购人）。 */
 export function MasterScreen({ onChanged }: { onChanged: () => void }) {
@@ -120,9 +136,10 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
         }
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+      {/* 整页不滚：概览、标签栏固定，表格自己占满剩余高度并在内部滚动（和台账一致） */}
+      <div className="flex min-h-0 flex-1 flex-col px-6 pt-5 pb-4">
         {/* 概览 */}
-        <div className="mb-4 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-separator-border bg-separator-border md:grid-cols-4">
+        <div className="mb-4 grid shrink-0 grid-cols-2 gap-px overflow-hidden rounded-xl border border-separator-border bg-separator-border md:grid-cols-4">
           <Stat label="物料总数" value={count(stats?.items ?? 0)} sub={`在用的 ${count(stats?.itemsActive ?? 0)}`} />
           <Stat label="供应商" value={count(stats?.suppliers ?? 0)} sub="含台账里出现过的" />
           <Stat
@@ -154,7 +171,11 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
           />
         </div>
 
-        <Tabs selectedKey={tab} onSelectionChange={(key) => setTab(String(key))}>
+        <Tabs
+          selectedKey={tab}
+          onSelectionChange={(key) => setTab(String(key))}
+          className="min-h-0 flex-1"
+        >
           <TabList aria-label="基础资料分类">
             <Tab id="items">物料（{count(stats?.items ?? 0)}）</Tab>
             <Tab id="drawings">图号（{count(stats?.withDrawing ?? 0)}）</Tab>
@@ -162,7 +183,7 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
             <Tab id="dict">字典</Tab>
           </TabList>
 
-          <TabPanel id="items">
+          <TabPanel id="items" className="flex min-h-0 flex-1 flex-col">
             <ItemsPanel
               categories={stats?.categories.map((c) => c.category) ?? []}
               itemTypes={stats?.itemTypes.map((t) => t.category) ?? []}
@@ -170,13 +191,13 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
               busy={busy}
             />
           </TabPanel>
-          <TabPanel id="drawings">
+          <TabPanel id="drawings" className="flex min-h-0 flex-1 flex-col">
             <DrawingsPanel onChanged={loadStats} busy={busy} />
           </TabPanel>
-          <TabPanel id="suppliers">
+          <TabPanel id="suppliers" className="flex min-h-0 flex-1 flex-col">
             <SuppliersPanel onChanged={loadStats} busy={busy} />
           </TabPanel>
-          <TabPanel id="dict">
+          <TabPanel id="dict" className="flex min-h-0 flex-1 flex-col">
             <DictPanel onChanged={loadStats} />
           </TabPanel>
         </Tabs>
@@ -208,7 +229,20 @@ function ItemsPanel({
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Item | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
+  // 列表排序：跟输入关键字一样，改了要回到第一页
+  const [sortOrder, setSortOrder] = useState<ItemSort>(() => storedItemSort());
+  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  // 分页信息：总页数至少为 1，避免 0 条时显示「第 1 / 0 页」
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
+  // 表格滚动容器：翻页后要滚回顶部
+  const tableRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
+
+  useEffect(() => {
+    saveItemSort(sortOrder);
+  }, [sortOrder]);
+  useEffect(() => onItemSortChange(setSortOrder), []);
 
   const filterTypes = useMemo(
     () =>
@@ -223,7 +257,7 @@ function ItemsPanel({
       setOffset(0);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [keyword, category, itemType, onlyActive]);
+  }, [keyword, category, itemType, onlyActive, sortOrder, pageSize]);
 
   const load = useCallback(async () => {
     const ticket = ++seq.current;
@@ -234,10 +268,13 @@ function ItemsPanel({
         category: category === "all" ? null : category,
         itemType: itemType === "all" ? null : itemType,
         onlyActive,
-        limit: PAGE,
+        limit: pageSize,
         offset,
       };
-      const [list, n] = await Promise.all([listItems(opts), countItems(opts)]);
+      const [list, n] = await Promise.all([
+        listItems({ ...opts, order: sortOrder }),
+        countItems(opts),
+      ]);
       if (ticket === seq.current) {
         setRows(list);
         setTotal(n);
@@ -247,7 +284,7 @@ function ItemsPanel({
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [keyword, category, itemType, onlyActive, offset]);
+  }, [keyword, category, itemType, onlyActive, offset, sortOrder, pageSize]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -268,8 +305,8 @@ function ItemsPanel({
   };
 
   return (
-    <div className="mt-3 flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <SearchField
           aria-label="搜索物料编码、名称、库位或规格"
           placeholder="编码 / 名称 / 库位 / 规格"
@@ -315,6 +352,21 @@ function ItemsPanel({
           <Switch size="sm" isSelected={onlyActive} onChange={setOnlyActive} aria-label="只看在用" />
           只看在用
         </label>
+        <Select
+          aria-label="排序方式"
+          size="sm"
+          selectedKey={sortOrder}
+          onSelectionChange={(key) => setSortOrder(String(key) as ItemSort)}
+          className="w-36"
+        >
+          <>
+            <SelectItem id="code">按编码 ↑</SelectItem>
+            <SelectItem id="code_desc">按编码 ↓</SelectItem>
+            <SelectItem id="name">按名称</SelectItem>
+            <SelectItem id="newest">最新建档在前</SelectItem>
+            <SelectItem id="oldest">最早建档在前</SelectItem>
+          </>
+        </Select>
         {loading ? <Spinner size="xs" aria-label="加载中" /> : null}
         <Button
           size="small"
@@ -331,9 +383,9 @@ function ItemsPanel({
         </Button>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
         <table className="w-full min-w-[1360px] table-fixed border-collapse text-[0.8125rem]">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="w-[148px] px-3 py-2 text-start font-medium whitespace-nowrap">物料编码</th>
               <th className="w-[240px] px-3 py-2 text-start font-medium whitespace-nowrap">物料名称</th>
@@ -429,17 +481,48 @@ function ItemsPanel({
         </table>
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
         <p className="text-body-2-regular text-text-tertiary">
-          第 {count(offset + 1)}–{count(Math.min(offset + PAGE, total))} 条，共 {count(total)} 条
+          第 {count(offset + 1)}–{count(Math.min(offset + pageSize, total))} 条，共 {count(total)} 条
         </p>
-        <div className="flex items-center gap-2">
-          <Button size="small" variant="secondary" onClick={() => setOffset(Math.max(0, offset - PAGE))} disabled={offset === 0 || loading}>
-            上一页
-          </Button>
-          <Button size="small" variant="secondary" onClick={() => setOffset(offset + PAGE)} disabled={offset + PAGE >= total || loading}>
-            下一页
-          </Button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+            每页
+            <select
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPageSize(next);
+                try {
+                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
+                } catch {
+                  // 忽略
+                }
+                setOffset(0);
+                tableRef.current?.scrollTo({ top: 0 });
+              }}
+              className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            条
+          </label>
+          <Pagination
+            page={pageIndex}
+            totalPages={pageCount}
+            onChange={(next) => {
+              setOffset(Math.max(0, (next - 1) * pageSize));
+              tableRef.current?.scrollTo({ top: 0 });
+            }}
+            previousLabel="上一页"
+            nextLabel="下一页"
+            aria-label="物料分页"
+          />
         </div>
       </div>
 
@@ -502,10 +585,39 @@ function ItemDialog({
     active: item?.active ?? true,
   });
   const [busy, setBusy] = useState(false);
+  // 新增时编码撞上已有物料：右栏提示换个编码，别等保存被后端拒了才发现
+  const [duplicateCode, setDuplicateCode] = useState(false);
   // 单位与类型从字典取候选；类别合并字典与 stats 里的实际分布（含未进字典的旧值）
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
   const [typeOptions, setTypeOptions] = useState<string[]>([]);
   const [dictCategories, setDictCategories] = useState<string[]>([]);
+
+  // 编辑已有物料时不用查重（编码框本身是锁住的）
+  useEffect(() => {
+    if (!isTauri || item !== null) {
+      setDuplicateCode(false);
+      return;
+    }
+    const code = form.itemCode.trim();
+    if (!code) {
+      setDuplicateCode(false);
+      return;
+    }
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      lookupItem(code)
+        .then((hit) => {
+          if (alive) setDuplicateCode(hit !== null);
+        })
+        .catch(() => {
+          if (alive) setDuplicateCode(false);
+        });
+    }, 220);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [form.itemCode, item]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -568,11 +680,17 @@ function ItemDialog({
   };
 
   return (
-    <Modal isOpen onOpenChange={(open: boolean) => !open && onClose()} size="md">
+    <Modal
+      isOpen
+      onOpenChange={(open: boolean) => !open && onClose()}
+      size="xl"
+      className="max-h-[88vh] w-[880px] max-w-[92vw] overflow-y-auto"
+    >
       {({ close }) => (
         <>
           <ModalHeader title={item ? "编辑物料" : "新增物料"} description="编码与名称必填" />
-          <ModalBody className="flex flex-col gap-3">
+          <ModalBody className="grid grid-cols-[minmax(0,1fr)_19rem] items-start gap-4">
+            <div className="flex min-w-0 flex-col gap-3">
             <div className="grid grid-cols-2 gap-3">
               <Labeled label="物料编码">
                 <Input
@@ -643,13 +761,9 @@ function ItemDialog({
                 />
               </Labeled>
               <Labeled label="参考单价（元）">
-                <Input
-                  size="small"
-                  value={form.priceMicros == null ? "" : (form.priceMicros / 10000).toFixed(4)}
-                  onChange={(v) => {
-                    const n = Number(v.replace(/[,，\s]/g, ""));
-                    set("priceMicros", v.trim() === "" || !Number.isFinite(n) ? null : Math.round(n * 10000));
-                  }}
+                <PriceInput
+                  value={form.priceMicros ?? null}
+                  onChange={(micros) => set("priceMicros", micros)}
                 />
               </Labeled>
             </div>
@@ -663,6 +777,17 @@ function ItemDialog({
               <Switch size="sm" isSelected={form.active ?? true} onChange={(v) => set("active", v)} aria-label="在用" />
               在用（停用后不出现在开单下拉里）
             </label>
+            </div>
+
+            {/* 右栏：现有物料只读对照，照着已有写法录入，也避免建重 */}
+            <ItemCatalog
+              keyword={form.itemCode.trim() || form.itemName.trim()}
+              hint={
+                item === null && form.itemCode.trim() && duplicateCode
+                  ? `编码 ${form.itemCode.trim()} 已存在，换个编码或直接编辑那一条`
+                  : null
+              }
+            />
           </ModalBody>
           <ModalFooter>
             <Button size="small" variant="secondary" onClick={close} disabled={busy}>
@@ -695,10 +820,14 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
   const seq = useRef(0);
+  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
+  const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setOffset(0);
-  }, [keyword, mode]);
+  }, [keyword, mode, pageSize]);
 
   const load = useCallback(async () => {
     const ticket = ++seq.current;
@@ -708,7 +837,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         keyword: keyword.trim() || undefined,
         onlyActive: true,
         withDrawing: mode === "has",
-        limit: PAGE,
+        limit: pageSize,
         offset,
       };
       const [list, n] = await Promise.all([listItems(opts), countItems(opts)]);
@@ -721,7 +850,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [keyword, mode, offset]);
+  }, [keyword, mode, offset, pageSize]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -731,8 +860,8 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
   const filled = mode === "has";
 
   return (
-    <div className="mt-3 flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <SearchField
           aria-label="搜索图号或物料"
           placeholder="图号 / 物料编码 / 名称"
@@ -763,9 +892,9 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         </Button>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
         <table className="w-full min-w-[960px] table-fixed border-collapse text-[0.8125rem]">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="w-[180px] px-3 py-2 text-start font-medium whitespace-nowrap">图号</th>
               <th className="w-[148px] px-3 py-2 text-start font-medium whitespace-nowrap">物料编码</th>
@@ -837,17 +966,44 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         </table>
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
         <p className="text-body-2-regular text-text-tertiary">
-          第 {count(offset + 1)}–{count(Math.min(offset + PAGE, total))} 条，共 {count(total)} 条
+          第 {count(offset + 1)}–{count(Math.min(offset + pageSize, total))} 条，共 {count(total)} 条
         </p>
-        <div className="flex items-center gap-2">
-          <Button size="small" variant="secondary" onClick={() => setOffset(Math.max(0, offset - PAGE))} disabled={offset === 0 || loading}>
-            上一页
-          </Button>
-          <Button size="small" variant="secondary" onClick={() => setOffset(offset + PAGE)} disabled={offset + PAGE >= total || loading}>
-            下一页
-          </Button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+            每页
+            <select
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPageSize(next);
+                setOffset(0);
+                savePageSize(next);
+                tableRef.current?.scrollTo({ top: 0 });
+              }}
+              className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            条
+          </label>
+          <Pagination
+            page={pageIndex}
+            totalPages={pageCount}
+            onChange={(next) => {
+              setOffset(Math.max(0, (next - 1) * pageSize));
+              tableRef.current?.scrollTo({ top: 0 });
+            }}
+            previousLabel="上一页"
+            nextLabel="下一页"
+            aria-label="图号分页"
+          />
         </div>
       </div>
 
@@ -943,6 +1099,19 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Supplier | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Supplier | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const tableRef = useRef<HTMLDivElement>(null);
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const displayRows = useMemo(
+    () => rows.slice((page - 1) * pageSize, page * pageSize),
+    [rows, page, pageSize],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, pageSize]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -976,8 +1145,8 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   const used = useMemo(() => rows.filter((r) => r.hits > 0).length, [rows]);
 
   return (
-    <div className="mt-3 flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <SearchField
           aria-label="搜索供应商"
           placeholder="供应商名称"
@@ -996,9 +1165,9 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
         </Button>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
         <table className="w-full min-w-[800px] table-fixed border-collapse text-[0.8125rem]">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="px-3 py-2 text-start font-medium whitespace-nowrap">供应商名称</th>
               <th className="w-[130px] px-3 py-2 text-start font-medium whitespace-nowrap">联系人</th>
@@ -1016,7 +1185,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
                 </td>
               </tr>
             ) : (
-              rows.map((supplier) => (
+              displayRows.map((supplier) => (
                 <tr key={supplier.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
                   <td className="truncate px-3 py-1.5 text-text-primary" title={supplier.name}>{supplier.name}</td>
                   <td className="truncate px-3 py-1.5 text-text-tertiary" title={supplier.contact ?? ""}>{supplier.contact ?? "—"}</td>
@@ -1050,6 +1219,49 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
+        <p className="text-body-2-regular text-text-tertiary">
+          第 {count((page - 1) * pageSize + 1)}–{count(Math.min(page * pageSize, rows.length))} 家，共 {count(rows.length)} 家
+          <span className="mx-2 text-text-tertiary/40">·</span>
+          其中 {count(used)} 家已被台账引用
+        </p>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+            每页
+            <select
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPageSize(next);
+                setPage(1);
+                savePageSize(next);
+                tableRef.current?.scrollTo({ top: 0 });
+              }}
+              className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            家
+          </label>
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onChange={(next) => {
+              setPage(next);
+              tableRef.current?.scrollTo({ top: 0 });
+            }}
+            previousLabel="上一页"
+            nextLabel="下一页"
+            aria-label="供应商分页"
+          />
+        </div>
       </div>
 
       {editing ? (
@@ -1166,6 +1378,81 @@ function Labeled({ label, children }: { label: string; children: React.ReactNode
       {children}
     </div>
   );
+}
+
+/**
+ * 参考单价输入框。
+ *
+ * 不能像原来那样把值反推显示（`priceMicros / 10000` 再 toFixed(4)）：
+ * 敲「1.」的瞬间就被换算成 10000，输入框回显「1.0000」，小数点被吃掉，
+ * 接着打的小数就接到了后面，最后整段变 NaN 清空——所以只能整段粘贴才填得进去。
+ *
+ * 这里自己持有一份输入文字：
+ * · 打字时只更新文字，同时把能解析的数字同步出去（留空即清空）；
+ * · 失焦、回车、以及外部值被重置（例如换了一条物料）时才把文字规范成两位小数。
+ */
+function PriceInput({
+  value,
+  onChange,
+}: {
+  /** 万分之一元 */
+  value: number | null;
+  onChange: (micros: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(() => priceInput4(value));
+  // 自己刚刚发出去的值。父组件回传的这个值不能拿来改写输入框，
+  // 否则打字过程中每敲一位都会被「规范化」一次，末位会被截掉。
+  const sent = useRef<number | null>(value);
+
+  useEffect(() => {
+    // 只有外部把值改成了别的东西（换了一条物料、表单重置）才重写文字
+    if (value === sent.current) return;
+    sent.current = value;
+    setDraft(priceInput4(value));
+  }, [value]);
+
+  const emit = (text: string) => {
+    const micros = parsePriceToMicros(text);
+    sent.current = micros;
+    onChange(micros);
+  };
+
+  const normalize = () => {
+    // 输入到一半的「1.」「12.」在这里收敛成「1」「12」；非法内容按清空处理
+    const micros = parsePriceToMicros(draft);
+    setDraft(priceInput4(micros));
+    if (micros !== sent.current) {
+      sent.current = micros;
+      onChange(micros);
+    }
+  };
+
+  return (
+    <Input
+      size="small"
+      inputMode="decimal"
+      placeholder="0.00"
+      // 只留数字和小数点，且小数点最多一个：多打的点直接吞掉，不会把整段变成 NaN
+      value={draft}
+      onChange={(v) => {
+        const cleaned = sanitizePriceDraft(v);
+        setDraft(cleaned);
+        emit(cleaned);
+      }}
+      onBlur={normalize}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") normalize();
+      }}
+    />
+  );
+}
+
+/** 输入过程中的清洗：非数字字符丢弃，小数点只保留第一个。 */
+function sanitizePriceDraft(text: string): string {
+  const kept = text.replace(/[^0-9.]/g, "");
+  const dot = kept.indexOf(".");
+  if (dot < 0) return kept;
+  return kept.slice(0, dot + 1) + kept.slice(dot + 1).replace(/\./g, "");
 }
 
 

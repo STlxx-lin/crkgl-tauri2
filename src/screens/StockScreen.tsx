@@ -13,12 +13,24 @@ import { Button } from "@/components/base/buttons/button";
 import { ItemPicker } from "../components/ItemPicker";
 import { SearchField } from "@/components/base/search-field/search-field";
 import { Spinner } from "@/components/base/spinner/spinner";
+import { Pagination } from "@/components/base/pagination/pagination";
 import { toast } from "@/components/base/toast/toast";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/AppShell";
 
-const PAGE = 200;
+const PAGE_SIZES = [50, 100, 200, 500] as const;
+const PAGE_SIZE_KEY = "stock.pageSize";
+
+function storedPageSize(): number {
+  try {
+    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
+    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
+  } catch {
+    // 忽略
+  }
+  return 100;
+}
 
 type Tab = "stock" | "issues";
 
@@ -85,6 +97,10 @@ function StockTable() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
+  const tableRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
 
   // 关键字防抖后再查，避免连续敲击时向数据库排队发送重复重查询
@@ -98,7 +114,7 @@ function StockTable() {
 
   useEffect(() => {
     setOffset(0);
-  }, [onlyNegative]);
+  }, [onlyNegative, pageSize]);
 
   const load = useCallback(async () => {
     const ticket = ++seq.current;
@@ -107,7 +123,7 @@ function StockTable() {
       const opts = {
         keyword: debouncedKeyword || undefined,
         onlyNegative,
-        limit: PAGE,
+        limit: pageSize,
         offset,
       };
       const [list, n] = await Promise.all([fetchStockReport(opts), countStock(opts.keyword, onlyNegative)]);
@@ -120,7 +136,7 @@ function StockTable() {
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [debouncedKeyword, onlyNegative, offset]);
+  }, [debouncedKeyword, onlyNegative, offset, pageSize]);
 
   useEffect(() => {
     load();
@@ -194,7 +210,7 @@ function StockTable() {
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div ref={tableRef} className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
         <table className="w-full min-w-[1170px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
@@ -256,19 +272,50 @@ function StockTable() {
         </table>
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
         <p className="text-body-2-regular text-text-tertiary">
-          第 {count(offset + 1)}–{count(Math.min(offset + PAGE, total))} 个，共 {count(total)} 个
+          第 {count(offset + 1)}–{count(Math.min(offset + pageSize, total))} 个，共 {count(total)} 个
           <span className="mx-2 text-text-tertiary/40">·</span>
           本页入库 {qty(totals.inQty)} / 出库 {qty(totals.outQty)} / 结存 {qty(totals.stock)}
         </p>
-        <div className="flex items-center gap-2">
-          <Button size="small" variant="secondary" onClick={() => setOffset(Math.max(0, offset - PAGE))} disabled={offset === 0 || loading}>
-            上一页
-          </Button>
-          <Button size="small" variant="secondary" onClick={() => setOffset(offset + PAGE)} disabled={offset + PAGE >= total || loading}>
-            下一页
-          </Button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+            每页
+            <select
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPageSize(next);
+                try {
+                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
+                } catch {
+                  // 忽略
+                }
+                setOffset(0);
+                tableRef.current?.scrollTo({ top: 0 });
+              }}
+              className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            条
+          </label>
+          <Pagination
+            page={pageIndex}
+            totalPages={pageCount}
+            onChange={(next) => {
+              setOffset(Math.max(0, (next - 1) * pageSize));
+              tableRef.current?.scrollTo({ top: 0 });
+            }}
+            previousLabel="上一页"
+            nextLabel="下一页"
+            aria-label="库存分页"
+          />
         </div>
       </div>
     </div>

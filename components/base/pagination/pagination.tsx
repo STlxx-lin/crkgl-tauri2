@@ -35,6 +35,8 @@ export interface PaginationProps {
   previousLabel?: string;
   nextLabel?: string;
   "aria-label"?: string;
+  /** Whether to hide the pagination entirely when totalPages <= 1. Default false to maintain consistent layout. */
+  hideOnSinglePage?: boolean;
 }
 
 const DOTS = "dots";
@@ -101,17 +103,18 @@ export function Pagination({
   previousLabel = "Previous",
   nextLabel = "Next",
   "aria-label": ariaLabel = "Pagination",
+  hideOnSinglePage = false,
 }: PaginationProps) {
   const localize = useTemplateCopy();
   const [navRef, isCompact] = useIsCompact();
-  if (totalPages <= 1) return null;
+  if (totalPages <= 0 || (hideOnSinglePage && totalPages <= 1)) return null;
   const pages = paginationRange(page, totalPages, isCompact ? 0 : siblingCount);
 
   return localize((
     <nav
       ref={navRef}
       aria-label={ariaLabel}
-      className={cx("flex w-full items-center justify-between gap-2", className)}
+      className={cx("flex items-center gap-1.5", className)}
     >
       <Button
         variant="secondary"

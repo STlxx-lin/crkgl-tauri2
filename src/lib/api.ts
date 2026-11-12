@@ -258,6 +258,9 @@ export function bulkDeleteRows(ids: number[]): Promise<number> {
 
 // ---------- 基础资料 ----------
 
+/** 物料列表排序键。 */
+export type ItemOrder = "code" | "code_desc" | "name" | "newest" | "oldest";
+
 export function listItems(opts: {
   keyword?: string;
   category?: string | null;
@@ -267,6 +270,10 @@ export function listItems(opts: {
   withDrawing?: boolean | null;
   limit?: number;
   offset?: number;
+  /** true 时按建档时间倒序，最新建的在最前 */
+  recent?: boolean;
+  /** 排序方式；不传按编码升序 */
+  order?: ItemOrder;
 }): Promise<Item[]> {
   return call<Item[]>("items_list", {
     keyword: opts.keyword ?? null,
@@ -276,6 +283,8 @@ export function listItems(opts: {
     withDrawing: opts.withDrawing ?? null,
     limit: opts.limit ?? 200,
     offset: opts.offset ?? 0,
+    recent: opts.recent ?? false,
+    order: opts.order ?? null,
   });
 }
 
@@ -430,4 +439,16 @@ export async function fetchStockCheck(): Promise<{ issues: StockIssue[]; summary
 
 export function clearData(includeMaster = false): Promise<ClearOutcome> {
   return call<ClearOutcome>("data_clear", { includeMaster });
+}
+
+// ---------- 后台与开机自启 ----------
+
+/** 当前程序是否已登记开机自启（只认指向本 exe 的那条）。 */
+export function autostartStatus(): Promise<boolean> {
+  return call<boolean>("autostart_status");
+}
+
+/** 开 / 关开机自启；返回写完之后读回的真实状态。 */
+export function autostartSet(enabled: boolean): Promise<boolean> {
+  return call<boolean>("autostart_set", { enabled });
 }

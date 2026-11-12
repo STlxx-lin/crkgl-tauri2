@@ -145,10 +145,16 @@ pub fn next_doc_no(conn: &Connection, kind: &str, date: &str) -> DbResult<String
     Ok(format!("{compact}{:03}", seq + 1))
 }
 
-/// 物料快速输入的数据源：按编码聚合名称/单位，取最近一次的入库单价。
+/// 物料快速输入的数据源。
 ///
-/// `inbound_only` 为真时只统计 `kind='in'` 的行——开单页的「物料编码」要引用
-/// 真正入库过的物料，出库流水里那些只在领用单出现过的名字不该出现在候选里。
+/// 两个来源合在一起：
+/// 1. 台账 `ledger` 按编码聚合——名称/单位取最近值，单价取最近一次入库，带结存与历史次数；
+/// 2. 基础资料 `items`——刚建好还没入过库的物料也要能选到，否则新建的编码在开单页永远搜不出来。
+///
+/// 同一编码两边都有时以台账为准（有真实入库价和结存），基础资料只补台账里没有的编码。
+///
+/// `inbound_only` 为真时台账只统计 `kind='in'` 的行；基础资料里的物料本身就是
+/// 用户主动建的「将要用」的物料，不受这一项限制（它代表的是基础资料，不是出库流水）。
 pub fn item_master(
     conn: &Connection,
     keyword: Option<&str>,
@@ -173,15 +179,37 @@ pub fn item_master(
                    COALESCE(MAX(NULLIF(TRIM(item_name), '')), '') AS item_name,
                    MAX(NULLIF(TRIM(unit), '')) AS unit,
                    {hits_expr} AS hits,
-                   COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock_qty
+                   COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock_qty,
+                   0 AS from_master
             FROM ledger
             WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
               AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1)
             GROUP BY item_code
             HAVING (?3 = 0 OR hits > 0)
                AND (?4 = 0 OR stock_qty > 0)
-            ORDER BY hits DESC, item_code
-            LIMIT ?2
+        ),
+        -- 基础资料里新增、但台账还没有记录的物料（并集后由上面的 top_items 优先）
+        master_items AS (
+            SELECT item_code,
+                   COALESCE(NULLIF(TRIM(item_name), ''), item_code) AS item_name,
+                   NULLIF(TRIM(unit), '') AS unit,
+                   0 AS hits,
+                   0 AS stock_qty,
+                   1 AS from_master
+            FROM items
+            WHERE active = 1
+              AND TRIM(item_code) NOT IN ('-', '0')
+              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
+                   OR drawing_no LIKE ?1 OR spec LIKE ?1)
+              -- 只有库存过滤时才排除基础资料项：它们本来就没有结存
+              AND ?4 = 0
+        ),
+        merged AS (
+            SELECT item_code, item_name, unit, hits, stock_qty, from_master FROM top_items
+            UNION ALL
+            SELECT m.item_code, m.item_name, m.unit, m.hits, m.stock_qty, m.from_master
+            FROM master_items m
+            WHERE NOT EXISTS (SELECT 1 FROM top_items t WHERE t.item_code = m.item_code)
         )
         SELECT t.item_code,
                t.item_name,
@@ -191,8 +219,14 @@ pub fn item_master(
                  WHERE l2.item_code = t.item_code AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
                    {kind_sub}
                  ORDER BY l2.doc_date DESC, l2.id DESC LIMIT 1) AS last_price,
-               t.stock_qty
-        FROM top_items t",
+               t.stock_qty,
+               -- 台账里没有记录时回落到基础资料的参考单价
+               (SELECT i.price_micros FROM items i WHERE i.item_code = t.item_code AND i.price_micros > 0
+                 LIMIT 1) AS master_price,
+               t.from_master
+        FROM merged t
+        ORDER BY t.hits DESC, t.item_code
+        LIMIT ?2",
     );
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
@@ -206,12 +240,15 @@ pub fn item_master(
             |r| {
             let name: String = r.get(1)?;
             let code: String = r.get(0)?;
+            // 有台账单价就用台账的，没有才用基础资料的参考单价
+            let last_price: Option<i64> = r.get(4)?;
+            let master_price: Option<i64> = r.get(6)?;
             Ok(ItemMaster {
                 item_name: if name.is_empty() { code.clone() } else { name },
                 item_code: code,
                 unit: r.get(2)?,
                 hits: r.get(3)?,
-                last_price_micros: r.get(4)?,
+                last_price_micros: last_price.or(master_price),
                 stock_qty: r.get::<_, f64>(5).unwrap_or(0.0),
             })
         })
@@ -1040,6 +1077,79 @@ mod tests {
         // 不限来源时两者都在
         let all = db.with_loose(|c| item_master(c, None, 10, false, false)).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn item_master_includes_master_data_items() {
+        let db = Db::open_in_memory().unwrap();
+        // 台账里只有一条入库记录
+        db.with_loose(|c| {
+            create(c, &input("in", "2026-08-30", vec![line("WG-LED", "台账里的", 5.0, Some(15_000))]))
+        })
+        .unwrap();
+        // 基础资料里四条：一条与台账同码，三条台账没有
+        db.with_loose(|c| {
+            for (code, name, unit, price) in [
+                ("WG-LED", "台账里的", "件", 99_000i64),
+                ("WG-NEW", "新建但没入库", "套", 12_500),
+                ("WG-NEW2", "另一个新料", "米", 3_000),
+                ("WG-OFF", "停用的", "个", 1_000),
+            ] {
+                c.execute(
+                    "INSERT INTO items (item_code, item_name, unit, price_micros, active) VALUES (?1,?2,?3,?4,?5)",
+                    rusqlite::params![code, name, unit, price, if code == "WG-OFF" { 0 } else { 1 }],
+                )
+                .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let all = db.with_loose(|c| item_master(c, None, 50, true, false)).unwrap();
+        let codes: Vec<&str> = all.iter().map(|i| i.item_code.as_str()).collect();
+        assert!(codes.contains(&"WG-LED"), "台账物料要在: {codes:?}");
+        assert!(codes.contains(&"WG-NEW"), "基础资料新物料也要在: {codes:?}");
+        assert!(codes.contains(&"WG-NEW2"), "基础资料新物料也要在: {codes:?}");
+        assert!(!codes.contains(&"WG-OFF"), "停用的不该出现: {codes:?}");
+        // 同码时以台账为准：单价是入库价 15000，不是基础资料的 99000
+        let led = all.iter().find(|i| i.item_code == "WG-LED").unwrap();
+        assert_eq!(led.last_price_micros, Some(15_000));
+        assert_eq!(led.stock_qty, 5.0);
+
+        // 只靠基础资料补进来的，单价回落到参考单价
+        let new = all.iter().find(|i| i.item_code == "WG-NEW").unwrap();
+        assert_eq!(new.last_price_micros, Some(12_500));
+        assert_eq!(new.unit.as_deref(), Some("套"));
+        assert_eq!(new.hits, 0);
+
+        // 关键字也能搜到基础资料里的物料（按名称）
+        let by_name = db.with_loose(|c| item_master(c, Some("新料"), 50, true, false)).unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].item_code, "WG-NEW2");
+    }
+
+    #[test]
+    fn stock_filter_excludes_master_only_items() {
+        let db = Db::open_in_memory().unwrap();
+        // 账外物料（基础资料有、没库存）
+        db.with_loose(|c| {
+            c.execute(
+                "INSERT INTO items (item_code, item_name, unit, price_micros, active) VALUES ('WG-NOSTOCK','没结存','个',1000,1)",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        db.with_loose(|c| {
+            create(c, &input("in", "2026-08-30", vec![line("WG-HAS", "有结存", 8.0, Some(2_000))]))
+        })
+        .unwrap();
+
+        // 出库单只看有库存的：基础资料里没结存的物料不能出现
+        let in_stock = db.with_loose(|c| item_master(c, None, 50, true, true)).unwrap();
+        let codes: Vec<&str> = in_stock.iter().map(|i| i.item_code.as_str()).collect();
+        assert_eq!(codes, vec!["WG-HAS"], "只看库存时不该带出没结存的基础资料项");
     }
 
     #[test]

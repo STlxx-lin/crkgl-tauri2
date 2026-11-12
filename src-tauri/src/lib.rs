@@ -2,6 +2,7 @@
 //!
 //! 启动顺序：开库 → 首启自动导入 → 起 80 端口只读站 → 开窗口。
 
+pub mod autostart;
 pub mod commands;
 pub mod db;
 pub mod dict;
@@ -71,7 +72,24 @@ pub fn run() {
             }
 
             app.manage(state);
+
+            // 托盘常驻：关窗口只是收进托盘，后台的 80 端口站和数据一直活着；
+            // 真正退出走托盘菜单「退出」。
+            setup_tray(app.handle())?;
+            if autostart::launched_by_autostart() {
+                if let Some(win) = app.get_webview_window("main") {
+                    log::info!("开机自启拉起，窗口收进托盘");
+                    let _ = win.hide();
+                }
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 用户点右上角关闭 → 隐藏到托盘，不退出进程
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
@@ -129,7 +147,64 @@ pub fn run() {
             commands::data_clear,
             commands::local_addresses,
             commands::client_log,
+            commands::autostart_status,
+            commands::autostart_set,
+            commands::window_show,
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");
+}
+
+/// 托盘图标 + 菜单（显示主窗口 / 打开只读站 / 退出）。
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let open_site = MenuItem::with_id(app, "open_site", "打开局域网只读站", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &open_site, &PredefinedMenuItem::separator(app)?, &quit])?;
+
+    let icon = app.default_window_icon().cloned();
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("仓库出入库明细 · 关闭窗口后在后台继续运行")
+        .menu(&menu)
+        .show_menu_on_left_click(false);
+    if let Some(icon) = icon {
+        builder = builder.icon(icon);
+    }
+
+    builder
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+            "open_site" => {
+                let url = format!("http://localhost:{}", web::DEFAULT_PORT);
+                let _ = tauri_plugin_opener::open_url(url, None::<&str>);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击托盘图标：把主窗口叫回来
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(win) = tray.app_handle().get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
 }

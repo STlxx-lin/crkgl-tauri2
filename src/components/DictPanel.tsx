@@ -18,6 +18,7 @@ import { DICT_KINDS } from "../lib/types";
 import type { DictEntry, DictInput, DictKind } from "../lib/types";
 import { count } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
+import { Pagination } from "@/components/base/pagination/pagination";
 import { Input } from "@/components/base/input/input";
 import { SearchField } from "@/components/base/search-field/search-field";
 import { Switch } from "@/components/base/switch/switch";
@@ -26,6 +27,28 @@ import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/compo
 import { toast } from "@/components/base/toast/toast";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "./EmptyState";
+
+const PAGE_SIZES = [10, 20, 50, 100] as const;
+const DICT_PAGE_SIZE_KEY = "dict.pageSize";
+
+function storedDictPageSize(): number {
+  try {
+    const raw = localStorage.getItem(DICT_PAGE_SIZE_KEY);
+    if (!raw) return 20;
+    const n = Number(raw);
+    return PAGE_SIZES.includes(n as any) ? n : 20;
+  } catch {
+    return 20;
+  }
+}
+
+function saveDictPageSize(size: number) {
+  try {
+    localStorage.setItem(DICT_PAGE_SIZE_KEY, String(size));
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * 字典：单位 / 类别 / 类型 / 出库部门 / 采购人。
@@ -42,7 +65,20 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<DictEntry | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DictEntry | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(() => storedDictPageSize());
+  const tableRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const displayRows = useMemo(
+    () => rows.slice((page - 1) * pageSize, page * pageSize),
+    [rows, page, pageSize],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [kind, keyword, onlyActive, pageSize]);
 
   const meta = useMemo(() => DICT_KINDS.find((k) => k.kind === kind)!, [kind]);
   const label = meta.label;
@@ -99,8 +135,8 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
   const inUse = useMemo(() => rows.filter((r) => r.used > 0).length, [rows]);
 
   return (
-    <div className="mt-3 flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <SegmentedControl
           aria-label="字段字典"
           selectedKeys={[kind]}
@@ -153,19 +189,19 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
         </Button>
       </div>
 
-      <p className="text-caption-1-regular text-text-tertiary">
+      <p className="shrink-0 text-caption-1-regular text-text-tertiary">
         {handle} · 共 {count(rows.length)} 条，其中 {count(inUse)} 条已被数据引用。
         改名会同步改写台账与物料里用到它的行；还在用的条目只能停用，不能删。
       </p>
 
-      <div className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
         <table className="w-full min-w-[760px] table-fixed border-collapse text-[0.8125rem]">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
-              <th className="px-3 py-2 text-start font-medium whitespace-nowrap">{label}</th>
+              <th className="w-[220px] px-3 py-2 text-start font-medium whitespace-nowrap">{label}</th>
               <th className="w-[100px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">使用行数</th>
               <th className="w-[76px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">排序</th>
-              <th className="w-[120px] px-3 py-2 text-start font-medium whitespace-nowrap">备注</th>
+              <th className="px-3 py-2 text-start font-medium whitespace-nowrap">备注</th>
               <th className="w-[76px] px-3 py-2 text-center font-medium whitespace-nowrap">状态</th>
               <th className="w-[88px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
             </tr>
@@ -186,7 +222,7 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
                 </td>
               </tr>
             ) : (
-              rows.map((entry) => (
+              displayRows.map((entry) => (
                 <tr key={entry.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
                   <td className="truncate px-3 py-1.5 text-text-primary" title={entry.value}>
                     {entry.value}
@@ -234,6 +270,49 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
+        <p className="text-body-2-regular text-text-tertiary">
+          第 {count((page - 1) * pageSize + 1)}–{count(Math.min(page * pageSize, rows.length))} 条，共 {count(rows.length)} 条
+          <span className="mx-2 text-text-tertiary/40">·</span>
+          其中 {count(inUse)} 条已被数据引用
+        </p>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary">
+            每页
+            <select
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPageSize(next);
+                setPage(1);
+                saveDictPageSize(next);
+                tableRef.current?.scrollTo({ top: 0 });
+              }}
+              className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            条
+          </label>
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onChange={(next) => {
+              setPage(next);
+              tableRef.current?.scrollTo({ top: 0 });
+            }}
+            previousLabel="上一页"
+            nextLabel="下一页"
+            aria-label={`${label}分页`}
+          />
+        </div>
       </div>
 
       {editing ? (
