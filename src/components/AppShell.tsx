@@ -55,7 +55,7 @@ export function AppShell({ page, onPage, nav, remote, footer, children }: AppShe
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-background-full">
-      <aside className="flex w-60 shrink-0 flex-col border-e border-separator-border bg-background-secondary-default">
+      <aside className="flex w-60 shrink-0 flex-col overflow-y-auto border-e border-separator-border bg-background-secondary-default">
         <div className="flex items-center gap-2 px-4 pb-2 pt-5">
           <LedgerMark />
           <div className="min-w-0">

@@ -33,7 +33,7 @@ export function storedFontScale(): FontScale {
   return DEFAULT_SCALE;
 }
 
-function rootPxOf(scale: FontScale): number {
+export function rootPxOf(scale: FontScale): number {
   return (FONT_SCALES.find((s) => s.id === scale) ?? FONT_SCALES[1]).rootPx;
 }
 

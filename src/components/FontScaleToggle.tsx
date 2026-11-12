@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { cx } from "@/utils/cx";
-import { FONT_SCALES, applyFontScale, storedFontScale, onFontScaleChange, type FontScale } from "../lib/fontScale";
+import {
+  FONT_SCALES,
+  applyFontScale,
+  onFontScaleChange,
+  rootPxOf,
+  storedFontScale,
+  type FontScale,
+} from "../lib/fontScale";
 
 /**
  * 侧栏底部的字号控件：四档，点一下整体缩放。
@@ -29,7 +36,11 @@ export function FontScaleToggle({ className }: { className?: string }) {
       aria-label="界面字号"
       className={cx("flex flex-col gap-1.5", className)}
     >
-      <span className="text-caption-1-regular text-text-tertiary">字号</span>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-caption-1-regular text-text-tertiary">字号</span>
+        {/* 写真名档位而不是「大」：现场打电话说「还是小」时，能直接对上这一行 */}
+        <span className="text-caption-1-regular tabular-nums text-text-tertiary">{rootPxOf(scale)}px</span>
+      </div>
       <div className="grid grid-cols-4 gap-0.5 rounded-lg bg-background-secondary-default p-0.5">
         {FONT_SCALES.map((option) => {
           const selected = scale === option.id;
@@ -38,7 +49,7 @@ export function FontScaleToggle({ className }: { className?: string }) {
               key={option.id}
               type="button"
               aria-pressed={selected}
-              title={`${option.label}：${option.hint}`}
+              title={`${option.label}：${option.hint}（${option.rootPx}px）`}
               onClick={() => choose(option.id)}
               className={cx(
                 "h-7 rounded-md text-caption-1-semibold transition-colors outline-none",
@@ -53,6 +64,15 @@ export function FontScaleToggle({ className }: { className?: string }) {
           );
         })}
       </div>
+      {scale === "normal" ? null : (
+        <button
+          type="button"
+          onClick={() => choose("normal")}
+          className="self-start text-caption-1-regular text-text-tertiary underline-offset-2 hover:text-text-primary hover:underline"
+        >
+          恢复标准
+        </button>
+      )}
     </div>
   );
 }
