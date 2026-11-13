@@ -66,16 +66,33 @@ pub fn run() {
                 paths::remote_dist(app.path().resource_dir().ok().as_deref(), None)
             };
             log::info!("只读站静态目录: {dist:?}");
-            let handle = web::start(db, dist, web::DEFAULT_PORT);
+            let handle = web::start(db.clone(), dist, web::DEFAULT_PORT);
             if let Ok(mut slot) = state.web.lock() {
                 *slot = Some(handle);
             }
 
-            app.manage(state);
+            app.manage(state.clone());
 
             // 托盘常驻：关窗口只是收进托盘，后台的 80 端口站和数据一直活着；
             // 真正退出走托盘菜单「退出」。
             setup_tray(app.handle())?;
+
+            // 默认打开开机自动启动：只要用户没有手动在设置中关闭过，就默认开启并保持
+            let autostart_disabled = db::get_setting(&state.db, "autostart_disabled")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            if !autostart_disabled {
+                if let Ok(exe) = commands::current_exe() {
+                    if !autostart::is_enabled(&exe) {
+                        if let Err(e) = autostart::set_enabled(&exe, true) {
+                            log::warn!("默认开启开机自启失败: {e}");
+                        } else {
+                            log::info!("已默认开启开机自启: {}", exe.display());
+                        }
+                    }
+                }
+            }
+
             if autostart::launched_by_autostart() {
                 if let Some(win) = app.get_webview_window("main") {
                     log::info!("开机自启拉起，窗口收进托盘");

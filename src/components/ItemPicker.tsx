@@ -70,11 +70,11 @@ export function ItemPicker({
       setAnchor({
         left: r.left - hr.left,
         top: r.bottom - hr.top + 4,
-        width: Math.max(r.width, 320),
+        width: Math.max(r.width, 460),
         host,
       });
     } else {
-      setAnchor({ left: r.left, top: r.bottom + 4, width: Math.max(r.width, 320), host: null });
+      setAnchor({ left: r.left, top: r.bottom + 4, width: Math.max(r.width, 460), host: null });
     }
   };
 
@@ -252,6 +252,14 @@ export function ItemPicker({
                           <span className="truncate text-body-2-medium text-text-primary">{item.itemName}</span>
                         </span>
                         <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
+                          {item.spec ? (
+                            <span
+                              className="inline-flex max-w-[200px] shrink-0 items-center truncate rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default"
+                              title={`规格型号: ${item.spec}`}
+                            >
+                              规格: {item.spec}
+                            </span>
+                          ) : null}
                           {item.category ? <span>{item.category}</span> : null}
                           {item.unit ? <span>{item.unit}</span> : null}
                           {item.stockQty !== null && item.stockQty !== undefined ? (
@@ -291,7 +299,7 @@ function inboundToItems(rows: ItemMaster[]): Item[] {
     category: null,
     unit: row.unit,
     priceMicros: row.lastPriceMicros,
-    spec: null,
+    spec: row.spec ?? null,
     itemType: null,
     drawingNo: null,
     owner: null,

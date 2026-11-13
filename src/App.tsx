@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RiArrowDownSFill, RiArrowUpSFill, RiDatabase2Line, RiRefreshLine, RiServerLine } from "@remixicon/react";
+import { cx } from "@/utils/cx";
 import { bootstrap, fetchFacets, isTauri } from "./lib/api";
 import type { BootstrapInfo } from "./lib/types";
 import { count } from "./lib/format";
@@ -158,10 +159,15 @@ export default function App() {
           )
         }
       >
+        {/* 开单工作台保持常驻挂载：切换到其他页面查资料时，正在录入的内容、明细行和光标完整保留 */}
+        {isTauri ? (
+          <div className={cx("flex min-h-0 flex-1 flex-col", page !== "voucher" && "hidden")}>
+            <VoucherScreen active={page === "voucher"} onChanged={refreshBoot} />
+          </div>
+        ) : null}
+
         {page === "ledger" ? (
           <LedgerScreen boot={boot} onChanged={refreshBoot} />
-        ) : page === "voucher" ? (
-          <VoucherScreen onChanged={refreshBoot} />
         ) : page === "master" ? (
           <MasterScreen onChanged={refreshBoot} />
         ) : page === "summary" ? (
@@ -172,9 +178,9 @@ export default function App() {
           <ImportScreen onImported={refreshBoot} />
         ) : page === "settings" ? (
           <SettingsScreen boot={boot} onChanged={refreshBoot} />
-        ) : (
+        ) : page === "remote" ? (
           <RemoteScreen boot={boot} onChanged={refreshBoot} />
-        )}
+        ) : null}
       </AppShell>
       <Toaster />
       <span className="hidden" data-reload-key={reloadKey} />

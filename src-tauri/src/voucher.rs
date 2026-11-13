@@ -19,6 +19,7 @@ pub struct VoucherLineInput {
     pub delivery_no: Option<String>,
     pub item_code: Option<String>,
     pub item_name: Option<String>,
+    pub spec: Option<String>,
     pub unit: Option<String>,
     pub qty: Option<f64>,
     /// 单价（分）。出库没有单价，传 None。
@@ -56,6 +57,7 @@ pub struct VoucherLine {
     pub delivery_no: Option<String>,
     pub item_code: Option<String>,
     pub item_name: Option<String>,
+    pub spec: Option<String>,
     pub unit: Option<String>,
     pub qty: Option<f64>,
     pub price_micros: Option<i64>,
@@ -107,6 +109,7 @@ pub struct ItemMaster {
     pub item_code: String,
     pub item_name: String,
     pub unit: Option<String>,
+    pub spec: Option<String>,
     /// 最近一次入库单价（分）
     pub last_price_micros: Option<i64>,
     /// 历史出现次数，用于排序
@@ -178,12 +181,13 @@ pub fn item_master(
             SELECT item_code,
                    COALESCE(MAX(NULLIF(TRIM(item_name), '')), '') AS item_name,
                    MAX(NULLIF(TRIM(unit), '')) AS unit,
+                   MAX(NULLIF(TRIM(spec), '')) AS spec,
                    {hits_expr} AS hits,
                    COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock_qty,
                    0 AS from_master
             FROM ledger
             WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
-              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1)
+              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1 OR spec LIKE ?1)
             GROUP BY item_code
             HAVING (?3 = 0 OR hits > 0)
                AND (?4 = 0 OR stock_qty > 0)
@@ -193,6 +197,7 @@ pub fn item_master(
             SELECT item_code,
                    COALESCE(NULLIF(TRIM(item_name), ''), item_code) AS item_name,
                    NULLIF(TRIM(unit), '') AS unit,
+                   NULLIF(TRIM(spec), '') AS spec,
                    0 AS hits,
                    0 AS stock_qty,
                    1 AS from_master
@@ -205,15 +210,16 @@ pub fn item_master(
               AND ?4 = 0
         ),
         merged AS (
-            SELECT item_code, item_name, unit, hits, stock_qty, from_master FROM top_items
+            SELECT item_code, item_name, unit, spec, hits, stock_qty, from_master FROM top_items
             UNION ALL
-            SELECT m.item_code, m.item_name, m.unit, m.hits, m.stock_qty, m.from_master
+            SELECT m.item_code, m.item_name, m.unit, m.spec, m.hits, m.stock_qty, m.from_master
             FROM master_items m
             WHERE NOT EXISTS (SELECT 1 FROM top_items t WHERE t.item_code = m.item_code)
         )
         SELECT t.item_code,
                t.item_name,
                t.unit,
+               COALESCE(t.spec, (SELECT i.spec FROM items i WHERE i.item_code = t.item_code AND i.spec IS NOT NULL AND TRIM(i.spec) <> '' LIMIT 1)) AS spec,
                t.hits,
                (SELECT l2.price_micros FROM ledger l2
                  WHERE l2.item_code = t.item_code AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
@@ -241,15 +247,16 @@ pub fn item_master(
             let name: String = r.get(1)?;
             let code: String = r.get(0)?;
             // 有台账单价就用台账的，没有才用基础资料的参考单价
-            let last_price: Option<i64> = r.get(4)?;
-            let master_price: Option<i64> = r.get(6)?;
+            let last_price: Option<i64> = r.get(5)?;
+            let master_price: Option<i64> = r.get(7)?;
             Ok(ItemMaster {
                 item_name: if name.is_empty() { code.clone() } else { name },
                 item_code: code,
                 unit: r.get(2)?,
-                hits: r.get(3)?,
+                spec: r.get(3)?,
+                hits: r.get(4)?,
                 last_price_micros: last_price.or(master_price),
-                stock_qty: r.get::<_, f64>(5).unwrap_or(0.0),
+                stock_qty: r.get::<_, f64>(6).unwrap_or(0.0),
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -260,7 +267,7 @@ pub fn item_master(
 fn load_lines(conn: &Connection, voucher_id: i64) -> DbResult<Vec<VoucherLine>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, id, delivery_no, item_code, item_name, unit, qty, price_micros, amount_cents, remark
+            "SELECT id, id, delivery_no, item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark
              FROM ledger WHERE voucher_id = ?1 ORDER BY id",
         )
         .map_err(DbError::from)?;
@@ -272,11 +279,12 @@ fn load_lines(conn: &Connection, voucher_id: i64) -> DbResult<Vec<VoucherLine>> 
                 delivery_no: r.get(2)?,
                 item_code: r.get(3)?,
                 item_name: r.get(4)?,
-                unit: r.get(5)?,
-                qty: r.get(6)?,
-                price_micros: r.get(7)?,
-                amount_cents: r.get(8)?,
-                remark: r.get(9)?,
+                spec: r.get(5)?,
+                unit: r.get(6)?,
+                qty: r.get(7)?,
+                price_micros: r.get(8)?,
+                amount_cents: r.get(9)?,
+                remark: r.get(10)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -573,9 +581,9 @@ pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
         let mut stmt = tx
             .prepare(
                 "INSERT INTO ledger (import_id, voucher_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
-                    item_code, item_name, unit, qty, price_micros, amount_cents, remark,
+                    item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
                     partner, buyer, owner, receiver, flags)
-                 VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, '')",
+                 VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, '')",
             )
             .map_err(DbError::from)?;
         for (index, line) in input.lines.iter().enumerate() {
@@ -597,6 +605,7 @@ pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
                 trimmed(&line.delivery_no).or(trimmed(&input.delivery_no)),
                 trimmed(&line.item_code),
                 trimmed(&line.item_name),
+                trimmed(&line.spec),
                 trimmed(&line.unit),
                 line.qty,
                 line.price_micros,
@@ -680,9 +689,9 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
         let mut stmt = tx
             .prepare(
                 "INSERT INTO ledger (voucher_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
-                    item_code, item_name, unit, qty, price_micros, amount_cents, remark,
+                    item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
                     partner, buyer, owner, receiver, flags)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,'')",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,'')",
             )
             .map_err(DbError::from)?;
         for (index, line) in input.lines.iter().enumerate() {
@@ -700,6 +709,7 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
                 trimmed(&line.delivery_no).or(trimmed(&input.delivery_no)),
                 trimmed(&line.item_code),
                 trimmed(&line.item_name),
+                trimmed(&line.spec),
                 trimmed(&line.unit),
                 line.qty,
                 line.price_micros,
@@ -815,6 +825,7 @@ mod tests {
             delivery_no: None,
             item_code: Some(code.into()),
             item_name: Some(name.into()),
+            spec: None,
             unit: Some("个".into()),
             qty: Some(qty),
             price_micros: price,

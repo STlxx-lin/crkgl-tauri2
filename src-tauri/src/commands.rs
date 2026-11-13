@@ -135,6 +135,8 @@ pub struct QueryArgs {
     pub page: Option<i64>,
     #[serde(default)]
     pub page_size: Option<i64>,
+    #[serde(default)]
+    pub skip_totals: Option<bool>,
 }
 
 #[tauri::command]
@@ -142,7 +144,7 @@ pub fn ledger_page(state: State<'_, Arc<AppState>>, args: QueryArgs) -> Result<l
     let page = args.page.unwrap_or(1);
     let size = args.page_size.unwrap_or(100);
     web::validate_page(page, size)?;
-    ledger::page_from(&state.db, &args.filter, page, size)
+    ledger::page_from_opt(&state.db, &args.filter, page, size, args.skip_totals.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -381,7 +383,7 @@ pub fn local_addresses() -> Vec<String> {
 }
 
 /// 当前 exe 路径：开机自启项要指向它。
-fn current_exe() -> Result<PathBuf, String> {
+pub(crate) fn current_exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("取不到程序路径：{e}"))
 }
 
@@ -391,9 +393,15 @@ pub fn autostart_status() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn autostart_set(enabled: bool) -> Result<bool, String> {
+pub fn autostart_set(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<bool, String> {
     let exe = current_exe()?;
     crate::autostart::set_enabled(&exe, enabled)?;
+    // 记录用户是否显式关闭开机自启
+    let _ = crate::db::set_setting(
+        &state.db,
+        "autostart_disabled",
+        if enabled { "0" } else { "1" },
+    );
     // 读回真实状态：写注册表可能被组策略拦下，以磁盘上的结果为准
     Ok(crate::autostart::is_enabled(&exe))
 }

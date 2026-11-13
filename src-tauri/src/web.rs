@@ -255,6 +255,7 @@ struct PageQuery {
     desc: bool,
     page: Option<i64>,
     page_size: Option<i64>,
+    skip_totals: Option<bool>,
 }
 
 impl PageQuery {
@@ -442,11 +443,17 @@ async fn health(State(state): State<WebState>) -> Response {
 }
 
 async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
-    match ledger::page_from(
+    let page = query.page.unwrap_or(1);
+    let size = query.page_size.unwrap_or(100);
+    if let Err(err) = validate_page(page, size) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
+    }
+    match ledger::page_from_opt(
         &state.db,
         &query.filter(),
-        query.page.unwrap_or(1),
-        query.page_size.unwrap_or(100),
+        page,
+        size,
+        query.skip_totals.unwrap_or(false),
     ) {
         Ok(page) => Json(page).into_response(),
         Err(err) => server_error(err),

@@ -267,6 +267,9 @@ function BackgroundSetup() {
         <span className="flex flex-col gap-0.5">
           <span className="text-body-2-medium text-text-primary">
             开机自动启动，后台运行
+            <span className="ms-1.5 inline-flex items-center rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[0.6875rem] font-medium text-emerald-500">
+              默认开启
+            </span>
             {busy ? <span className="ms-2 text-caption-1-regular text-text-tertiary">正在写入…</span> : null}
           </span>
           <span className="text-caption-1-regular text-text-tertiary">

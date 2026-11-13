@@ -99,16 +99,47 @@ export function bootstrap(): Promise<BootstrapInfo> {
   return call<BootstrapInfo>("bootstrap");
 }
 
-export function fetchPage(filter: LedgerFilter, page: number, pageSize: number): Promise<LedgerPage> {
+export function fetchPage(
+  filter: LedgerFilter,
+  page: number,
+  pageSize: number,
+  skipTotals = false,
+): Promise<LedgerPage> {
   if (isTauri) {
-    return call<LedgerPage>("ledger_page", { args: { filter, page, pageSize } });
+    return call<LedgerPage>("ledger_page", { args: { filter, page, pageSize, skipTotals } });
   }
-  return getJson<LedgerPage>(`/api/ledger/page?${qs(filter)}&page=${page}&pageSize=${pageSize}`);
+  return getJson<LedgerPage>(
+    `/api/ledger/page?${qs(filter)}&page=${page}&pageSize=${pageSize}${skipTotals ? "&skipTotals=true" : ""}`,
+  );
 }
 
-export function fetchFacets(): Promise<Facets> {
-  if (isTauri) return call<Facets>("ledger_facets");
-  return getJson<Facets>("/api/ledger/facets");
+let cachedFacets: Facets | null = null;
+let facetsPromise: Promise<Facets> | null = null;
+
+export function fetchFacets(forceRefresh = false): Promise<Facets> {
+  if (!forceRefresh && cachedFacets) {
+    return Promise.resolve(cachedFacets);
+  }
+  if (!forceRefresh && facetsPromise) {
+    return facetsPromise;
+  }
+  const p = isTauri ? call<Facets>("ledger_facets") : getJson<Facets>("/api/ledger/facets");
+  facetsPromise = p
+    .then((res) => {
+      cachedFacets = res;
+      facetsPromise = null;
+      return res;
+    })
+    .catch((err) => {
+      facetsPromise = null;
+      throw err;
+    });
+  return facetsPromise;
+}
+
+export function invalidateFacetsCache(): void {
+  cachedFacets = null;
+  facetsPromise = null;
 }
 
 export function fetchDetail(id: number): Promise<LedgerRow | null> {
@@ -147,12 +178,14 @@ export function exportUrl(filter: LedgerFilter): string {
 
 // ---------- 写操作：只有桌面端 ----------
 
-export function updateRow(id: number, patch: Partial<LedgerRow>): Promise<void> {
-  return call<void>("ledger_update", { args: { id, patch } });
+export async function updateRow(id: number, patch: Partial<LedgerRow>): Promise<void> {
+  await call<void>("ledger_update", { args: { id, patch } });
+  invalidateFacetsCache();
 }
 
-export function deleteRow(id: number): Promise<void> {
-  return call<void>("ledger_delete", { id });
+export async function deleteRow(id: number): Promise<void> {
+  await call<void>("ledger_delete", { id });
+  invalidateFacetsCache();
 }
 
 export function exportLedger(filter: LedgerFilter, path: string): Promise<ExportResult> {
@@ -248,12 +281,16 @@ export function fetchItemMaster(
 
 // ---------- 批量 ----------
 
-export function bulkUpdateRows(ids: number[], patch: BulkPatch): Promise<number> {
-  return call<number>("ledger_bulk_update", { args: { ids, patch } });
+export async function bulkUpdateRows(ids: number[], patch: BulkPatch): Promise<number> {
+  const count = await call<number>("ledger_bulk_update", { args: { ids, patch } });
+  invalidateFacetsCache();
+  return count;
 }
 
-export function bulkDeleteRows(ids: number[]): Promise<number> {
-  return call<number>("ledger_bulk_delete", { ids });
+export async function bulkDeleteRows(ids: number[]): Promise<number> {
+  const count = await call<number>("ledger_bulk_delete", { ids });
+  invalidateFacetsCache();
+  return count;
 }
 
 // ---------- 基础资料 ----------

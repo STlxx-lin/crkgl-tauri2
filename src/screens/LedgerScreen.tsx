@@ -114,6 +114,17 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   const [mergeByDoc, setMergeByDoc] = useState(() => storedMergeByDoc());
   const requestId = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevQueryRef = useRef<{
+    filterKey: string;
+    pageSize: number;
+    totals: LedgerPage["totals"] | null;
+    total: number;
+  }>({
+    filterKey: "",
+    pageSize,
+    totals: null,
+    total: 0,
+  });
 
   // 关键字防抖后再查
   useEffect(() => {
@@ -130,13 +141,33 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
       .catch((err: unknown) => toast("筛选项读取失败", { description: String(err), status: "error" }));
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (forceRefreshTotals = false) => {
     const current = ++requestId.current;
     setLoading(true);
     try {
-      const result = await fetchPage(filter, page, pageSize);
+      const currentFilterKey = JSON.stringify(filter);
+      const isOnlyPaging =
+        !forceRefreshTotals &&
+        prevQueryRef.current.filterKey === currentFilterKey &&
+        prevQueryRef.current.pageSize === pageSize &&
+        prevQueryRef.current.totals !== null;
+      const result = await fetchPage(filter, page, pageSize, isOnlyPaging);
       if (current === requestId.current) {
-        setData(result);
+        if (isOnlyPaging && prevQueryRef.current.totals) {
+          setData({
+            ...result,
+            total: prevQueryRef.current.total,
+            totals: prevQueryRef.current.totals,
+          });
+        } else {
+          setData(result);
+          prevQueryRef.current = {
+            filterKey: currentFilterKey,
+            pageSize,
+            totals: result.totals,
+            total: result.total,
+          };
+        }
         // 换页/换筛选后旧的选择已经没有意义
         setSelectedIds(new Set());
       }
@@ -264,7 +295,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
       toast(`已修改 ${count(changed)} 行`, { status: "success" });
       setBulkOpen(false);
       setSelectedIds(new Set());
-      await load();
+      await load(true);
       onChanged();
     } catch (err) {
       toast("批量修改失败", { description: String(err), status: "error" });
@@ -281,7 +312,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
       toast(`已删除 ${count(removed)} 行`, { description: "开单产生的单据如果明细被删空，单据头也会一起清掉" });
       setBulkConfirmDelete(false);
       setSelectedIds(new Set());
-      await load();
+      await load(true);
       onChanged();
     } catch (err) {
       toast("批量删除失败", { description: String(err), status: "error" });
@@ -298,7 +329,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
       toast("已删除一行", { description: `${pendingDelete.itemName ?? pendingDelete.itemCode ?? ""} · 源表第 ${pendingDelete.rowNo} 行` });
       setPendingDelete(null);
       setDetailId(null);
-      await load();
+      await load(true);
       onChanged();
     } catch (err) {
       toast("删除失败", { description: String(err), status: "error" });
@@ -318,7 +349,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
         description={boot ? `共 ${count(boot.rowCount)} 行 · 入库 ${count(boot.inRows)} · 出库 ${count(boot.outRows)}` : "入库与出库明细"}
         actions={
           <>
-            <Button size="small" variant="secondary" leadingIcon={RiRefreshLine} onClick={load} disabled={loading}>
+            <Button size="small" variant="secondary" leadingIcon={RiRefreshLine} onClick={() => void load(true)} disabled={loading}>
               刷新
             </Button>
             <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={doExport} disabled={busy || total === 0}>
@@ -668,7 +699,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
             setDetail(null);
           }}
           onSaved={async () => {
-            await load();
+            await load(true);
             onChanged();
             if (detail) {
               const fresh = await fetchDetail(detail.id);

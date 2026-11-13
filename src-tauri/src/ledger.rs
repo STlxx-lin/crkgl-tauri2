@@ -55,7 +55,7 @@ pub struct LedgerRow {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerTotals {
     pub rows: i64,
@@ -151,7 +151,13 @@ fn order_by(sort: &Option<String>, desc: bool) -> String {
     };
     let dir = if desc { "DESC" } else { "ASC" };
     if column == "doc_date, id" {
-        format!("ORDER BY doc_date IS NULL, doc_date {dir}, id {dir}")
+        if desc {
+            // 倒序时 SQLite 默认将 NULL 视作最小值排在最后，无需 doc_date IS NULL，
+            // 从而能够直接命中 ix_ledger_date_id 复合索引，消除全表扫描与临时 B-Tree 排序。
+            "ORDER BY doc_date DESC, id DESC".to_string()
+        } else {
+            "ORDER BY doc_date IS NULL, doc_date ASC, id ASC".to_string()
+        }
     } else {
         format!("ORDER BY {column} IS NULL, {column} {dir}, id {dir}")
     }
@@ -251,10 +257,25 @@ pub fn totals(conn: &Connection, filter: &LedgerFilter) -> DbResult<LedgerTotals
 }
 
 pub fn page(conn: &Connection, filter: &LedgerFilter, page: i64, page_size: i64) -> DbResult<LedgerPage> {
+    page_with_opt(conn, filter, page, page_size, false)
+}
+
+pub fn page_with_opt(
+    conn: &Connection,
+    filter: &LedgerFilter,
+    page: i64,
+    page_size: i64,
+    skip_totals: bool,
+) -> DbResult<LedgerPage> {
     let page = page.max(1);
     let page_size = page_size.clamp(20, 500);
     let (where_sql, params) = compile_where(filter);
-    let totals = totals(conn, filter)?;
+    let totals = if skip_totals {
+        LedgerTotals::default()
+    } else {
+        totals(conn, filter)?
+    };
+    let total = totals.rows;
     let sql = format!(
         "SELECT {SELECT_COLUMNS_PUB} FROM ledger WHERE {where_sql} {} LIMIT ? OFFSET ?",
         order_by(&filter.sort, filter.desc)
@@ -269,7 +290,7 @@ pub fn page(conn: &Connection, filter: &LedgerFilter, page: i64, page_size: i64)
         .map_err(DbError::from)?;
     Ok(LedgerPage {
         rows,
-        total: totals.rows,
+        total,
         page,
         page_size,
         totals,
@@ -278,7 +299,17 @@ pub fn page(conn: &Connection, filter: &LedgerFilter, page: i64, page_size: i64)
 
 /// 带连接封装的翻页入口：桌面命令与 80 端口服务共用。
 pub fn page_from(db: &Db, filter: &LedgerFilter, page_no: i64, page_size: i64) -> DbResult<LedgerPage> {
-    db.with(|c| page(c, filter, page_no, page_size).map_err(DbError::from))
+    page_from_opt(db, filter, page_no, page_size, false)
+}
+
+pub fn page_from_opt(
+    db: &Db,
+    filter: &LedgerFilter,
+    page_no: i64,
+    page_size: i64,
+    skip_totals: bool,
+) -> DbResult<LedgerPage> {
+    db.with(|c| page_with_opt(c, filter, page_no, page_size, skip_totals).map_err(DbError::from))
 }
 
 pub fn detail(conn: &Connection, id: i64) -> DbResult<Option<LedgerRow>> {

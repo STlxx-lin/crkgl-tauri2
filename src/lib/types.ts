@@ -307,6 +307,7 @@ export interface VoucherLineInput {
   deliveryNo?: string | null;
   itemCode?: string | null;
   itemName?: string | null;
+  spec?: string | null;
   unit?: string | null;
   qty?: number | null;
   /** 单价（分）。出库没有单价。 */
@@ -333,6 +334,7 @@ export interface VoucherLine {
   deliveryNo: string | null;
   itemCode: string | null;
   itemName: string | null;
+  spec: string | null;
   unit: string | null;
   qty: number | null;
   priceMicros: number | null;
@@ -376,6 +378,7 @@ export interface ItemMaster {
   itemCode: string;
   itemName: string;
   unit: string | null;
+  spec: string | null;
   /** 最近一次入库单价（万分之一元） */
   lastPriceMicros: number | null;
   hits: number;

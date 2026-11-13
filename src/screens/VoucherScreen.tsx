@@ -58,6 +58,7 @@ interface DraftLine {
   qty: string;
   price: string;
   remark: string;
+  spec?: string;
 }
 
 interface HeadDraft {
@@ -100,7 +101,7 @@ function saveDocSearchOpen(open: boolean): void {
 let lineSeq = 0;
 function blankLine(): DraftLine {
   lineSeq += 1;
-  return { key: `l${lineSeq}`, deliveryNo: "", itemCode: "", itemName: "", unit: "", qty: "", price: "", remark: "" };
+  return { key: `l${lineSeq}`, deliveryNo: "", itemCode: "", itemName: "", unit: "", qty: "", price: "", remark: "", spec: "" };
 }
 
 function blankHead(kind: Kind): HeadDraft {
@@ -115,6 +116,125 @@ function blankHead(kind: Kind): HeadDraft {
   };
 }
 
+const VOUCHER_DRAFT_KEY = "ledger.voucher.draft";
+
+interface VoucherDraft {
+  mode: Mode;
+  head: HeadDraft;
+  lines: DraftLine[];
+}
+
+function loadVoucherDraft(): VoucherDraft | null {
+  try {
+    const raw = window.localStorage.getItem(VOUCHER_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      parsed.mode &&
+      (parsed.mode.kind === "in" || parsed.mode.kind === "out") &&
+      parsed.head &&
+      Array.isArray(parsed.lines) &&
+      parsed.lines.length > 0
+    ) {
+      return parsed;
+    }
+  } catch {
+    // 忽略解析错误
+  }
+  return null;
+}
+
+function clearVoucherDraft(): void {
+  try {
+    window.localStorage.removeItem(VOUCHER_DRAFT_KEY);
+  } catch {
+    // 忽略存储错误
+  }
+}
+
+function saveVoucherDraft(draft: VoucherDraft): void {
+  try {
+    window.localStorage.setItem(VOUCHER_DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    // 忽略存储错误
+  }
+}
+
+/**
+ * 开单表格物料名称旁边的规格型号标签。
+ * 默认以轻巧的徽标胶囊显示；点击可快速内联编辑修改。
+ */
+function SpecBadge({
+  value,
+  showAdd,
+  onChange,
+}: {
+  value?: string;
+  showAdd?: boolean;
+  onChange: (val: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(value ?? "");
+
+  useEffect(() => {
+    setText(value ?? "");
+  }, [value]);
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          setEditing(false);
+          onChange(text.trim());
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            setEditing(false);
+            onChange(text.trim());
+          } else if (e.key === "Escape") {
+            setEditing(false);
+            setText(value ?? "");
+          }
+        }}
+        className="h-6 w-24 shrink-0 rounded border border-border-focus-ring bg-background-primary-default px-1.5 font-mono text-[0.6875rem] text-text-primary outline-none"
+        placeholder="规格型号"
+      />
+    );
+  }
+
+  if (value && value.trim()) {
+    return (
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        title={`规格型号: ${value}（点击修改）`}
+        className="inline-flex max-w-[120px] shrink-0 items-center truncate rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default transition-colors hover:border-border-button-hover hover:text-text-primary"
+      >
+        {value}
+      </button>
+    );
+  }
+
+  if (showAdd) {
+    return (
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        title="添加规格型号"
+        className="shrink-0 text-[0.6875rem] text-text-tertiary opacity-0 transition-opacity hover:text-text-secondary group-hover/name:opacity-100"
+      >
+        +规格
+      </button>
+    );
+  }
+
+  return null;
+}
+
 /**
  * 开单页：入库单 / 出库单。
  *
@@ -122,10 +242,17 @@ function blankHead(kind: Kind): HeadDraft {
  * 加明细行（物料编码、名称、单位、数量、单价、合计、备注）。
  * 选物料时从历史台账带出单位与最近单价，减少重复录入。
  */
-export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
-  const [mode, setMode] = useState<Mode>({ kind: "in", id: null });
-  const [head, setHead] = useState<HeadDraft>(() => blankHead("in"));
-  const [lines, setLines] = useState<DraftLine[]>(() => [blankLine()]);
+export function VoucherScreen({
+  active = true,
+  onChanged,
+}: {
+  active?: boolean;
+  onChanged: () => void;
+}) {
+  const initialDraft = useRef(loadVoucherDraft());
+  const [mode, setMode] = useState<Mode>(() => initialDraft.current?.mode ?? { kind: "in", id: null });
+  const [head, setHead] = useState<HeadDraft>(() => initialDraft.current?.head ?? blankHead("in"));
+  const [lines, setLines] = useState<DraftLine[]>(() => initialDraft.current?.lines ?? [blankLine()]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   // 字典候选：单位按行选，出库部门与采购人在表头选
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
@@ -200,7 +327,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   const freshDocNo = useCallback(async (kind: Kind, docDate: string) => {
     try {
       const no = await nextDocNo(kind, docDate || today());
-      setHead((prev) => ({ ...prev, docNo: no }));
+      setHead((prev) => ({ ...prev, docNo: prev.docNo.trim() ? prev.docNo : no }));
     } catch (err) {
       toast("取号失败", { description: String(err), status: "error" });
     }
@@ -211,6 +338,42 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
     loadDicts();
     loadHistory();
   }, [loadSuppliers, loadDicts, loadHistory]);
+
+  // 从其他页面切回开单时，静默拉取最新的供应商、字典与历史单据，保证下拉框最新且不影响正在输入的表单
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (!wasActive.current && active) {
+      loadSuppliers();
+      loadDicts();
+      loadHistory();
+    }
+    wasActive.current = active;
+  }, [active, loadSuppliers, loadDicts, loadHistory]);
+
+  // 正在输入时自动防抖暂存草稿，防止误刷新或关闭应用丢失
+  useEffect(() => {
+    const hasContent =
+      head.partner.trim() !== "" ||
+      head.owner.trim() !== "" ||
+      head.receiver.trim() !== "" ||
+      head.buyer.trim() !== (mode.kind === "in" ? storedBuyer() : "") ||
+      lines.some(
+        (l) =>
+          l.deliveryNo.trim() !== "" ||
+          l.itemCode.trim() !== "" ||
+          l.itemName.trim() !== "" ||
+          l.qty.trim() !== "" ||
+          l.price.trim() !== "" ||
+          l.remark.trim() !== "",
+      );
+
+    if (hasContent || dirty.current) {
+      const timer = window.setTimeout(() => {
+        saveVoucherDraft({ mode, head, lines });
+      }, 250);
+      return () => window.clearTimeout(timer);
+    }
+  }, [mode, head, lines]);
 
   // 设置里改了「保存后打印」，编辑器跟着换
   useEffect(() => onPrintAfterSaveChange(setPrintAfterSave), []);
@@ -323,6 +486,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
         priceMicros: p === null || !Number.isFinite(p) ? null : p,
         amountCents: q === null || p === null ? null : Math.round((q * p) / 100),
         remark: line.remark.trim() || null,
+        spec: line.spec?.trim() || null,
       };
     });
     return {
@@ -351,6 +515,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
       itemCode: item.itemCode,
       itemName: item.itemName,
       unit: item.unit ?? "",
+      spec: item.spec ?? "",
     };
     if (mode.kind === "in" && item.priceMicros !== null && item.priceMicros !== undefined) {
       patch.price = String(item.priceMicros / 10_000);
@@ -359,6 +524,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
   };
 
   const startNew = async (kind: Kind) => {
+    clearVoucherDraft();
     setMode({ kind, id: null });
     setHead(blankHead(kind));
     setLines([blankLine()]);
@@ -420,6 +586,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
                 qty: line.qty === null ? "" : String(line.qty),
                 price: line.priceMicros === null ? "" : priceInput(line.priceMicros),
                 remark: line.remark ?? "",
+                spec: line.spec ?? "",
               };
             })
           : [blankLine()],
@@ -449,6 +616,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
           qty: line.qty.trim() === "" ? null : Number(line.qty),
           priceMicros: mode.kind === "in" && Number.isFinite(p) && line.price.trim() !== "" ? Math.round(p * 10000) : null,
           remark: line.remark.trim() || null,
+          spec: (line.spec ?? "").trim() || null,
         };
       });
 
@@ -478,6 +646,7 @@ export function VoucherScreen({ onChanged }: { onChanged: () => void }) {
         toast("单据已更新", { description: `${head.docNo} · ${count(payloadLines.length)} 行`, status: "success" });
       }
       dirty.current = false;
+      clearVoucherDraft();
       // 下次新开单沿用这次填的采购人
       if (mode.kind === "in" && head.buyer.trim()) saveBuyer(head.buyer);
       // 手输的新供应商存进基础资料，下次输两个字就能关联出来
@@ -733,13 +902,13 @@ const runDocSearch = useCallback(async (keyword: string) => {
 
             {/* 明细表：列与纸单一致；送货单号逐行填（一张单可能对应多张送货单） */}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1080px] table-fixed border-collapse text-[0.8125rem]">
+              <table className="w-full min-w-[960px] table-fixed border-collapse text-[0.8125rem]">
                 <thead>
                   <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
                     <th className="w-10 px-2 py-2 text-center font-medium">#</th>
                     {isIn ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
                     <th className="w-32 whitespace-nowrap px-2 py-2 text-start font-medium">物料编码</th>
-                    <th className="w-[20rem] min-w-[20rem] whitespace-nowrap px-2 py-2 text-start font-medium">物料名称</th>
+                    <th className="w-[18rem] min-w-[15rem] whitespace-nowrap px-2 py-2 text-start font-medium">物料名称</th>
                     <th className="w-20 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
                     <th className="w-16 px-2 py-2 text-end font-medium">数量</th>
                     {isIn ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
@@ -782,13 +951,22 @@ const runDocSearch = useCallback(async (keyword: string) => {
                         </td>
                         <td className="px-1 py-1">
                           {/* 名称列同样引用基础资料：选中一条会一并带出编码、单位与最近单价 */}
-                          <ItemPicker
-                            value={line.itemName}
-                            onPick={(item) => applyMaster(line.key, item)}
-                            onChangeText={(text) => setLine(line.key, { itemName: text })}
-                            inStockOnly={!isIn}
-                            placeholder={isIn ? "选或输入名称" : "选有库存的物料"}
-                          />
+                          <div className="group/name flex items-center gap-1.5">
+                            <div className="min-w-0 flex-1">
+                              <ItemPicker
+                                value={line.itemName}
+                                onPick={(item) => applyMaster(line.key, item)}
+                                onChangeText={(text) => setLine(line.key, { itemName: text })}
+                                inStockOnly={!isIn}
+                                placeholder={isIn ? "选或输入名称" : "选有库存的物料"}
+                              />
+                            </div>
+                            <SpecBadge
+                              value={line.spec}
+                              showAdd={Boolean(line.itemName && !line.spec)}
+                              onChange={(v) => setLine(line.key, { spec: v })}
+                            />
+                          </div>
                         </td>
                         <td className="px-1 py-1">
                           <ComboPicker
@@ -1220,8 +1398,20 @@ const runDocSearch = useCallback(async (keyword: string) => {
                           <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
                             {line.itemCode ?? "—"}
                           </td>
-                          <td className="truncate px-2 py-1 text-text-primary" title={line.itemName ?? ""}>
-                            {line.itemName ?? "—"}
+                          <td className="px-2 py-1 text-text-primary">
+                            <div className="flex items-center gap-1.5 truncate">
+                              <span className="truncate" title={line.itemName ?? ""}>
+                                {line.itemName ?? "—"}
+                              </span>
+                              {line.spec ? (
+                                <span
+                                  className="shrink-0 rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default"
+                                  title={`规格型号: ${line.spec}`}
+                                >
+                                  {line.spec}
+                                </span>
+                              ) : null}
+                            </div>
                           </td>
                           <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">{qty(line.qty)}</td>
@@ -1309,8 +1499,20 @@ const runDocSearch = useCallback(async (keyword: string) => {
                           <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
                             {line.itemCode ?? "—"}
                           </td>
-                          <td className="truncate px-2 py-1 text-text-primary" title={line.itemName ?? ""}>
-                            {line.itemName ?? "—"}
+                          <td className="px-2 py-1 text-text-primary">
+                            <div className="flex items-center gap-1.5 truncate">
+                              <span className="truncate" title={line.itemName ?? ""}>
+                                {line.itemName ?? "—"}
+                              </span>
+                              {line.spec ? (
+                                <span
+                                  className="shrink-0 rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default"
+                                  title={`规格型号: ${line.spec}`}
+                                >
+                                  {line.spec}
+                                </span>
+                              ) : null}
+                            </div>
                           </td>
                           <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">{qty(line.qty)}</td>
@@ -1380,10 +1582,17 @@ const runDocSearch = useCallback(async (keyword: string) => {
               } else {
                 const fresh = blankLine();
                 dirty.current = true;
-                setLines((prev) => [
-                  ...prev,
-                  { ...fresh, itemCode: item.itemCode, itemName: item.itemName, unit: item.unit ?? "" },
-                ]);
+                const freshLine: DraftLine = {
+                  ...fresh,
+                  itemCode: item.itemCode,
+                  itemName: item.itemName,
+                  unit: item.unit ?? "",
+                  spec: item.spec ?? "",
+                };
+                if (mode.kind === "in" && item.priceMicros !== null && item.priceMicros !== undefined) {
+                  freshLine.price = String(item.priceMicros / 10_000);
+                }
+                setLines((prev) => [...prev, freshLine]);
               }
             }
           }}

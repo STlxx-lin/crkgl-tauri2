@@ -29,6 +29,7 @@ fn line(code: &str, name: &str, qty: f64, price: Option<i64>) -> VoucherLineInpu
         delivery_no: None,
         item_code: Some(code.into()),
         item_name: Some(name.into()),
+        spec: None,
         unit: Some("个".into()),
         qty: Some(qty),
         price_micros: price,
