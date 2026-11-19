@@ -352,6 +352,37 @@ pub fn sync_from_data(conn: &Connection) -> DbResult<usize> {
     Ok((after - before).max(0) as usize)
 }
 
+// ---------- 导出 ----------
+
+/// 字典导出：按类别导出当前筛选结果，列头用中文类别名。
+///
+/// 复用 `list`，导出的就是屏幕上那一批（含「只看在用」的取舍）。
+pub fn export_csv(
+    conn: &Connection,
+    kind: &str,
+    keyword: Option<&str>,
+    only_active: bool,
+) -> DbResult<(String, i64)> {
+    let rows = list(conn, kind, keyword, only_active)?;
+    let mut out = String::from("\u{feff}");
+    // 第一列列名跟着类别走，导进 Excel 一眼能看出这是哪本字典
+    out.push_str(&format!(
+        "{},使用行数,排序,备注,状态\n",
+        kind_label(kind)
+    ));
+    for entry in &rows {
+        let fields = [
+            entry.value.clone(),
+            entry.used.to_string(),
+            entry.sort_no.to_string(),
+            entry.remark.clone().unwrap_or_default(),
+            if entry.active { "在用" } else { "停用" }.to_string(),
+        ];
+        out.push_str(&crate::ledger::csv_row(&fields));
+    }
+    Ok((out, rows.len() as i64))
+}
+
 // ---------- Db 包装 ----------
 
 pub fn list_db(db: &Db, kind: &str, keyword: Option<&str>, only_active: bool) -> DbResult<Vec<DictEntry>> {
@@ -376,6 +407,11 @@ pub fn delete_db(db: &Db, id: i64) -> DbResult<()> {
 
 pub fn sync_db(db: &Db) -> DbResult<usize> {
     db.with(|c| sync_from_data(c).map_err(DbError))
+}
+
+/// 字典导出（连接封装版）。
+pub fn export_db(db: &Db, kind: &str, keyword: Option<&str>, only_active: bool) -> DbResult<(String, i64)> {
+    db.with(|c| export_csv(c, kind, keyword, only_active).map_err(DbError))
 }
 
 #[cfg(test)]
@@ -478,5 +514,45 @@ mod tests {
         assert_eq!(counts.len(), 5);
         assert_eq!(counts[0].kind, "unit");
         assert!(counts.iter().all(|c| c.total >= 1));
+    }
+
+    #[test]
+    fn export_csv_uses_kind_label_and_filters() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db);
+        sync_db(&db).unwrap();
+
+        // 单位：个 / 只 两条都该导出，列头是「单位」
+        let (csv, n) = export_db(&db, "unit", None, false).unwrap();
+        assert_eq!(n, 2);
+        assert!(csv.starts_with('\u{feff}'), "Excel 打开不能乱码");
+        assert!(csv.starts_with("\u{feff}单位,"), "首列列名应跟随字典类别");
+        assert!(csv.contains("个") && csv.contains("只"));
+
+        // 关键字 + 只看在用：能筛窄
+        let (_, n) = export_db(&db, "unit", Some("个"), true).unwrap();
+        assert_eq!(n, 1);
+
+        // 非法类别必须报错而不是导出空文件
+        assert!(export_db(&db, "nope", None, false).is_err());
+    }
+
+    #[test]
+    fn export_csv_escapes_commas_in_values() {
+        let db = Db::open_in_memory().unwrap();
+        create_db(
+            &db,
+            &DictInput {
+                kind: "unit".into(),
+                value: "套,件".into(),
+                sort_no: None,
+                remark: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let (csv, n) = export_db(&db, "unit", None, false).unwrap();
+        assert_eq!(n, 1);
+        assert!(csv.contains("\"套,件\""), "含逗号的值要加引号");
     }
 }

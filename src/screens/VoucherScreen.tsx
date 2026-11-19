@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RiAddLine,
   RiArrowDownLine,
+  RiArrowLeftRightLine,
   RiDeleteBinLine,
   RiFileAddLine,
   RiFileList3Line,
@@ -594,6 +595,64 @@ export function VoucherScreen({
       dirty.current = false;
     } catch (err) {
       toast("单据读取失败", { description: String(err), status: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * 把弹窗里这张单抄成一张反向类型的新单（入库↔出库）载进左边表单：
+   * 明细原样带过去，单据编号重新取号（不能沿用原单号），单头里
+   * 供应商↔出库部门互换 —— 入库单的 partner 是供应商，出库单的 owner 是部门，语义不同。
+   * 存单成功后才清空弹窗里的原单，不会动原单本身。
+   */
+  const convertVoucher = async (voucher: Voucher) => {
+    const target: Kind = voucher.kind === "in" ? "out" : "in";
+    const label = kindLabel(target);
+    if (dirty.current && !window.confirm(`左边有未保存的内容，「转为${label}」会覆盖。继续？`)) {
+      return;
+    }
+    const carried = voucher.lines.filter((line) => line.itemCode || line.itemName);
+    if (carried.length === 0) {
+      toast("这张单没有可转换的明细", { status: "error" });
+      return;
+    }
+    setBusy(true);
+    try {
+      setViewingVoucher(null);
+      setMode({ kind: target, id: null });
+      setHead({
+        docNo: "",
+        docDate: today(),
+        // 入库单的供应商 → 出库单只能落到出库部门；反过来出库部门不会当供应商带过去
+        partner: target === "in" ? "" : voucher.partner ?? "",
+        buyer: head.buyer,
+        owner: target === "in" ? "" : voucher.partner ?? voucher.owner ?? "",
+        receiver: voucher.receiver ?? "",
+        storekeeper: "",
+      });
+      setLines(
+        carried.map((line) => {
+          lineSeq += 1;
+          return {
+            key: `l${lineSeq}`,
+            deliveryNo: line.deliveryNo ?? voucher.deliveryNo ?? "",
+            itemCode: line.itemCode ?? "",
+            itemName: line.itemName ?? "",
+            unit: line.unit ?? "",
+            qty: line.qty === null ? "" : String(line.qty),
+            // 出库单不记单价，转成入库单时留空让用户按当前进价填
+            price: target === "in" && line.priceMicros !== null ? priceInput(line.priceMicros) : "",
+            remark: line.remark ?? "",
+            spec: line.spec ?? "",
+          };
+        }),
+      );
+      dirty.current = false;
+      await freshDocNo(target, today());
+      toast(`已转为${label}，核对后保存`, { status: "success" });
+    } catch (err) {
+      toast("转换失败", { description: String(err), status: "error" });
     } finally {
       setBusy(false);
     }
@@ -1451,6 +1510,18 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 </Button>
                 <Button size="small" variant="secondary" onClick={close}>
                   关闭
+                </Button>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  leadingIcon={RiArrowLeftRightLine}
+                  title={`把这单的明细抄成一张新的${kindLabel(viewingVoucher.kind === "in" ? "out" : "in")}；原单不受影响`}
+                  onClick={() => {
+                    close();
+                    convertVoucher(viewingVoucher);
+                  }}
+                >
+                  {viewingVoucher.kind === "in" ? "转出库单" : "转入库单"}
                 </Button>
                 <Button size="small" onClick={() => loadVoucherIntoForm(viewingVoucher)}>
                   载入编辑

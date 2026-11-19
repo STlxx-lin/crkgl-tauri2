@@ -597,7 +597,10 @@ pub fn trim_float(v: f64) -> String {
     }
 }
 
-fn csv_row(fields: &[String]) -> String {
+/// 一行 CSV：字段里有逗号/引号/换行时用引号包起来并把引号翻倍。
+///
+/// 台账导出与基础资料导出共用，避免两套转义规则写岔。
+pub(crate) fn csv_row(fields: &[String]) -> String {
     let escaped: Vec<String> = fields
         .iter()
         .map(|f| {

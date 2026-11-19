@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RiAddLine,
   RiDeleteBinLine,
+  RiDownload2Line,
   RiPencilLine,
   RiRefreshLine,
   RiSearchLine,
@@ -9,6 +10,7 @@ import {
 import {
   createDict,
   deleteDict,
+  exportDict,
   isTauri,
   listDict,
   syncDict,
@@ -17,6 +19,7 @@ import {
 import { DICT_KINDS } from "../lib/types";
 import type { DictEntry, DictInput, DictKind } from "../lib/types";
 import { count } from "../lib/format";
+import { exportFileName, saveCsvFile } from "../lib/exportCsv";
 import { Button } from "@/components/base/buttons/button";
 import { Pagination } from "@/components/base/pagination/pagination";
 import { Input } from "@/components/base/input/input";
@@ -134,6 +137,12 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
 
   const inUse = useMemo(() => rows.filter((r) => r.used > 0).length, [rows]);
 
+  // 导出当前类别 + 关键字 + 只看在用这一组合下的全部条目
+  const doExport = () =>
+    saveCsvFile(`导出${label}`, exportFileName(`字典_${label}`), (path) =>
+      exportDict(kind, keyword.trim() || undefined, onlyActive, path),
+    );
+
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -177,6 +186,16 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
           title="从物料与台账现有数据里补登记缺的值"
         >
           从数据补齐
+        </Button>
+        <Button
+          size="small"
+          variant="secondary"
+          leadingIcon={RiDownload2Line}
+          onClick={doExport}
+          disabled={!isTauri || rows.length === 0}
+          title={`按当前筛选导出全部${label}`}
+        >
+          导出 CSV
         </Button>
         <Button
           size="small"

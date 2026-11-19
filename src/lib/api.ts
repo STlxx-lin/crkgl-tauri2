@@ -385,6 +385,51 @@ export function backfillMaster(): Promise<[number, number]> {
   return call<[number, number]>("master_backfill");
 }
 
+// ---------- 基础资料导出（只有桌面端） ----------
+
+/** 物料导出：筛选口径与列表页一致，导出全部命中行。 */
+export function exportItems(
+  opts: {
+    keyword?: string;
+    category?: string | null;
+    itemType?: string | null;
+    onlyActive?: boolean;
+    withDrawing?: boolean | null;
+    order?: ItemOrder;
+  },
+  path: string,
+): Promise<ExportResult> {
+  return call<ExportResult>("master_items_export", {
+    args: {
+      keyword: opts.keyword ?? null,
+      category: opts.category ?? null,
+      itemType: opts.itemType ?? null,
+      onlyActive: opts.onlyActive ?? false,
+      withDrawing: opts.withDrawing ?? null,
+      order: opts.order ?? null,
+    },
+    path,
+  });
+}
+
+/** 供应商导出。 */
+export function exportSuppliers(keyword: string | undefined, path: string): Promise<ExportResult> {
+  return call<ExportResult>("master_suppliers_export", { args: { keyword: keyword ?? null }, path });
+}
+
+/** 字典导出：按类别 + 关键字 + 只看在用。 */
+export function exportDict(
+  kind: DictKind,
+  keyword: string | undefined,
+  onlyActive: boolean,
+  path: string,
+): Promise<ExportResult> {
+  return call<ExportResult>("master_dict_export", {
+    args: { kind, keyword: keyword ?? null, onlyActive },
+    path,
+  });
+}
+
 // ---------- 字典（单位 / 类别 / 类型 / 出库部门 / 采购人） ----------
 
 export function listDict(kind: DictKind, keyword?: string, onlyActive = false): Promise<DictEntry[]> {

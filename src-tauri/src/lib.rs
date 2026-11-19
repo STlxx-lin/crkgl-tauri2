@@ -34,6 +34,9 @@ pub fn run() {
         .build();
 
     tauri::Builder::default()
+        // 单实例插件必须最先注册：第二个实例在进入其余 setup 之前就被判定并退出，
+        // 否则会先开库、先占 80 端口，反而干扰已经在跑的那一份。
+        .plugin(single_instance_plugin())
         .plugin(log_plugin)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -159,6 +162,9 @@ pub fn run() {
             commands::master_stats,
             commands::master_import_workbook,
             commands::master_backfill,
+            commands::master_items_export,
+            commands::master_suppliers_export,
+            commands::master_dict_export,
             commands::ledger_bulk_update,
             commands::ledger_bulk_delete,
             commands::data_clear,
@@ -170,6 +176,60 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("启动失败");
+}
+
+/// 单实例控制：第二次启动时把参数转交给已运行的实例，然后把主窗口叫到前台。
+///
+/// 判定依据是操作系统级的锁（Windows 命名互斥量 / Linux D-Bus 名 / macOS Unix socket），
+/// 按 `identifier` 生成名字，比「按进程名扫描」更准：改名后的副本、不同安装目录都能识别，
+/// 也不会因为存在同名的无关进程而误判成未运行。第二个实例由插件直接 `exit(0)`，
+/// 不会走到 `setup`，因此不会重复开库、重复占端口。
+fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // 已经有一个实例在跑：把它的窗口显示出来并置前，用户能看到反馈
+        log::info!("检测到已有实例在运行，本次启动转入已有窗口");
+        // 回调可能早于第一个实例的窗口创建完成（例如刚开机自启、用户立刻双击图标），
+        // 因此放到后台线程轮询等待窗口注册就绪；在事件循环线程上直接 sleep 会阻塞窗口创建。
+        let app = app.clone();
+        std::thread::spawn(move || {
+            // 最多等 5 秒，每 200ms 探测一次主窗口
+            let mut waited = 0u32;
+            while app.get_webview_window("main").is_none() && waited < 5_000 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                waited += 200;
+            }
+            // 窗口可见性/焦点操作必须在主线程执行
+            let handle = app.clone();
+            if let Err(e) = app.run_on_main_thread(move || {
+                // 找不到主窗口（极少见）时只记日志，不影响已有实例继续运行
+                if !bring_main_window_to_front(&handle) {
+                    log::warn!("已有实例在运行，但找不到主窗口");
+                }
+            }) {
+                log::warn!("无法把唤起窗口的任务投递到主线程: {e}");
+            }
+        });
+    })
+}
+
+/// 把主窗口从托盘/最小化状态恢复到前台；窗口不存在时返回 `false`。
+///
+/// 单实例唤醒、托盘菜单「显示主窗口」、托盘图标左键点击三处共用这一份逻辑。
+fn bring_main_window_to_front(app: &tauri::AppHandle) -> bool {
+    let Some(win) = app.get_webview_window("main") else {
+        return false;
+    };
+    // 三步各自容错：某一步失败（如窗口正被系统重建）不应阻断后续步骤
+    if let Err(e) = win.show() {
+        log::warn!("唤醒主窗口失败: {e}");
+    }
+    if let Err(e) = win.unminimize() {
+        log::warn!("取消最小化失败: {e}");
+    }
+    if let Err(e) = win.set_focus() {
+        log::warn!("主窗口置前失败: {e}");
+    }
+    true
 }
 
 /// 托盘图标 + 菜单（显示主窗口 / 打开只读站 / 退出）。
@@ -194,11 +254,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     builder
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.unminimize();
-                    let _ = win.set_focus();
-                }
+                // 与单实例唤醒共用同一份「显示 + 取消最小化 + 置前」逻辑
+                bring_main_window_to_front(app);
             }
             "open_site" => {
                 let url = format!("http://localhost:{}", web::DEFAULT_PORT);
@@ -215,11 +272,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                if let Some(win) = tray.app_handle().get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.unminimize();
-                    let _ = win.set_focus();
-                }
+                bring_main_window_to_front(tray.app_handle());
             }
         })
         .build(app)?;

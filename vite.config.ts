@@ -23,10 +23,12 @@ export default defineConfig(({ mode }) => ({
   base: "/",
   clearScreen: false,
   server: {
-    port: 1422,
+    // 1422 落在 Windows 保留段（netsh excludedportrange protocol=tcp 显示 1420-1519，
+    // Hyper-V/WSL NAT 占用），绑定 ::1:1422 直接 EACCES。改用 Vite 默认端口 5173
+    port: 5173,
     strictPort: true,
     host: host || false,
-    hmr: host ? { protocol: "ws", host, port: 1423 } : undefined,
+    hmr: host ? { protocol: "ws", host, port: 5174 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
     proxy: {
       "/api": {

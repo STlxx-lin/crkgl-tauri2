@@ -209,8 +209,26 @@ pub fn list_items_ordered(
     list_items_sorted(conn, keyword, category, item_type, only_active, with_drawing, limit, offset, order)
 }
 
-/// 带排序的版本：基础资料列表的列头排序走这里。
-pub fn list_items_sorted(
+/// 物料列表的过滤条件（列表、计数、导出三处共用同一套语义）。
+///
+/// 参数位固定为：?1 关键字、?2 类别、?3 只看在用、?4 分页条数、?5 偏移、
+/// ?6 类型、?7 图号（1 有 / 0 无）。
+const ITEM_FILTER_SQL: &str = "WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
+                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
+           AND (?2 IS NULL OR category = ?2)
+           AND (?6 IS NULL OR item_type = ?6)
+           AND (?3 = 0 OR active = 1)
+           -- 过滤只有 '-' / '0' 的粘贴残留，它们不是真编码
+           AND TRIM(item_code) NOT IN ('-', '0')
+           -- ?7 = 1 只看有图号，0 只看没图号的
+           AND (
+             ?7 IS NULL
+             OR (?7 = 1 AND TRIM(COALESCE(drawing_no,'')) <> '')
+             OR (?7 = 0 AND TRIM(COALESCE(drawing_no,'')) = '')
+           )";
+
+/// 按过滤条件取物料行。`limit` 传负数表示不限条数（SQLite 的 LIMIT -1）。
+fn query_items(
     conn: &Connection,
     keyword: Option<&str>,
     category: Option<&str>,
@@ -226,25 +244,9 @@ pub fn list_items_sorted(
         .filter(|k| !k.is_empty())
         .map(|k| format!("%{k}%"));
     let category = category.map(str::trim).filter(|c| !c.is_empty());
-    let limit = limit.clamp(1, 500);
-    let order = order.clause();
     let sql = format!(
-        "SELECT {ITEM_COLUMNS} FROM items
-         WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
-           AND (?2 IS NULL OR category = ?2)
-           AND (?6 IS NULL OR item_type = ?6)
-           AND (?3 = 0 OR active = 1)
-           -- 过滤只有 '-' / '0' 的粘贴残留，它们不是真编码
-           AND TRIM(item_code) NOT IN ('-', '0')
-           -- ?7 = 1 只看有图号，0 只看没图号的
-           AND (
-             ?7 IS NULL
-             OR (?7 = 1 AND TRIM(COALESCE(drawing_no,'')) <> '')
-             OR (?7 = 0 AND TRIM(COALESCE(drawing_no,'')) = '')
-           )
-         {order}
-         LIMIT ?4 OFFSET ?5"
+        "SELECT {ITEM_COLUMNS} FROM items {ITEM_FILTER_SQL} {} LIMIT ?4 OFFSET ?5",
+        order.clause()
     );
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
@@ -265,6 +267,31 @@ pub fn list_items_sorted(
     Ok(rows)
 }
 
+/// 带排序的版本：基础资料列表的列头排序走这里。
+pub fn list_items_sorted(
+    conn: &Connection,
+    keyword: Option<&str>,
+    category: Option<&str>,
+    item_type: Option<&str>,
+    only_active: bool,
+    with_drawing: Option<bool>,
+    limit: i64,
+    offset: i64,
+    order: ItemOrder,
+) -> DbResult<Vec<Item>> {
+    query_items(
+        conn,
+        keyword,
+        category,
+        item_type,
+        only_active,
+        with_drawing,
+        limit.clamp(1, 500),
+        offset,
+        order,
+    )
+}
+
 pub fn count_items(
     conn: &Connection,
     keyword: Option<&str>,
@@ -280,24 +307,16 @@ pub fn count_items(
     let category = category.map(str::trim).filter(|c| !c.is_empty());
     let item_type = item_type.map(str::trim).filter(|t| !t.is_empty());
     conn.query_row(
-        "SELECT COUNT(*) FROM items
-         WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
-           AND (?2 IS NULL OR category = ?2)
-           AND (?5 IS NULL OR item_type = ?5)
-           AND (?3 = 0 OR active = 1)
-           AND TRIM(item_code) NOT IN ('-', '0')
-           AND (
-             ?4 IS NULL
-             OR (?4 = 1 AND TRIM(COALESCE(drawing_no,'')) <> '')
-             OR (?4 = 0 AND TRIM(COALESCE(drawing_no,'')) = '')
-           )",
+        // 与列表共用同一段 WHERE，保证「共 N 条」和翻出来的行始终对得上
+        &format!("SELECT COUNT(*) FROM items {ITEM_FILTER_SQL}"),
         rusqlite::params![
             like,
             category,
             only_active as i64,
-            with_drawing.map(|v| v as i64),
+            0i64,
+            0i64,
             item_type,
+            with_drawing.map(|v| v as i64),
         ],
         |r| r.get(0),
     )
@@ -1036,6 +1055,65 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
     Ok(outcome)
 }
 
+// ---------- 导出 ----------
+
+/// 物料导出：按当前筛选条件导出全部命中行（不分页），UTF-8 BOM 便于 Excel 直接打开。
+///
+/// 复用 `query_items`，`limit` 传 -1 表示 SQLite 不限条数——导出的必须和屏幕上
+/// 筛出来的是同一批行，否则用户会以为漏数据。
+pub fn export_items_csv(
+    conn: &Connection,
+    keyword: Option<&str>,
+    category: Option<&str>,
+    item_type: Option<&str>,
+    only_active: bool,
+    with_drawing: Option<bool>,
+    order: ItemOrder,
+) -> DbResult<(String, i64)> {
+    let rows = query_items(conn, keyword, category, item_type, only_active, with_drawing, -1, 0, order)?;
+    let mut out = String::from("\u{feff}");
+    out.push_str("物料编码,物料名称,库位,规格型号,单位,类型,类别,图号,参考单价,默认供应商,负责人,备注,状态\n");
+    for item in &rows {
+        let fields = [
+            item.item_code.clone(),
+            item.item_name.clone(),
+            item.location.clone().unwrap_or_default(),
+            item.spec.clone().unwrap_or_default(),
+            item.unit.clone().unwrap_or_default(),
+            item.item_type.clone().unwrap_or_default(),
+            item.category.clone().unwrap_or_default(),
+            item.drawing_no.clone().unwrap_or_default(),
+            // 单价按万分之一元还原成元，Excel 里能直接当数字算
+            item.price_micros.map(crate::ledger::micros_text).unwrap_or_default(),
+            item.supplier.clone().unwrap_or_default(),
+            item.owner.clone().unwrap_or_default(),
+            item.remark.clone().unwrap_or_default(),
+            if item.active { "在用" } else { "停用" }.to_string(),
+        ];
+        out.push_str(&crate::ledger::csv_row(&fields));
+    }
+    Ok((out, rows.len() as i64))
+}
+
+/// 供应商导出：带关键字过滤，和列表口径一致。
+pub fn export_suppliers_csv(conn: &Connection, keyword: Option<&str>) -> DbResult<(String, i64)> {
+    let rows = list_suppliers(conn, keyword)?;
+    let mut out = String::from("\u{feff}");
+    out.push_str("供应商名称,联系人,电话,台账行数,状态,备注\n");
+    for s in &rows {
+        let fields = [
+            s.name.clone(),
+            s.contact.clone().unwrap_or_default(),
+            s.phone.clone().unwrap_or_default(),
+            s.hits.to_string(),
+            if s.active { "在用" } else { "停用" }.to_string(),
+            s.remark.clone().unwrap_or_default(),
+        ];
+        out.push_str(&crate::ledger::csv_row(&fields));
+    }
+    Ok((out, rows.len() as i64))
+}
+
 /// 台账里出现过但主数据里没有的供应商，补进去（让下拉不漏）。
 pub fn backfill_suppliers_from_ledger(conn: &Connection) -> DbResult<usize> {
     let added = conn
@@ -1157,6 +1235,27 @@ pub fn backfill_db(db: &Db) -> DbResult<(usize, usize)> {
         let suppliers = backfill_suppliers_from_ledger(c).map_err(DbError)?;
         Ok((items, suppliers))
     })
+}
+
+/// 物料导出（连接封装版）：桌面端命令直接用。
+pub fn export_items_db(
+    db: &Db,
+    keyword: Option<&str>,
+    category: Option<&str>,
+    item_type: Option<&str>,
+    only_active: bool,
+    with_drawing: Option<bool>,
+    order: ItemOrder,
+) -> DbResult<(String, i64)> {
+    db.with(|c| {
+        export_items_csv(c, keyword, category, item_type, only_active, with_drawing, order)
+            .map_err(DbError)
+    })
+}
+
+/// 供应商导出（连接封装版）。
+pub fn export_suppliers_db(db: &Db, keyword: Option<&str>) -> DbResult<(String, i64)> {
+    db.with(|c| export_suppliers_csv(c, keyword).map_err(DbError))
 }
 
 #[cfg(test)]
@@ -1408,6 +1507,27 @@ mod tests {
     }
 
     #[test]
+    fn export_is_not_capped_at_page_size() {
+        let db = db();
+        // 列表单页上限 500，导出必须不受它限制，否则用户会以为数据被截断
+        db.with(|c| {
+            for i in 0..520 {
+                c.execute(
+                    "INSERT INTO items (item_code, item_name) VALUES (?1, ?2)",
+                    rusqlite::params![format!("X-{i:04}"), format!("批量件{i}")],
+                )
+                .map_err(DbError::from)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let (_, n) = db
+            .with(|c| export_items_csv(c, None, None, None, false, None, ItemOrder::CodeAsc).map_err(DbError))
+            .unwrap();
+        assert_eq!(n, 520);
+    }
+
+    #[test]
     fn supplier_crud_and_stats() {
         let db = db();
         db.with(|c| {
@@ -1446,5 +1566,77 @@ mod tests {
         assert_eq!(stats.categories[0].category, "五金类");
         assert_eq!(stats.item_types.len(), 1);
         assert_eq!(stats.item_types[0].category, "未分类");
+    }
+
+    #[test]
+    fn export_items_respects_filters_and_escapes() {
+        let db = db();
+        db.with(|c| {
+            let mut a = item("WG-A", "外卡,含逗号");
+            a.location = Some("D-01".into());
+            a.price_micros = Some(2_020);
+            create_item(c, &a)?;
+            let mut off = item("WG-B", "停用件");
+            off.active = false;
+            create_item(c, &off)?;
+            let mut drawn = item("WG-C", "加工件");
+            drawn.item_type = Some("加工件".into());
+            drawn.drawing_no = Some("QLKJ480-002.110".into());
+            create_item(c, &drawn)?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 全部（含停用）：3 行 + 1 行列头
+        let (csv, n) = db
+            .with(|c| export_items_csv(c, None, None, None, false, None, ItemOrder::CodeAsc).map_err(DbError))
+            .unwrap();
+        assert_eq!(n, 3);
+        assert!(csv.starts_with('\u{feff}'), "Excel 打开不能乱码");
+        assert!(csv.contains("\"外卡,含逗号\""), "逗号字段要加引号");
+        assert!(csv.contains("0.202"), "单价按元输出，保留厘级精度");
+
+        // 只看在用 + 有图号：只剩加工件那条
+        let (csv, n) = db
+            .with(|c| export_items_csv(c, None, None, None, true, Some(true), ItemOrder::CodeAsc).map_err(DbError))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(csv.contains("QLKJ480-002.110"));
+        assert!(!csv.contains("WG-A"));
+
+        // 关键字过滤与列表口径一致
+        let (_, n) = db
+            .with(|c| export_items_csv(c, Some("WG-B"), None, None, false, None, ItemOrder::CodeAsc).map_err(DbError))
+            .unwrap();
+        assert_eq!(n, 1, "停用的也应当被关键字筛出来");
+    }
+
+    #[test]
+    fn export_suppliers_uses_live_hits() {
+        let db = db();
+        db.with(|c| {
+            create_supplier(
+                c,
+                &SupplierInput {
+                    name: "万杨五金".into(),
+                    contact: Some("王".into()),
+                    phone: None,
+                    remark: None,
+                    active: true,
+                },
+            )?;
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, partner) VALUES ('t',1,'in','万杨五金'),('t',2,'in','万杨五金')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .unwrap();
+        let (csv, n) = db.with(|c| export_suppliers_csv(c, None).map_err(DbError)).unwrap();
+        assert_eq!(n, 1);
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains("万杨五金"));
+        assert!(csv.contains(",2,"), "台账行数应实时统计");
     }
 }

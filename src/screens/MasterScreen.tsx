@@ -18,6 +18,8 @@ import {
   createSupplier,
   deleteItem,
   deleteSupplier,
+  exportItems,
+  exportSuppliers,
   importMasterWorkbook,
   isTauri,
   listDict,
@@ -29,6 +31,7 @@ import {
   updateSupplier,
 } from "../lib/api";
 import type { Item, ItemInput, MasterStats, Supplier, SupplierInput } from "../lib/types";
+import { exportFileName, saveCsvFile } from "../lib/exportCsv";
 import { count, parsePriceToMicros, priceInput4, priceText } from "../lib/format";
 import { onItemSortChange, saveItemSort, storedItemSort, type ItemSort } from "../lib/itemSortPrefs";
 import { Button } from "@/components/base/buttons/button";
@@ -312,6 +315,21 @@ function ItemsPanel({
     }
   };
 
+  // 导出走当前筛选（关键字/类别/类型/在用/排序），不分页：文件里是全部命中行
+  const doExport = () =>
+    saveCsvFile("导出物料资料", exportFileName("物料资料"), (path) =>
+      exportItems(
+        {
+          keyword: keyword.trim() || undefined,
+          category: category === "all" ? null : category,
+          itemType: itemType === "all" ? null : itemType,
+          onlyActive,
+          order: sortOrder,
+        },
+        path,
+      ),
+    );
+
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -385,6 +403,16 @@ function ItemsPanel({
           disabled={loading}
         >
           刷新
+        </Button>
+        <Button
+          size="small"
+          variant="secondary"
+          leadingIcon={RiDownload2Line}
+          onClick={doExport}
+          disabled={!isTauri}
+          title="按当前筛选条件导出全部物料（不只是本页）"
+        >
+          导出 CSV
         </Button>
         <Button size="small" leadingIcon={RiAddLine} onClick={() => setEditing("new")} disabled={!isTauri}>
           新增物料
@@ -867,6 +895,19 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
 
   const filled = mode === "has";
 
+  // 图号页导出：沿用「有图号 / 缺图号」的取舍，导出的就是屏幕上这批（不分页）
+  const doExport = () =>
+    saveCsvFile(`导出${filled ? "图号" : "缺图号"}清单`, exportFileName(filled ? "物料图号" : "缺图号物料"), (path) =>
+      exportItems(
+        {
+          keyword: keyword.trim() || undefined,
+          onlyActive: true,
+          withDrawing: filled,
+        },
+        path,
+      ),
+    );
+
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -897,6 +938,16 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         </span>
         <Button size="small" variant="ghost" leadingIcon={RiRefreshLine} onClick={load} className="ms-auto" disabled={loading}>
           刷新
+        </Button>
+        <Button
+          size="small"
+          variant="secondary"
+          leadingIcon={RiDownload2Line}
+          onClick={doExport}
+          disabled={!isTauri || total === 0}
+          title="导出当前清单的全部行（不只是本页）"
+        >
+          导出 CSV
         </Button>
       </div>
 
@@ -1152,6 +1203,12 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
 
   const used = useMemo(() => rows.filter((r) => r.hits > 0).length, [rows]);
 
+  // 导出当前关键字命中的全部供应商（列表是前端分页，文件里给全量）
+  const doExport = () =>
+    saveCsvFile("导出供应商", exportFileName("供应商"), (path) =>
+      exportSuppliers(keyword.trim() || undefined, path),
+    );
+
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -1168,7 +1225,18 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
           共 {count(rows.length)} 家，其中 {count(used)} 家在台账里有记录
         </span>
         {loading ? <Spinner size="xs" aria-label="加载中" /> : null}
-        <Button size="small" leadingIcon={RiAddLine} onClick={() => setEditing("new")} className="ms-auto" disabled={!isTauri}>
+        <Button
+          size="small"
+          variant="secondary"
+          leadingIcon={RiDownload2Line}
+          onClick={doExport}
+          className="ms-auto"
+          disabled={!isTauri || rows.length === 0}
+          title="按当前搜索导出全部供应商"
+        >
+          导出 CSV
+        </Button>
+        <Button size="small" leadingIcon={RiAddLine} onClick={() => setEditing("new")} disabled={!isTauri}>
           新增供应商
         </Button>
       </div>

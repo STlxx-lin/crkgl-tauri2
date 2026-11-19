@@ -184,6 +184,14 @@ pub struct ExportResult {
 
 #[tauri::command]
 pub fn ledger_export(state: State<'_, Arc<AppState>>, args: QueryArgs, path: &str) -> Result<ExportResult, String> {
+    let (csv, rows) = ledger::export_csv_from(&state.db, &args.filter, 500_000)?;
+    write_csv(&path, csv, rows)
+}
+
+/// 把 CSV 文本写到用户选定的路径，返回给前端提示用的路径与行数。
+///
+/// 台账导出与基础资料导出共用：目录不存在时先建，空路径直接拒绝。
+fn write_csv(path: &str, csv: String, rows: i64) -> Result<ExportResult, String> {
     let target = PathBuf::from(path.trim());
     if target.as_os_str().is_empty() {
         return Err("没有选择保存位置".into());
@@ -193,12 +201,79 @@ pub fn ledger_export(state: State<'_, Arc<AppState>>, args: QueryArgs, path: &st
             std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
         }
     }
-    let (csv, rows) = ledger::export_csv_from(&state.db, &args.filter, 500_000)?;
     std::fs::write(&target, csv).map_err(|e| format!("写文件失败: {e}"))?;
     Ok(ExportResult {
         path: target.display().to_string(),
         rows,
     })
+}
+
+/// 基础资料 · 物料导出。筛选条件与列表页一致，`limit` 不传即导出全部命中行。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ItemExportArgs {
+    pub keyword: Option<String>,
+    pub category: Option<String>,
+    pub item_type: Option<String>,
+    pub only_active: bool,
+    /// 图号筛选：有图号 / 缺图号 / 不筛
+    pub with_drawing: Option<bool>,
+    /// 排序键，与列表页同一个枚举
+    pub order: Option<String>,
+}
+
+#[tauri::command]
+pub fn master_items_export(
+    state: State<'_, Arc<AppState>>,
+    args: ItemExportArgs,
+    path: &str,
+) -> Result<ExportResult, String> {
+    let (csv, rows) = master::export_items_db(
+        &state.db,
+        args.keyword.as_deref(),
+        args.category.as_deref(),
+        args.item_type.as_deref(),
+        args.only_active,
+        args.with_drawing,
+        master::ItemOrder::parse(args.order.as_deref()),
+    )?;
+    write_csv(path, csv, rows)
+}
+
+/// 基础资料 · 供应商导出。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SupplierExportArgs {
+    pub keyword: Option<String>,
+}
+
+#[tauri::command]
+pub fn master_suppliers_export(
+    state: State<'_, Arc<AppState>>,
+    args: SupplierExportArgs,
+    path: &str,
+) -> Result<ExportResult, String> {
+    let (csv, rows) = master::export_suppliers_db(&state.db, args.keyword.as_deref())?;
+    write_csv(path, csv, rows)
+}
+
+/// 基础资料 · 字典导出（按当前类别 + 关键字 + 只看在用）。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DictExportArgs {
+    pub kind: String,
+    pub keyword: Option<String>,
+    pub only_active: bool,
+}
+
+#[tauri::command]
+pub fn master_dict_export(
+    state: State<'_, Arc<AppState>>,
+    args: DictExportArgs,
+    path: &str,
+) -> Result<ExportResult, String> {
+    let (csv, rows) = dict::export_db(&state.db, &args.kind, args.keyword.as_deref(), args.only_active)?;
+    write_csv(path, csv, rows)
 }
 
 #[tauri::command]
@@ -406,15 +481,15 @@ pub fn autostart_set(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<b
     Ok(crate::autostart::is_enabled(&exe))
 }
 
-/// 把主窗口从托盘里叫回来。
+/// 把主窗口从托盘里叫回来（前端调用入口，逻辑与单实例唤醒共用）。
 #[tauri::command]
 pub fn window_show(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let win = app.get_webview_window("main").ok_or("主窗口不存在")?;
-    win.show().map_err(|e| e.to_string())?;
-    win.unminimize().map_err(|e| e.to_string())?;
-    win.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
+    // 窗口不存在时给前端明确的错误，便于提示而不是静默失败
+    if crate::bring_main_window_to_front(&app) {
+        Ok(())
+    } else {
+        Err("主窗口不存在".into())
+    }
 }
 
 

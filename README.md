@@ -47,7 +47,7 @@ crkgl-tauri2/
 
 ```bash
 npm install
-npm run tauri dev          # 开发：前端 1422，桌面窗口自动打开
+npm run tauri dev          # 开发：前端 5173，桌面窗口自动打开
 ```
 
 开发时如果仓库根目录有 `.xlsm` / `.xlsx`，首次启动（库为空）会自动导入一次，
