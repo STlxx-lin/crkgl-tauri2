@@ -1,15 +1,107 @@
+# ===== 依赖与包管理器 =====
+# node_modules：npm/pnpm/yarn 安装的第三方依赖目录
 node_modules/
+# pnpm 全局内容寻址存储
+.pnpm-store/
+# yarn 缓存与状态目录
+.yarn/
+# npm 本地缓存
+.npm/
+
+# ===== 前端构建产物 =====
+# 桌面端默认构建输出目录
 dist/
+# --mode remote 模式的构建输出目录
 dist-remote/
-shots/
-_archive/
+# SSR 构建输出目录（预留）
+dist-ssr/
+# TypeScript 增量编译信息
+*.tsbuildinfo
+
+# ===== Tauri / Rust 编译产物 =====
+# 正式构建的 Rust 编译缓存与产物
 src-tauri/target/
+# 测试构建的 Rust 编译缓存与产物
 src-tauri/target-test/
+# Tauri 自动生成的权限与 schema 文件
 src-tauri/gen/
+# rustfmt 备份文件
+**/*.rs.bk
+# cargo 本地目标目录（若被重定向到工程内）
+src-tauri/.cargo/target/
+
+# ===== 本地工具缓存 =====
+# mimosa 钩子的运行记录与状态缓存
 .mimosa/
-*.log
-*.xlsx
-*.xlsm
+# 子工程内的 mimosa 缓存
+src-tauri/.mimosa/
+
+# ===== 测试与截图产物 =====
+# 页面截图脚本输出目录
+shots/
+# Playwright 测试运行结果
+test-results/
+# Playwright HTML 报告
+playwright-report/
+# Playwright 分片报告
+blob-report/
+# Playwright 浏览器与元数据缓存
+playwright/.cache/
+
+# ===== 归档目录 =====
+# 历史备份与废弃代码归档
+_archive/
+
+# ===== 环境变量文件 =====
+# 本地环境变量（含密钥，禁止提交）
 .env
+# 各环境变体文件
 .env.*
+# 示例模板文件需要保留在版本库中
 !.env.example
+
+# ===== 日志文件 =====
+# 任意日志文件
+*.log
+# 各包管理器的调试与错误日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== 本地数据库文件 =====
+# SQLite 主库文件（运行时生成于用户数据目录）
+*.db
+# SQLite 回滚日志
+*.db-journal
+# SQLite 预写日志
+*.db-wal
+# SQLite 共享内存文件
+*.db-shm
+# 其他 SQLite 变体后缀
+*.sqlite
+*.sqlite3
+
+# ===== 业务表格数据 =====
+# Excel 数据文件（含真实业务数据）
+*.xlsx
+# 含宏的 Excel 数据文件
+*.xlsm
+
+# ===== 操作系统生成文件 =====
+# macOS 目录元数据
+.DS_Store
+# Windows 缩略图缓存与目录配置
+Thumbs.db
+Desktop.ini
+# Windows 回收站目录
+$RECYCLE.BIN/
+
+# ===== 编辑器 / IDE =====
+# 个人编辑器配置，仅共享推荐插件列表
+.vscode/*
+!.vscode/extensions.json
+# JetBrains 项目配置
+.idea/
+# vim 交换文件
+*.swp
