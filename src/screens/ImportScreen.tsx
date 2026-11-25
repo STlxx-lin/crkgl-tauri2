@@ -176,12 +176,12 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
     }
   };
 
-  const doImport = async (replace: boolean) => {
+  const doImport = async (replace: boolean, allowDuplicate: boolean) => {
     if (!report) return;
     setBusy(true);
     setBusyLabel("正在写入台账");
     try {
-      const result = await runImport(report.path, sheetPlans(), replace, true, year);
+      const result = await runImport(report.path, sheetPlans(), replace, true, year, allowDuplicate);
       setOutcome(result);
       setStep("done");
       await loadHistory();
@@ -685,10 +685,12 @@ function PreviewPanel({
   busy,
 }: {
   preview: PreviewResult;
-  onImport: (replace: boolean) => Promise<void>;
+  onImport: (replace: boolean, allowDuplicate: boolean) => Promise<void>;
   busy: boolean;
 }) {
   const [replace, setReplace] = useState(false);
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
   return (
     <div className="flex flex-col gap-3 rounded-2xl border border-border-button-default bg-background-primary-default p-4">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
@@ -799,17 +801,42 @@ function PreviewPanel({
         </div>
       ))}
 
-      <div className="flex flex-wrap items-center gap-3">
-        <Switch size="sm" isSelected={replace} onChange={setReplace} aria-label="先清掉同名表的旧数据">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <Switch size="sm" isSelected={replace} onChange={setReplace} aria-label="先清掉本工作簿同名表的旧数据">
           先清掉同名表旧数据
         </Switch>
+        <Switch size="sm" isSelected={allowDuplicate} onChange={setAllowDuplicate} aria-label="允许重复导入同一个文件">
+          允许重复导入
+        </Switch>
         <span className="text-caption-1-regular text-text-tertiary">
-          不开这个开关时，新导入的行与已有行并存；重导同一个文件会产生重复行。
+          {allowDuplicate
+            ? "同一份文件会被再写一遍，台账与库存会翻倍。只在确认上一批没导入成功时使用。"
+            : "同一份文件默认只导一次；需要重导请先在下面的导入历史里删掉那一批，或打开「允许重复导入」。"}
         </span>
-        <Button size="small" className="ms-auto" onClick={() => onImport(replace)} disabled={busy || preview.totalRows === 0}>
+        <Button
+          size="small"
+          className="ms-auto"
+          onClick={() => {
+            if (allowDuplicate) setConfirmDuplicate(true);
+            else void onImport(replace, false);
+          }}
+          disabled={busy || preview.totalRows === 0}
+        >
           {busy ? "写入中" : `写入 ${count(preview.totalRows)} 行`}
         </Button>
       </div>
+
+      <AlertDialog
+        title="确认再导一次这个文件？"
+        description="如果同一份文件已经导入过，这次写入会让台账行、库存结存和汇总金额翻倍，事后很难拆开。确认上一批没有成功时再继续。"
+        confirmLabel="仍然写入"
+        isOpen={confirmDuplicate}
+        onConfirm={async () => {
+          setConfirmDuplicate(false);
+          await onImport(replace, true);
+        }}
+        onOpenChange={(open: boolean) => !open && setConfirmDuplicate(false)}
+      />
     </div>
   );
 }
@@ -837,7 +864,7 @@ function OutcomePanel({
       </div>
       {outcome.duplicateOf ? (
         <p className="text-caption-1-regular text-amber-500">
-          这个文件之前导入过（批次 #{outcome.duplicateOf}）。如果台账里出现重复行，删掉旧批次再导一次。
+          这个文件之前导入过（批次 #{outcome.duplicateOf}），本次是显式允许的重复导入。台账行、库存结存与汇总金额可能已经翻倍，请核对后再决定是否删掉其中一批。
         </p>
       ) : null}
       <ul className="flex flex-wrap gap-x-4 gap-y-1 text-body-2-regular text-text-secondary">

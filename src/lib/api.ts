@@ -204,8 +204,11 @@ export async function runImport(
   replace: boolean,
   master = true,
   year?: number,
+  allowDuplicate = false,
 ): Promise<ImportOutcome> {
-  const outcome = await call<ImportOutcome>("import_run", { args: { path, plans, replace, master, year } });
+  const outcome = await call<ImportOutcome>("import_run", {
+    args: { path, plans, replace, master, year, allowDuplicate },
+  });
   invalidateFacetsCache();
   return outcome;
 }

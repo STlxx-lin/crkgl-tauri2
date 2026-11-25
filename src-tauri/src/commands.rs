@@ -319,6 +319,9 @@ pub struct RunArgs {
     /// 月度进销存宽表所属年份
     #[serde(default)]
     pub year: Option<i32>,
+    /// 明确允许重复导入同一个文件（前端二次确认后才置 true）
+    #[serde(default)]
+    pub allow_duplicate: bool,
 }
 
 fn default_true() -> bool {
@@ -329,7 +332,14 @@ fn default_true() -> bool {
 pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<import::ImportOutcome, String> {
     let file = require_file(&args.path)?;
     let year = args.year.unwrap_or_else(import::current_year);
-    let mut outcome = import::run_with_year(&state.db, &file, args.plans, args.replace, year)?;
+    let mut outcome = import::run_with_options(
+        &state.db,
+        &file,
+        args.plans,
+        args.replace,
+        year,
+        args.allow_duplicate,
+    )?;
     // 宽表在 run_with_year 内部已顺带写好基础资料并填入 outcome.master；
     // 仅当常规明细工作簿尚未写入基础资料且开启了 master 选项时，才单独扫主数据表。
     if args.master && outcome.master.is_none() {
