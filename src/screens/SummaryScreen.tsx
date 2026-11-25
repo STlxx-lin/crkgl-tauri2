@@ -72,7 +72,9 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
   const cmp = data?.compare ?? null;
   // 出库明细没有金额列时，主口径自动落到入库，避免整页显示 0.00
   const primary: "in" | "out" =
-    (totals?.amountOutCents ?? 0) > 0 && (totals?.amountOutCents ?? 0) >= (totals?.amountInCents ?? 0) * 0.1 ? "out" : "in";
+    (totals?.amountOutCents ?? 0) > 0 && (totals?.amountOutCents ?? 0) >= (totals?.amountInCents ?? 0) * 0.1
+      ? "out"
+      : "in";
 
   const spans = [
     {
@@ -153,7 +155,11 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
 
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
               <MonthlyChart points={data?.monthly ?? []} primary={primary} />
-              <TopList items={primary === "out" ? data?.topOut ?? [] : data?.topIn ?? []} title={primary === "out" ? "出库金额前 10 物料" : "入库金额前 10 物料"} kindLabel={primary === "out" ? "出库" : "入库"} />
+              <TopList
+                items={primary === "out" ? (data?.topOut ?? []) : (data?.topIn ?? [])}
+                title={primary === "out" ? "出库金额前 10 物料" : "入库金额前 10 物料"}
+                kindLabel={primary === "out" ? "出库" : "入库"}
+              />
             </section>
 
             <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -165,7 +171,7 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
               {/* 上面已经按主口径显示了一侧，这里必须是另一侧；
                   原来固定渲染 topIn，主口径选「入库」时同一张卡片会出现两次 */}
               <TopList
-                items={primary === "out" ? data?.topIn ?? [] : data?.topOut ?? []}
+                items={primary === "out" ? (data?.topIn ?? []) : (data?.topOut ?? [])}
                 title={primary === "out" ? "入库金额前 10 物料" : "出库金额前 10 物料"}
                 kindLabel={primary === "out" ? "入库" : "出库"}
                 variant="neutral"
@@ -239,13 +245,7 @@ function StatCard({
 
 /** 月度对比：入库为中性刻度，出库为强调色；悬停给出当月数值。 */
 /** 月度对比：主口径用强调色，另一条用中性刻度；没有数据的月份标出来。 */
-function MonthlyChart({
-  points,
-  primary,
-}: {
-  points: SummaryBundle["monthly"];
-  primary: "in" | "out";
-}) {
+function MonthlyChart({ points, primary }: { points: SummaryBundle["monthly"]; primary: "in" | "out" }) {
   const [hover, setHover] = useState<number | null>(null);
   const recent = points.slice(-12);
   const primaryKey = primary === "out" ? "amountOutCents" : "amountInCents";
@@ -296,7 +296,10 @@ function MonthlyChart({
           role="group"
           aria-label={`近 ${recent.length} 个月${primaryLabel}与${secondaryLabel}金额对比；每根柱子可用 Tab 聚焦查看数值，完整数据见下方「逐月明细」表`}
         >
-          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 bottom-7 flex flex-col justify-between">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 bottom-7 flex flex-col justify-between"
+          >
             {ticks.map((_tick, index) => (
               <span key={index} className="h-px w-full bg-separator-border" />
             ))}
@@ -324,11 +327,16 @@ function MonthlyChart({
                   onBlur={() => setHover(null)}
                 >
                   <div
-                    className={"max-w-6 rounded-t-[3px] bg-text-quaternary/45 transition-colors group-hover:bg-text-quaternary/70 " + width}
+                    className={
+                      "max-w-6 rounded-t-[3px] bg-text-quaternary/45 transition-colors group-hover:bg-text-quaternary/70 " +
+                      width
+                    }
                     style={{ height: `${Math.max(secondaryH, 0.6)}%` }}
                   />
                   <div
-                    className={"max-w-6 rounded-t-[3px] bg-accent-500 transition-colors group-hover:bg-accent-400 " + width}
+                    className={
+                      "max-w-6 rounded-t-[3px] bg-accent-500 transition-colors group-hover:bg-accent-400 " + width
+                    }
                     style={{ height: `${Math.max(primaryH, 0.6)}%` }}
                   />
                   {active ? (
@@ -394,8 +402,13 @@ function TopList({
       ) : (
         <ol className="mt-3 flex flex-col">
           {items.map((item, index) => (
-            <li key={(item.itemCode ?? "") + (item.itemName ?? "") + index} className="flex items-center gap-2 py-[5px]">
-              <span className="w-4 shrink-0 font-mono text-[0.6875rem] tabular-nums text-text-tertiary">{index + 1}</span>
+            <li
+              key={(item.itemCode ?? "") + (item.itemName ?? "") + index}
+              className="flex items-center gap-2 py-[5px]"
+            >
+              <span className="w-4 shrink-0 font-mono text-[0.6875rem] tabular-nums text-text-tertiary">
+                {index + 1}
+              </span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate text-body-2-medium text-text-primary" title={item.itemName ?? ""}>
@@ -495,9 +508,13 @@ function MonthTable({ points }: { points: SummaryBundle["monthly"] }) {
               <tr key={point.month} className="border-b border-separator-border last:border-0">
                 <td className="px-5 py-2 font-mono tabular-nums text-text-secondary">{point.month}</td>
                 <td className="px-3 py-2 text-end font-mono tabular-nums text-text-tertiary">{count(point.inRows)}</td>
-                <td className="px-3 py-2 text-end font-mono tabular-nums text-text-secondary">{money(point.amountInCents)}</td>
+                <td className="px-3 py-2 text-end font-mono tabular-nums text-text-secondary">
+                  {money(point.amountInCents)}
+                </td>
                 <td className="px-3 py-2 text-end font-mono tabular-nums text-text-tertiary">{count(point.outRows)}</td>
-                <td className="px-5 py-2 text-end font-mono tabular-nums text-text-primary">{money(point.amountOutCents)}</td>
+                <td className="px-5 py-2 text-end font-mono tabular-nums text-text-primary">
+                  {money(point.amountOutCents)}
+                </td>
               </tr>
             ))}
           </tbody>

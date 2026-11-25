@@ -149,7 +149,9 @@ export default function App() {
               </div>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-caption-1-semibold text-text-tertiary">台账</span>
-                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{count(rows || ledgerRows)} 行</span>
+                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                  {count(rows || ledgerRows)} 行
+                </span>
               </div>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-caption-1-semibold text-text-tertiary">日期</span>

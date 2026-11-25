@@ -8,11 +8,7 @@
 import { useCallback, useState } from "react";
 
 /** 读存储的每页条数：不在档位表里（脏数据、旧版本残留）就回退到 `fallback`。 */
-export function readStoredPageSize<T extends number>(
-  key: string,
-  sizes: readonly T[],
-  fallback: T,
-): T {
+export function readStoredPageSize<T extends number>(key: string, sizes: readonly T[], fallback: T): T {
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return fallback;

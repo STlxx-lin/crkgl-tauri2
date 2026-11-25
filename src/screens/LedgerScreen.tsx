@@ -144,42 +144,45 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   // 否则筛选下拉的供应商、日期范围会一直是进页面那一刻的旧值
   useEffect(() => onFacetsInvalidated(loadFacets), [loadFacets]);
 
-  const load = useCallback(async (forceRefreshTotals = false) => {
-    const current = ++requestId.current;
-    setLoading(true);
-    try {
-      const currentFilterKey = JSON.stringify(filter);
-      const isOnlyPaging =
-        !forceRefreshTotals &&
-        prevQueryRef.current.filterKey === currentFilterKey &&
-        prevQueryRef.current.pageSize === pageSize &&
-        prevQueryRef.current.totals !== null;
-      const result = await fetchPage(filter, page, pageSize, isOnlyPaging);
-      if (current === requestId.current) {
-        if (isOnlyPaging && prevQueryRef.current.totals) {
-          setData({
-            ...result,
-            total: prevQueryRef.current.total,
-            totals: prevQueryRef.current.totals,
-          });
-        } else {
-          setData(result);
-          prevQueryRef.current = {
-            filterKey: currentFilterKey,
-            pageSize,
-            totals: result.totals,
-            total: result.total,
-          };
+  const load = useCallback(
+    async (forceRefreshTotals = false) => {
+      const current = ++requestId.current;
+      setLoading(true);
+      try {
+        const currentFilterKey = JSON.stringify(filter);
+        const isOnlyPaging =
+          !forceRefreshTotals &&
+          prevQueryRef.current.filterKey === currentFilterKey &&
+          prevQueryRef.current.pageSize === pageSize &&
+          prevQueryRef.current.totals !== null;
+        const result = await fetchPage(filter, page, pageSize, isOnlyPaging);
+        if (current === requestId.current) {
+          if (isOnlyPaging && prevQueryRef.current.totals) {
+            setData({
+              ...result,
+              total: prevQueryRef.current.total,
+              totals: prevQueryRef.current.totals,
+            });
+          } else {
+            setData(result);
+            prevQueryRef.current = {
+              filterKey: currentFilterKey,
+              pageSize,
+              totals: result.totals,
+              total: result.total,
+            };
+          }
+          // 换页/换筛选后旧的选择已经没有意义
+          setSelectedIds(new Set());
         }
-        // 换页/换筛选后旧的选择已经没有意义
-        setSelectedIds(new Set());
+      } catch (err) {
+        toast("台账加载失败", { description: String(err), status: "error", duration: 6000 });
+      } finally {
+        if (current === requestId.current) setLoading(false);
       }
-    } catch (err) {
-      toast("台账加载失败", { description: String(err), status: "error", duration: 6000 });
-    } finally {
-      if (current === requestId.current) setLoading(false);
-    }
-  }, [filter, page, pageSize]);
+    },
+    [filter, page, pageSize],
+  );
 
   useEffect(() => {
     load();
@@ -199,7 +202,6 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     return () => observer.disconnect();
   }, []);
   const virtual = useVirtualRows(scrollRef, mergeByDoc ? 0 : rows.length, rowHeight);
-
 
   /**
    * 按单据合并：对整页 rows 做（窗口切片会切断同单明细），切片放在合并之后。
@@ -250,9 +252,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
 
   const toggleSort = (column: "date" | "amount" | "qty") => {
     setPage(1);
-    setFilter((prev) =>
-      prev.sort === column ? { ...prev, desc: !prev.desc } : { ...prev, sort: column, desc: true },
-    );
+    setFilter((prev) => (prev.sort === column ? { ...prev, desc: !prev.desc } : { ...prev, sort: column, desc: true }));
   };
 
   const openDetail = async (row: LedgerRow) => {
@@ -289,7 +289,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     }
   };
 
-const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: string }) => {
+  const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: string }) => {
     if (selectedIds.size === 0) return;
     setBusy(true);
     try {
@@ -328,7 +328,9 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
     setBusy(true);
     try {
       await deleteRow(pendingDelete.id);
-      toast("已删除一行", { description: `${pendingDelete.itemName ?? pendingDelete.itemCode ?? ""} · 源表第 ${pendingDelete.rowNo} 行` });
+      toast("已删除一行", {
+        description: `${pendingDelete.itemName ?? pendingDelete.itemCode ?? ""} · 源表第 ${pendingDelete.rowNo} 行`,
+      });
       setPendingDelete(null);
       closeDetail();
       await load(true);
@@ -342,19 +344,39 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
 
   const totals = data?.totals;
   const activeFilterCount =
-    (filter.kind ? 1 : 0) + (filter.owner ? 1 : 0) + (filter.buyer ? 1 : 0) + (filter.from ? 1 : 0) + (filter.keyword ? 1 : 0);
+    (filter.kind ? 1 : 0) +
+    (filter.owner ? 1 : 0) +
+    (filter.buyer ? 1 : 0) +
+    (filter.from ? 1 : 0) +
+    (filter.keyword ? 1 : 0);
 
   return (
     <>
       <PageHeader
         title="台账"
-        description={boot ? `共 ${count(boot.rowCount)} 行 · 入库 ${count(boot.inRows)} · 出库 ${count(boot.outRows)}` : "入库与出库明细"}
+        description={
+          boot
+            ? `共 ${count(boot.rowCount)} 行 · 入库 ${count(boot.inRows)} · 出库 ${count(boot.outRows)}`
+            : "入库与出库明细"
+        }
         actions={
           <>
-            <Button size="small" variant="secondary" leadingIcon={RiRefreshLine} onClick={() => void load(true)} disabled={loading}>
+            <Button
+              size="small"
+              variant="secondary"
+              leadingIcon={RiRefreshLine}
+              onClick={() => void load(true)}
+              disabled={loading}
+            >
               刷新
             </Button>
-            <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={doExport} disabled={busy || total === 0}>
+            <Button
+              size="small"
+              variant="secondary"
+              leadingIcon={RiDownload2Line}
+              onClick={doExport}
+              disabled={busy || total === 0}
+            >
               导出 CSV
             </Button>
           </>
@@ -450,10 +472,10 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
         {/* 批量操作栏：只在有选择时出现，避免常态占位置 */}
         {selectedIds.size > 0 && isTauri ? (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border-button-default bg-background-secondary-default px-3 py-2">
-            <span className="text-body-2-medium text-text-primary">
-              已选 {count(selectedIds.size)} 行
+            <span className="text-body-2-medium text-text-primary">已选 {count(selectedIds.size)} 行</span>
+            <span className="text-caption-1-regular text-text-tertiary">
+              批量只改归属/采购人/备注，数量金额需逐行核对
             </span>
-            <span className="text-caption-1-regular text-text-tertiary">批量只改归属/采购人/备注，数量金额需逐行核对</span>
             <div className="ms-auto flex items-center gap-2">
               <Button size="small" variant="ghost" onClick={() => setSelectedIds(new Set())}>
                 取消选择
@@ -477,14 +499,35 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
 
         {/* 合计条：跟着筛选走，跟表格的数字对得上 */}
         <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-separator-border bg-separator-border md:grid-cols-4">
-          <Stat label="筛选结果" value={count(total)} unit="行" sub={`入库 ${count(totals?.inRows ?? 0)} · 出库 ${count(totals?.outRows ?? 0)}`} />
-          <Stat label="入库金额" value={money(totals?.amountInCents ?? 0)} sub={`入库数量 ${qty(totals?.qtyIn ?? 0)}`} />
-          <Stat label="出库金额" value={money(totals?.amountOutCents ?? 0)} sub={`出库数量 ${qty(totals?.qtyOut ?? 0)}`} />
-          <Stat label="涉及单据" value={count(totals?.docCount ?? 0)} unit="张" sub={`物料 ${count(totals?.itemCount ?? 0)} 种`} />
+          <Stat
+            label="筛选结果"
+            value={count(total)}
+            unit="行"
+            sub={`入库 ${count(totals?.inRows ?? 0)} · 出库 ${count(totals?.outRows ?? 0)}`}
+          />
+          <Stat
+            label="入库金额"
+            value={money(totals?.amountInCents ?? 0)}
+            sub={`入库数量 ${qty(totals?.qtyIn ?? 0)}`}
+          />
+          <Stat
+            label="出库金额"
+            value={money(totals?.amountOutCents ?? 0)}
+            sub={`出库数量 ${qty(totals?.qtyOut ?? 0)}`}
+          />
+          <Stat
+            label="涉及单据"
+            value={count(totals?.docCount ?? 0)}
+            unit="张"
+            sub={`物料 ${count(totals?.itemCount ?? 0)} 种`}
+          />
         </div>
 
         <div className="scroll-fade-wrap min-h-0 flex-1">
-          <div ref={scrollRef} className="ledger-table h-full overflow-auto rounded-xl border border-separator-border bg-background-primary-default">
+          <div
+            ref={scrollRef}
+            className="ledger-table h-full overflow-auto rounded-xl border border-separator-border bg-background-primary-default"
+          >
             <Table
               aria-label="出入库明细"
               className="min-w-[92rem] table-fixed text-[0.8125rem]"
@@ -506,24 +549,57 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                     className="size-3.5 cursor-pointer accent-accent-500"
                   />
                 </TableColumn>
-                <TableColumn id="kind" className="w-[4rem] whitespace-nowrap">类型</TableColumn>
+                <TableColumn id="kind" className="w-[4rem] whitespace-nowrap">
+                  类型
+                </TableColumn>
                 <TableColumn id="date" className="w-[6.5rem] whitespace-nowrap">
-                  <SortHeader label="日期" active={filter.sort === 'date'} desc={Boolean(filter.desc)} onClick={() => toggleSort('date')} />
+                  <SortHeader
+                    label="日期"
+                    active={filter.sort === "date"}
+                    desc={Boolean(filter.desc)}
+                    onClick={() => toggleSort("date")}
+                  />
                 </TableColumn>
-                <TableColumn id="doc" className="w-[8rem] whitespace-nowrap">单据编号</TableColumn>
-                <TableColumn id="code" className="w-[8.5rem] whitespace-nowrap">物料编码</TableColumn>
-                <TableColumn id="name" isRowHeader className="w-[16.5rem] whitespace-nowrap">物料名称</TableColumn>
-                <TableColumn id="unit" className="w-[4.25rem] whitespace-nowrap">单位</TableColumn>
+                <TableColumn id="doc" className="w-[8rem] whitespace-nowrap">
+                  单据编号
+                </TableColumn>
+                <TableColumn id="code" className="w-[8.5rem] whitespace-nowrap">
+                  物料编码
+                </TableColumn>
+                <TableColumn id="name" isRowHeader className="w-[16.5rem] whitespace-nowrap">
+                  物料名称
+                </TableColumn>
+                <TableColumn id="unit" className="w-[4.25rem] whitespace-nowrap">
+                  单位
+                </TableColumn>
                 <TableColumn id="qty" className="w-[5.75rem] text-end whitespace-nowrap">
-                  <SortHeader label="数量" active={filter.sort === 'qty'} desc={Boolean(filter.desc)} onClick={() => toggleSort('qty')} />
+                  <SortHeader
+                    label="数量"
+                    active={filter.sort === "qty"}
+                    desc={Boolean(filter.desc)}
+                    onClick={() => toggleSort("qty")}
+                  />
                 </TableColumn>
-                <TableColumn id="price" className="w-[5.75rem] text-end whitespace-nowrap">单价</TableColumn>
+                <TableColumn id="price" className="w-[5.75rem] text-end whitespace-nowrap">
+                  单价
+                </TableColumn>
                 <TableColumn id="amount" className="w-[7.25rem] text-end whitespace-nowrap">
-                  <SortHeader label="合计" active={filter.sort === 'amount'} desc={Boolean(filter.desc)} onClick={() => toggleSort('amount')} />
+                  <SortHeader
+                    label="合计"
+                    active={filter.sort === "amount"}
+                    desc={Boolean(filter.desc)}
+                    onClick={() => toggleSort("amount")}
+                  />
                 </TableColumn>
-                <TableColumn id="partner" className="w-[8.5rem] whitespace-nowrap">供应商</TableColumn>
-                <TableColumn id="owner" className="w-[7.5rem] whitespace-nowrap">归属</TableColumn>
-                <TableColumn id="flags" className="w-[6.25rem] whitespace-nowrap">提醒</TableColumn>
+                <TableColumn id="partner" className="w-[8.5rem] whitespace-nowrap">
+                  供应商
+                </TableColumn>
+                <TableColumn id="owner" className="w-[7.5rem] whitespace-nowrap">
+                  归属
+                </TableColumn>
+                <TableColumn id="flags" className="w-[6.25rem] whitespace-nowrap">
+                  提醒
+                </TableColumn>
               </TableHeader>
               <TableBody
                 renderEmptyState={() => (
@@ -565,7 +641,9 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                         aria-label={`选择第 ${row.rowNo} 行`}
                         // 合并行代表整张单据：勾选它就勾上组内全部明细，
                         // 这样在合并视图下也能整单批量改归属/删除。
-                        title={mergeByDoc && row.groupCount > 1 ? `勾选整张单据（${row.groupCount} 行明细）` : undefined}
+                        title={
+                          mergeByDoc && row.groupCount > 1 ? `勾选整张单据（${row.groupCount} 行明细）` : undefined
+                        }
                         checked={row.memberIds.every((id) => selectedIds.has(id))}
                         onChange={(e) => {
                           const checked = e.target.checked;
@@ -605,7 +683,9 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                     </TableCell>
                     <TableCell className="text-text-tertiary">{row.unit ?? "—"}</TableCell>
                     <TableCell className="num text-text-secondary">{qty(row.qty)}</TableCell>
-                    <TableCell className="num text-text-tertiary">{row.priceMicros === null ? "—" : priceText(row.priceMicros)}</TableCell>
+                    <TableCell className="num text-text-tertiary">
+                      {row.priceMicros === null ? "—" : priceText(row.priceMicros)}
+                    </TableCell>
                     <TableCell className="num text-text-primary">{amount(row.amountCents)}</TableCell>
                     <TableCell className="truncate text-text-secondary">
                       <span title={row.partner ?? ""}>{row.partner ?? "—"}</span>
@@ -745,7 +825,6 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
   );
 }
 
-
 /** 列头排序按钮：点一下切换方向，用一个小箭头表示当前方向。 */
 function SortHeader({
   label,
@@ -791,7 +870,11 @@ function ChipGroup({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex items-center gap-0.5 rounded-lg bg-background-secondary-default p-0.5">
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="flex items-center gap-0.5 rounded-lg bg-background-secondary-default p-0.5"
+    >
       {items.map((item) => (
         <button
           key={item.id}
@@ -864,10 +947,7 @@ function BulkEditDialog({
     <Modal isOpen onOpenChange={(open: boolean) => !open && onClose()} size="sm">
       {({ close }) => (
         <>
-          <ModalHeader
-            title={`批量修改 ${rowCount} 行`}
-            description="只填要改的字段；留空的保持原样"
-          />
+          <ModalHeader title={`批量修改 ${rowCount} 行`} description="只填要改的字段；留空的保持原样" />
           <ModalBody className="flex flex-col gap-3">
             <label className="flex flex-col gap-1">
               <span className="text-caption-1-semibold text-text-tertiary">归属</span>

@@ -13,10 +13,10 @@ use crate::db::{self, Db};
 use crate::dict;
 use crate::import::{self, SheetPlan};
 use crate::ledger::{self, LedgerFilter, LedgerPatch};
-use crate::stock;
-use crate::paths;
-use crate::summary;
 use crate::master;
+use crate::paths;
+use crate::stock;
+use crate::summary;
 use crate::voucher;
 use crate::web::{self, WebHandle, WebStatus};
 
@@ -39,7 +39,6 @@ impl AppState {
         }
     }
 }
-
 
 fn empty_facets() -> crate::ledger::Facets {
     crate::ledger::Facets {
@@ -172,13 +171,8 @@ pub struct UpdateArgs {
 /// 「前端发来一坨 JSON，哪些字段被接受、哪个拼错就报错」正是最容易出问题
 /// 的地方——字段名写错时 serde 默认会当成没传，静默什么都不改，用户点了保存
 /// 却看不到变化。
-pub(crate) fn apply_ledger_patch(
-    db: &Db,
-    id: i64,
-    patch: serde_json::Value,
-) -> Result<(), String> {
-    let patch: LedgerPatch =
-        serde_json::from_value(patch).map_err(|e| format!("字段格式不对: {e}"))?;
+pub(crate) fn apply_ledger_patch(db: &Db, id: i64, patch: serde_json::Value) -> Result<(), String> {
+    let patch: LedgerPatch = serde_json::from_value(patch).map_err(|e| format!("字段格式不对: {e}"))?;
     db.with(|c| ledger::update(c, id, &patch).map_err(db::DbError::from))
 }
 
@@ -202,7 +196,7 @@ pub struct ExportResult {
 #[tauri::command]
 pub fn ledger_export(state: State<'_, Arc<AppState>>, args: QueryArgs, path: &str) -> Result<ExportResult, String> {
     let (csv, rows) = ledger::export_csv_from(&state.db, &args.filter, 500_000)?;
-    write_csv(&path, csv, rows)
+    write_csv(path, csv, rows)
 }
 
 /// 把 CSV 文本写到用户选定的路径，返回给前端提示用的路径与行数。
@@ -347,14 +341,7 @@ fn default_true() -> bool {
 pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<import::ImportOutcome, String> {
     let file = require_file(&args.path)?;
     let year = args.year.unwrap_or_else(import::current_year);
-    let mut outcome = import::run_with_options(
-        &state.db,
-        &file,
-        args.plans,
-        args.replace,
-        year,
-        args.allow_duplicate,
-    )?;
+    let mut outcome = import::run_with_options(&state.db, &file, args.plans, args.replace, year, args.allow_duplicate)?;
     // 宽表在 run_with_year 内部已顺带写好基础资料并填入 outcome.master；
     // 仅当常规明细工作簿尚未写入基础资料且开启了 master 选项时，才单独扫主数据表。
     if args.master && outcome.master.is_none() {
@@ -417,7 +404,9 @@ pub struct SummaryBundle {
 pub fn summary_bundle(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Result<SummaryBundle, String> {
     let db = &state.db;
     let filter = args.filter;
-    let totals = state.db.with(|c| ledger::totals(c, &filter).map_err(db::DbError::from))?;
+    let totals = state
+        .db
+        .with(|c| ledger::totals(c, &filter).map_err(db::DbError::from))?;
     Ok(SummaryBundle {
         totals,
         monthly: summary::monthly_from(db, &filter)?,
@@ -437,7 +426,6 @@ pub fn summary_group(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Resu
 
 #[tauri::command]
 pub fn web_status(state: State<'_, Arc<AppState>>) -> Result<WebStatus, String> {
-
     let guard = state.web.lock().map_err(|_| "状态不可用".to_string())?;
     match guard.as_ref() {
         Some(handle) => Ok(handle.snapshot()),
@@ -506,11 +494,7 @@ pub fn autostart_set(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<b
     let exe = current_exe()?;
     crate::autostart::set_enabled(&exe, enabled)?;
     // 记录用户是否显式关闭开机自启
-    let _ = crate::db::set_setting(
-        &state.db,
-        "autostart_disabled",
-        if enabled { "0" } else { "1" },
-    );
+    let _ = crate::db::set_setting(&state.db, "autostart_disabled", if enabled { "0" } else { "1" });
     // 读回真实状态：写注册表可能被组策略拦下，以磁盘上的结果为准
     Ok(crate::autostart::is_enabled(&exe))
 }
@@ -525,7 +509,6 @@ pub fn window_show(app: tauri::AppHandle) -> Result<(), String> {
         Err("主窗口不存在".into())
     }
 }
-
 
 #[tauri::command]
 pub fn client_log(level: Option<String>, message: String) {
@@ -575,11 +558,7 @@ pub fn voucher_create(state: State<'_, Arc<AppState>>, args: voucher::VoucherInp
 }
 
 #[tauri::command]
-pub fn voucher_update(
-    state: State<'_, Arc<AppState>>,
-    id: i64,
-    args: voucher::VoucherInput,
-) -> Result<(), String> {
+pub fn voucher_update(state: State<'_, Arc<AppState>>, id: i64, args: voucher::VoucherInput) -> Result<(), String> {
     voucher::update_db(&state.db, id, &args)
 }
 
@@ -603,11 +582,7 @@ pub fn voucher_list(
 }
 
 #[tauri::command]
-pub fn voucher_next_no(
-    state: State<'_, Arc<AppState>>,
-    kind: String,
-    date: String,
-) -> Result<String, String> {
+pub fn voucher_next_no(state: State<'_, Arc<AppState>>, kind: String, date: String) -> Result<String, String> {
     voucher::next_doc_no_db(&state.db, &kind, &date)
 }
 
@@ -651,10 +626,7 @@ fn default_stock_limit() -> i64 {
 }
 
 #[tauri::command]
-pub fn stock_report(
-    state: State<'_, Arc<AppState>>,
-    args: StockArgs,
-) -> Result<Vec<stock::StockRow>, String> {
+pub fn stock_report(state: State<'_, Arc<AppState>>, args: StockArgs) -> Result<Vec<stock::StockRow>, String> {
     stock::stock_report_db(
         &state.db,
         args.keyword.as_deref(),
@@ -812,7 +784,10 @@ pub fn dict_sync(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
 }
 
 #[tauri::command]
-pub fn suppliers_list(state: State<'_, Arc<AppState>>, keyword: Option<String>) -> Result<Vec<master::Supplier>, String> {
+pub fn suppliers_list(
+    state: State<'_, Arc<AppState>>,
+    keyword: Option<String>,
+) -> Result<Vec<master::Supplier>, String> {
     master::list_suppliers_db(&state.db, keyword.as_deref())
 }
 
@@ -878,10 +853,7 @@ pub fn seed_master_data(state: &AppState) {
 }
 
 #[tauri::command]
-pub fn data_clear(
-    state: State<'_, Arc<AppState>>,
-    include_master: Option<bool>,
-) -> Result<db::ClearOutcome, String> {
+pub fn data_clear(state: State<'_, Arc<AppState>>, include_master: Option<bool>) -> Result<db::ClearOutcome, String> {
     let outcome = db::clear_data(&state.db, include_master.unwrap_or(false))?;
     if let Ok(mut slot) = state.last_import.lock() {
         *slot = None;

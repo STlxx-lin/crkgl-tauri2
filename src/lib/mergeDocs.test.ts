@@ -68,21 +68,14 @@ describe("mergeRowsByDoc：按单号分组", () => {
   });
 
   it("空单号不参与合并，各自成行", () => {
-    const rows = [
-      row({ id: 1, docNo: null }),
-      row({ id: 2, docNo: "   " }),
-      row({ id: 3, docNo: "A" }),
-    ];
+    const rows = [row({ id: 1, docNo: null }), row({ id: 2, docNo: "   " }), row({ id: 3, docNo: "A" })];
     const merged = mergeRowsByDoc(rows, true);
     expect(merged).toHaveLength(3);
     expect(merged.every((r) => r.groupCount === 1)).toBe(true);
   });
 
   it("同号但类型不同（入库/出库）不能合并", () => {
-    const rows = [
-      row({ id: 1, docNo: "X", kind: "in" }),
-      row({ id: 2, docNo: "X", kind: "out" }),
-    ];
+    const rows = [row({ id: 1, docNo: "X", kind: "in" }), row({ id: 2, docNo: "X", kind: "out" })];
     const merged = mergeRowsByDoc(rows, true);
     expect(merged).toHaveLength(2);
   });

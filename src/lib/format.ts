@@ -62,9 +62,7 @@ export function delta(current: number, previous: number): { text: string; direct
   if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
   if (previous === 0) {
     if (current === 0) return null;
-    return current > 0
-      ? { text: "新增", direction: "up" }
-      : { text: "新增（负）", direction: "down" };
+    return current > 0 ? { text: "新增", direction: "up" } : { text: "新增（负）", direction: "down" };
   }
   const ratio = ((current - previous) / Math.abs(previous)) * 100;
   const text = (ratio >= 0 ? "+" : "") + ratio.toFixed(1) + "%";

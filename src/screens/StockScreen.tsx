@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  RiAlertLine,
-  RiCheckboxCircleLine,
-  RiDownload2Line,
-  RiRefreshLine,
-  RiSearchLine,
-} from "@remixicon/react";
+import { RiAlertLine, RiCheckboxCircleLine, RiDownload2Line, RiRefreshLine, RiSearchLine } from "@remixicon/react";
 import { countStock, fetchStockCheck, fetchStockReport, isTauri, updateRow } from "../lib/api";
 import type { StockCheckSummary, StockIssue, StockRow } from "../lib/types";
 import { count, date, qty } from "../lib/format";
@@ -203,7 +197,17 @@ function StockTable() {
     // 这条报表是给人对账用的，能丢进 Excel 比什么都实在
     const header = ["物料编码", "物料名称", "库位", "规格型号", "单位", "入库数量", "出库数量", "结存", "最近日期"];
     const lines = data.map((row) =>
-      [row.itemCode, row.itemName, row.location ?? "", row.spec ?? "", row.unit ?? "", row.inQty, row.outQty, row.stockQty, row.lastDate ?? ""]
+      [
+        row.itemCode,
+        row.itemName,
+        row.location ?? "",
+        row.spec ?? "",
+        row.unit ?? "",
+        row.inQty,
+        row.outQty,
+        row.stockQty,
+        row.lastDate ?? "",
+      ]
         .map(csvCell)
         .join(","),
     );
@@ -247,9 +251,7 @@ function StockTable() {
           只看负库存
         </button>
         {loading ? <Spinner size="xs" aria-label="加载中" /> : null}
-        <span className="text-body-2-regular text-text-tertiary">
-          共 {count(total)} 个物料
-        </span>
+        <span className="text-body-2-regular text-text-tertiary">共 {count(total)} 个物料</span>
         <div className="ms-auto flex items-center gap-2">
           <Button
             size="small"
@@ -276,7 +278,10 @@ function StockTable() {
         </div>
       </div>
 
-      <div ref={tableRef} className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div
+        ref={tableRef}
+        className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default"
+      >
         <table className="w-full min-w-[1170px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
@@ -304,22 +309,38 @@ function StockTable() {
               </tr>
             ) : (
               rows.map((row) => (
-                <tr key={row.itemCode} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={row.itemCode}>
+                <tr
+                  key={row.itemCode}
+                  className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover"
+                >
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary"
+                    title={row.itemCode}
+                  >
                     {row.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={row.itemName}>
                     {row.itemName}
                   </td>
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={row.location ?? ""}>
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={row.location ?? ""}
+                  >
                     {row.location ?? "—"}
                   </td>
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={row.spec ?? ""}>
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={row.spec ?? ""}
+                  >
                     {row.spec ?? "—"}
                   </td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-text-tertiary">{row.unit ?? "—"}</td>
-                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{qty(row.inQty)}</td>
-                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{qty(row.outQty)}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
+                    {qty(row.inQty)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
+                    {qty(row.outQty)}
+                  </td>
                   <td
                     className={
                       "whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums font-medium " +
@@ -413,10 +434,7 @@ function IssueList() {
     load();
   }, [load]);
 
-  const shown = useMemo(
-    () => (filter === "all" ? issues : issues.filter((i) => i.kind === filter)),
-    [issues, filter],
-  );
+  const shown = useMemo(() => (filter === "all" ? issues : issues.filter((i) => i.kind === filter)), [issues, filter]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -591,7 +609,11 @@ function IssueStat({
     <div className="bg-background-primary-default px-5 py-4">
       <p className="text-caption-1-semibold text-text-tertiary">{label}</p>
       <p className="mt-1 flex items-baseline gap-1">
-        <span className={"font-mono text-title-3-semibold tabular-nums " + (tone === "warn" ? "text-amber-500" : "text-text-primary")}>
+        <span
+          className={
+            "font-mono text-title-3-semibold tabular-nums " + (tone === "warn" ? "text-amber-500" : "text-text-primary")
+          }
+        >
           {value}
         </span>
         <span className="text-caption-1-regular text-text-tertiary">{unit}</span>
@@ -705,9 +727,7 @@ function FillCodeDialog({
               </label>
             </div>
 
-            <p className="text-caption-1-regular text-text-tertiary">
-              只改编码、名称、单位；数量和金额保持原样。
-            </p>
+            <p className="text-caption-1-regular text-text-tertiary">只改编码、名称、单位；数量和金额保持原样。</p>
           </ModalBody>
           <ModalFooter>
             <Button size="small" variant="secondary" onClick={close} disabled={saving}>

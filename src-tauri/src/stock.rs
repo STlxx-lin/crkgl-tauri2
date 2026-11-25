@@ -274,7 +274,7 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
                     kind_label: Some(kind_label(&kind)),
                     detail: match qty {
                         None => "数量为空".to_string(),
-                        Some(q) if q == 0.0 => "数量为 0".to_string(),
+                        Some(0.0) => "数量为 0".to_string(),
                         Some(q) => format!("数量为负（{q}）"),
                     },
                 })
@@ -308,11 +308,9 @@ pub fn check_summary(conn: &Connection) -> DbResult<CheckSummary> {
         )
         .map_err(|e| DbError::from(e).0)?;
     let bad_qty_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ledger WHERE qty IS NULL OR qty <= 0",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM ledger WHERE qty IS NULL OR qty <= 0", [], |r| {
+            r.get(0)
+        })
         .map_err(|e| DbError::from(e).0)?;
     Ok(CheckSummary {
         negative_items,
@@ -436,7 +434,9 @@ mod tests {
         assert_eq!(s.bad_qty_rows, 1);
 
         let issues = check_issues(&conn, 100).unwrap();
-        assert!(issues.iter().any(|i| i.kind == "negative_stock" && i.item_code.as_deref() == Some("C")));
+        assert!(issues
+            .iter()
+            .any(|i| i.kind == "negative_stock" && i.item_code.as_deref() == Some("C")));
         assert!(issues.iter().any(|i| i.kind == "missing_code"));
         assert!(issues.iter().any(|i| i.kind == "bad_qty"));
     }
