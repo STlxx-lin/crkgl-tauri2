@@ -83,6 +83,8 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --lib --tests -- -D warnings
 
+      # 含 tests/voucher_it.rs（开单落库的集成测试）；e2e 那几条是 #[ignore]，
+      # 需要真实工作簿，不在 CI 里跑
       - name: 单测
         working-directory: src-tauri
-        run: cargo test --lib
+        run: cargo test
