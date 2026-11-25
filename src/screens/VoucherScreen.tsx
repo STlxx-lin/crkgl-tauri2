@@ -119,15 +119,20 @@ function blankHead(kind: Kind): HeadDraft {
 
 const VOUCHER_DRAFT_KEY = "ledger.voucher.draft";
 
+function draftKey(warehouseId: number): string {
+  // 每个仓一份草稿：切仓回来还在，又不会把 A 仓的供应商写到 B 仓的单上
+  return `${VOUCHER_DRAFT_KEY}.${warehouseId}`;
+}
+
 interface VoucherDraft {
   mode: Mode;
   head: HeadDraft;
   lines: DraftLine[];
 }
 
-function loadVoucherDraft(): VoucherDraft | null {
+function loadVoucherDraft(warehouseId: number): VoucherDraft | null {
   try {
-    const raw = window.localStorage.getItem(VOUCHER_DRAFT_KEY);
+    const raw = window.localStorage.getItem(draftKey(warehouseId));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (
@@ -146,17 +151,34 @@ function loadVoucherDraft(): VoucherDraft | null {
   return null;
 }
 
-function clearVoucherDraft(): void {
+/**
+ * 老版本的草稿键不带仓库（`ledger.voucher.draft`）。
+ * 升级后第一次进开单页时把它归到当前仓，别让用户以为录了一半的单丢了。
+ * 只搬一次：搬完就删旧键，之后切仓的 load 都不会再看到它。
+ */
+function adoptLegacyDraft(warehouseId: number): void {
   try {
+    const legacy = window.localStorage.getItem(VOUCHER_DRAFT_KEY);
+    if (!legacy) return;
+    const key = draftKey(warehouseId);
+    if (!window.localStorage.getItem(key)) window.localStorage.setItem(key, legacy);
     window.localStorage.removeItem(VOUCHER_DRAFT_KEY);
   } catch {
     // 忽略存储错误
   }
 }
 
-function saveVoucherDraft(draft: VoucherDraft): void {
+function clearVoucherDraft(warehouseId: number): void {
   try {
-    window.localStorage.setItem(VOUCHER_DRAFT_KEY, JSON.stringify(draft));
+    window.localStorage.removeItem(draftKey(warehouseId));
+  } catch {
+    // 忽略存储错误
+  }
+}
+
+function saveVoucherDraft(warehouseId: number, draft: VoucherDraft): void {
+  try {
+    window.localStorage.setItem(draftKey(warehouseId), JSON.stringify(draft));
   } catch {
     // 忽略存储错误
   }
@@ -245,15 +267,24 @@ function SpecBadge({
  */
 export function VoucherScreen({
   active = true,
+  warehouseId,
+  warehouseName,
   onChanged,
 }: {
   active?: boolean;
+  /** 当前仓库：草稿按仓分开存，切仓回来还在 */
+  warehouseId: number;
+  warehouseName: string | null;
   onChanged: () => void;
 }) {
-  const initialDraft = useRef(loadVoucherDraft());
-  const [mode, setMode] = useState<Mode>(() => initialDraft.current?.mode ?? { kind: "in", id: null });
-  const [head, setHead] = useState<HeadDraft>(() => initialDraft.current?.head ?? blankHead("in"));
-  const [lines, setLines] = useState<DraftLine[]>(() => initialDraft.current?.lines ?? [blankLine()]);
+  // 老版本草稿不带仓库：先归到当前仓，再读（只在首次挂载时做一次）
+  const [initialDraft] = useState<VoucherDraft | null>(() => {
+    adoptLegacyDraft(warehouseId);
+    return loadVoucherDraft(warehouseId);
+  });
+  const [mode, setMode] = useState<Mode>(() => initialDraft?.mode ?? { kind: "in", id: null });
+  const [head, setHead] = useState<HeadDraft>(() => initialDraft?.head ?? blankHead("in"));
+  const [lines, setLines] = useState<DraftLine[]>(() => initialDraft?.lines ?? [blankLine()]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   // 字典候选：单位按行选，出库部门与采购人在表头选
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
@@ -351,6 +382,43 @@ export function VoucherScreen({
     wasActive.current = active;
   }, [active, loadSuppliers, loadDicts, loadHistory]);
 
+  // 草稿归属的仓库。切仓时先把它指向新仓，后面那次保存才不会把旧仓内容写进新仓。
+  const draftWarehouse = useRef(warehouseId);
+  // 未落盘的防抖定时器：切仓前先掐掉，否则它可能把旧仓内容写进新仓的键
+  const draftTimer = useRef<number | null>(null);
+
+  // 切仓：先把当前仓的草稿落盘，再换成新仓的那一份。
+  // 开单页是常驻挂载的，不重建，所以草稿要自己换，不能靠卸载。
+  useEffect(() => {
+    const from = draftWarehouse.current;
+    if (from === warehouseId) return;
+    if (draftTimer.current !== null) {
+      window.clearTimeout(draftTimer.current);
+      draftTimer.current = null;
+    }
+    saveVoucherDraft(from, { mode, head, lines });
+    draftWarehouse.current = warehouseId;
+    const draft = loadVoucherDraft(warehouseId);
+    const nextMode = draft?.mode ?? { kind: "in" as Kind, id: null };
+    const nextHead = draft?.head ?? blankHead(nextMode.kind);
+    setMode(nextMode);
+    setHead(nextHead);
+    setLines(draft?.lines ?? [blankLine()]);
+    dirty.current = false;
+    setHistory([]);
+    setViewingVoucher(null);
+    setViewingImport(null);
+    setPrintingView(null);
+    setDocHits(null);
+    setPendingDelete(null);
+    // 历史单据属于旧仓，重新拉一遍新仓的
+    void loadHistory();
+    // 新仓的流水单独起号：单据编号不能沿用上一个仓的
+    if (!draft || !nextHead.docNo.trim()) void freshDocNo(nextMode.kind, nextHead.docDate);
+    // 只用 warehouseId 触发；mode/head/lines 是切换那一刻的快照
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [warehouseId]);
+
   // 正在输入时自动防抖暂存草稿，防止误刷新或关闭应用丢失
   useEffect(() => {
     const hasContent =
@@ -370,9 +438,14 @@ export function VoucherScreen({
 
     if (hasContent || dirty.current) {
       const timer = window.setTimeout(() => {
-        saveVoucherDraft({ mode, head, lines });
+        draftTimer.current = null;
+        saveVoucherDraft(draftWarehouse.current, { mode, head, lines });
       }, 250);
-      return () => window.clearTimeout(timer);
+      draftTimer.current = timer;
+      return () => {
+        window.clearTimeout(timer);
+        if (draftTimer.current === timer) draftTimer.current = null;
+      };
     }
   }, [mode, head, lines]);
 
@@ -525,7 +598,7 @@ export function VoucherScreen({
   };
 
   const startNew = async (kind: Kind) => {
-    clearVoucherDraft();
+    clearVoucherDraft(warehouseId);
     setMode({ kind, id: null });
     setHead(blankHead(kind));
     setLines([blankLine()]);
@@ -705,7 +778,7 @@ export function VoucherScreen({
         toast("单据已更新", { description: `${head.docNo} · ${count(payloadLines.length)} 行`, status: "success" });
       }
       dirty.current = false;
-      clearVoucherDraft();
+      clearVoucherDraft(warehouseId);
       // 下次新开单沿用这次填的采购人
       if (mode.kind === "in" && head.buyer.trim()) saveBuyer(head.buyer);
       // 手输的新供应商存进基础资料，下次输两个字就能关联出来
@@ -837,7 +910,11 @@ const runDocSearch = useCallback(async (keyword: string) => {
     <>
       <PageHeader
         title="开单"
-        description="本机新开的入库单与出库单会和 Excel 导入的明细一起出现在台账里"
+        description={
+          warehouseName
+            ? `当前仓库：${warehouseName} · 本机新开单据会进入本仓台账`
+            : "本机新开的入库单与出库单会和 Excel 导入的明细一起出现在台账里"
+        }
         actions={
           <>
             <Button
@@ -1533,7 +1610,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
       ) : null}
 
       {printingView ? (
-        <PrintVoucher voucher={printingView} onClose={() => setPrintingView(null)} />
+        <PrintVoucher voucher={printingView} warehouseName={warehouseName} onClose={() => setPrintingView(null)} />
       ) : null}
 
       {viewingImport ? (
@@ -1670,7 +1747,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
         />
       ) : null}
 
-      {printing ? <PrintVoucher voucher={printDraft} onClose={() => setPrinting(false)} /> : null}
+      {printing ? <PrintVoucher voucher={printDraft} warehouseName={warehouseName} onClose={() => setPrinting(false)} /> : null}
     </>
   );
 }

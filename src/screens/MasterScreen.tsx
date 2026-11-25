@@ -134,7 +134,7 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
     <>
       <PageHeader
         title="基础资料"
-        description="物料与供应商是开单时的字典：选物料带出单位与参考单价，供应商从下拉里挑"
+        description="物料与供应商是全库通用的基础资料，各仓库共用；选物料带出单位与参考单价，供应商从下拉里挑"
         actions={
           <>
             <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={doBackfill} disabled={busy || !isTauri}>

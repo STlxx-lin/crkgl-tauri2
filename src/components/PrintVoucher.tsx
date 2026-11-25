@@ -16,10 +16,13 @@ import "../styles/print.css";
  */
 export function PrintVoucher({
   voucher,
+  warehouseName,
   onClose,
   onRowsChange,
 }: {
   voucher: Voucher;
+  /** 仓库名：打在纸面上，多仓台账归档时不会混 */
+  warehouseName?: string | null;
   onClose: () => void;
   onRowsChange?: (rows: number) => void;
 }) {
@@ -85,7 +88,10 @@ export function PrintVoucher({
       {pages.map((chunk, pageIndex) => (
         <div key={pageIndex} className="print-paper">
           <div className="print-root print-sheet">            <div className="print-head">
-              <div className="print-company">温州乾力机械有限公司</div>
+              <div className="print-company">
+                温州乾力机械有限公司
+                {warehouseName ? ` · ${warehouseName}` : ""}
+              </div>
               <h1 className="print-title">{isIn ? "入库单" : "出库单"}</h1>
             </div>
 

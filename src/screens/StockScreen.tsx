@@ -42,14 +42,25 @@ type Tab = "stock" | "issues";
  *
  * 这一页只读，不改任何数据：修正动作（补入库单、改台账行）由用户在各自页面完成。
  */
-export function StockScreen({ onChanged }: { onChanged?: () => void }) {
+export function StockScreen({
+  warehouseName,
+  onChanged,
+}: {
+  /** 当前仓库名：页头与导出文件名用 */
+  warehouseName?: string | null;
+  onChanged?: () => void;
+}) {
   const [tab, setTab] = useState<Tab>("stock");
 
   return (
     <>
       <PageHeader
         title="库存"
-        description="结存 = 入库数量 - 出库数量；核对清单只提示问题，不自动改数据"
+        description={
+          warehouseName
+            ? `${warehouseName} · 结存 = 入库数量 - 出库数量；核对只提示问题，不自动改数据`
+            : "结存 = 入库数量 - 出库数量；核对清单只提示问题，不自动改数据"
+        }
         actions={
           <Button size="small" variant="secondary" leadingIcon={RiRefreshLine} onClick={onChanged}>
             刷新
@@ -83,13 +94,13 @@ export function StockScreen({ onChanged }: { onChanged?: () => void }) {
           ))}
         </div>
 
-        {tab === "stock" ? <StockTable /> : <IssueList />}
+        {tab === "stock" ? <StockTable warehouseName={warehouseName} /> : <IssueList />}
       </div>
     </>
   );
 }
 
-function StockTable() {
+function StockTable({ warehouseName }: { warehouseName?: string | null }) {
   const [keyword, setKeyword] = useState("");
   const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [onlyNegative, setOnlyNegative] = useState(false);
@@ -165,7 +176,7 @@ function StockTable() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `库存结存_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${warehouseName ? `库存结存_${warehouseName}` : "库存结存"}_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     toast("已导出当前页", { description: `${count(rows.length)} 行`, status: "success" });
