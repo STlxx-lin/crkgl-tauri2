@@ -329,7 +329,9 @@ pub fn get(conn: &Connection, id: i64) -> DbResult<Option<Voucher>> {
 }
 
 pub fn list(conn: &Connection, kind: Option<&str>, limit: i64) -> DbResult<Vec<VoucherSummary>> {
-    let limit = limit.clamp(1, 200);
+    // 上限跟前端 `HISTORY_CAP` 对齐：前端允许「加载更早」到 500 张，
+    // 这里若仍卡在 200，点两次之后按钮就消失，用户会以为系统里只有 200 张单。
+    let limit = limit.clamp(1, 500);
     let mut stmt = conn
         .prepare(
             "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,

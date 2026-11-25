@@ -118,6 +118,10 @@ function blankHead(kind: Kind): HeadDraft {
 }
 
 const VOUCHER_DRAFT_KEY = "ledger.voucher.draft";
+/** 本机开单列表一次最多加载多少张。 */
+const HISTORY_CAP = 500;
+/** 点一次「加载更早」多取多少张。 */
+const HISTORY_STEP = 50;
 
 interface VoucherDraft {
   mode: Mode;
@@ -318,15 +322,18 @@ export function VoucherScreen({
   const [ownerOptions, setOwnerOptions] = useState<string[]>([]);
   const [buyerOptions, setBuyerOptions] = useState<string[]>([]);
   const [history, setHistory] = useState<VoucherSummary[]>([]);
-  // 列表分页：默认 50，点「加载更多」一次多取 50
-  const [historyLimit, setHistoryLimit] = useState(50);
+  // 列表分页：默认 50，点「加载更早」一次多取 50，最多 HISTORY_CAP 张
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_STEP);
   // 保存后是否自动打印（打印完毕后原单继续留在表单里，方便接着编号）
   const [printAfterSave, setPrintAfterSave] = useState(() => storedPrintAfterSave());
   // 本机开单列表：按编号/供应商筛 + 入库出库筛选
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyKind, setHistoryKind] = useState<"all" | "in" | "out">("all");
   const [busy, setBusy] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<VoucherSummary | null>(null);
+  // 待删单据只认 id / 单号 / 行数，不回查已加载列表：
+  // history 只装最近 50 张，从「单据查询」打开较早的单时回查会拿不到，
+  // 点删除就什么都不发生（没有 toast、没有确认框），像程序卡住了。
+  const [pendingDelete, setPendingDelete] = useState<{ id: number; docNo: string; rowCount: number } | null>(null);
   // A4 打印：用当前录入内容出稿，未保存也能先打一份校样
   const [printing, setPrinting] = useState(false);
   // 快速新增：录单到一半补一条物料/供应商
@@ -1314,8 +1321,14 @@ const runDocSearch = useCallback(async (keyword: string) => {
                     variant="secondary"
                     leadingIcon={RiDeleteBinLine}
                     onClick={() => {
-                      const hit = history.find((v) => v.id === mode.id);
-                      if (hit) setPendingDelete(hit);
+                      // 正在编辑的这张单可能不在 history 里（只加载最近 50 张），
+                      // 直接用表单里的单号与明细行数构造，不依赖列表
+                      if (mode.id === null) return;
+                      setPendingDelete({
+                        id: mode.id,
+                        docNo: head.docNo.trim(),
+                        rowCount: lines.filter((line) => line.itemCode.trim() || line.itemName.trim()).length,
+                      });
                     }}
                   >
                     删除单据
@@ -1406,8 +1419,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
               <h2 className="text-title-4-semibold text-text-primary">本机开单</h2>
               <span className="text-caption-1-regular text-text-tertiary">
                 {historyQuery || historyKind !== "all"
-                  ? `${count(shownHistory.length)} / ${count(history.length)} 张`
-                  : `${count(history.length)} 张`}
+                  ? `筛选命中 ${count(shownHistory.length)} 张 / 已加载 ${count(history.length)} 张`
+                  : `已加载 ${count(history.length)} 张`}
+                {history.length >= HISTORY_CAP ? "（只保留最近 500 张）" : ""}
               </span>
               <div className="ms-auto flex items-center gap-2">
                 <input
@@ -1446,7 +1460,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   description={
                     history.length === 0
                       ? "左边填一张入库单或出库单，保存后会出现在台账里。"
-                      : "换个编号或类型再试。"
+                      : `这里只在已加载的 ${count(history.length)} 张里筛。更早的单请用上方「单据查询」按编号查。`
                   }
                 />
               </div>
@@ -1502,20 +1516,20 @@ const runDocSearch = useCallback(async (keyword: string) => {
             {shownHistory.length > 0 ? (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-separator-border px-4 py-2">
                 <span className="text-caption-1-regular text-text-tertiary">
-                  当前列表 入库 {count(shownHistory.filter((v) => v.kind === "in").length)} 张 · 出库{" "}
+                  已加载范围内：入库 {count(shownHistory.filter((v) => v.kind === "in").length)} 张 · 出库{" "}
                   {count(shownHistory.filter((v) => v.kind === "out").length)} 张
                 </span>
                 <span className="ms-auto font-mono text-body-2-medium tabular-nums text-text-primary">
-                  合计 {money(shownAmount)}
+                  已加载合计 {money(shownAmount)}
                 </span>
-                {history.length >= historyLimit && historyLimit < 500 ? (
+                {history.length >= historyLimit && historyLimit < HISTORY_CAP ? (
                   <Button
                     size="small"
                     variant="ghost"
                     leadingIcon={RiArrowDownLine}
-                    onClick={() => setHistoryLimit((n) => Math.min(500, n + 50))}
+                    onClick={() => setHistoryLimit((n) => Math.min(HISTORY_CAP, n + HISTORY_STEP))}
                   >
-                    加载更多
+                    加载更早的 50 张
                   </Button>
                 ) : null}
               </div>
@@ -1599,11 +1613,13 @@ const runDocSearch = useCallback(async (keyword: string) => {
               </ModalBody>
               <ModalFooter>
                 <Button size="small" variant="ghost" leadingIcon={RiDeleteBinLine} onClick={() => {
-                  const hit = history.find((v) => v.id === viewingVoucher.id);
-                  if (hit) {
-                    close();
-                    setPendingDelete(hit);
-                  }
+                  // 直接用当前打开的单构造待删项，不回查 history
+                  setPendingDelete({
+                    id: viewingVoucher.id,
+                    docNo: viewingVoucher.docNo,
+                    rowCount: viewingVoucher.lines.length,
+                  });
+                  close();
                 }}>
                   删除
                 </Button>
