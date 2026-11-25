@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-static MIGRATIONS: [(&str, &str); 14] = [
+static MIGRATIONS: [(&str, &str); 15] = [
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_voucher", include_str!("../migrations/002_voucher.sql")),
     ("003_master_data", include_str!("../migrations/003_master_data.sql")),
@@ -27,6 +27,7 @@ static MIGRATIONS: [(&str, &str); 14] = [
     ("012_item_seq", include_str!("../migrations/012_item_seq.sql")),
     ("013_ledger_perf", include_str!("../migrations/013_ledger_perf.sql")),
     ("014_warehouse", include_str!("../migrations/014_warehouse.sql")),
+    ("015_warehouse_company", include_str!("../migrations/015_warehouse_company.sql")),
 ];
 
 pub struct Db {

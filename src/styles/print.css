@@ -28,6 +28,9 @@
   font-size: 12px;
   letter-spacing: 0.08em;
   color: var(--paper-muted);
+  /* 抬头可以是「公司名 + 地址/电话」三行，按仓库里填的换行原样排 */
+  white-space: pre-line;
+  line-height: 1.4;
 }
 
 .print-title {

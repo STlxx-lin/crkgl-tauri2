@@ -269,12 +269,15 @@ export function VoucherScreen({
   active = true,
   warehouseId,
   warehouseName,
+  companyName,
   onChanged,
 }: {
   active?: boolean;
   /** 当前仓库：草稿按仓分开存，切仓回来还在 */
   warehouseId: number;
   warehouseName: string | null;
+  /** 该仓库的打印抬头：单头与纸面都用它，空则不打公司名 */
+  companyName: string | null;
   onChanged: () => void;
 }) {
   // 老版本草稿不带仓库：先归到当前仓，再读（只在首次挂载时做一次）
@@ -965,7 +968,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
             {/* 单头：公司名 + 单据名（居中，和纸单一致） */}
             <div className="border-b border-separator-border px-6 py-4 text-center">
-              <p className="text-caption-1-regular text-text-tertiary">温州乾力机械有限公司</p>
+              {companyName?.trim() ? (
+                <p className="whitespace-pre-line text-caption-1-regular text-text-tertiary">{companyName.trim()}</p>
+              ) : null}
               <h2 className="mt-1 text-title-2-semibold tracking-wide text-text-primary">
                 {isIn ? "入库单" : "出库单"}
               </h2>
@@ -1610,7 +1615,12 @@ const runDocSearch = useCallback(async (keyword: string) => {
       ) : null}
 
       {printingView ? (
-        <PrintVoucher voucher={printingView} warehouseName={warehouseName} onClose={() => setPrintingView(null)} />
+        <PrintVoucher
+          voucher={printingView}
+          warehouseName={warehouseName}
+          companyName={companyName}
+          onClose={() => setPrintingView(null)}
+        />
       ) : null}
 
       {viewingImport ? (
@@ -1747,7 +1757,14 @@ const runDocSearch = useCallback(async (keyword: string) => {
         />
       ) : null}
 
-      {printing ? <PrintVoucher voucher={printDraft} warehouseName={warehouseName} onClose={() => setPrinting(false)} /> : null}
+      {printing ? (
+        <PrintVoucher
+          voucher={printDraft}
+          warehouseName={warehouseName}
+          companyName={companyName}
+          onClose={() => setPrinting(false)}
+        />
+      ) : null}
     </>
   );
 }

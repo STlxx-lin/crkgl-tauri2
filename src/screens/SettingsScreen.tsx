@@ -93,6 +93,10 @@ export function SettingsScreen({
 
             <dl className="flex flex-col gap-2 text-body-2-regular">
               <Row label="当前仓库" value={warehouse?.name ?? "—"} />
+              <Row
+                label="打印抬头"
+                value={warehouse?.companyName ? warehouse.companyName.split("\n").join(" / ") : "未设置（纸面不打公司名）"}
+              />
               <Row label="本仓台账" value={`${count(warehouse?.ledgerRows ?? boot?.rowCount ?? 0)} 行`} />
               <Row label="本仓单据" value={`${count(warehouse?.vouchers ?? 0)} 张 · 导入 ${count(warehouse?.imports ?? 0)} 批`} />
               <Row label="数据库结构" value={`v${boot?.schemaVersion ?? 0} · 程序 v${boot?.appVersion ?? "—"}`} />

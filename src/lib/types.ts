@@ -306,6 +306,8 @@ export interface Warehouse {
   id: number;
   name: string;
   remark: string | null;
+  /** 打印抬头（公司名，可带地址/电话，用换行分隔）；空表示纸面不打这一行 */
+  companyName: string | null;
   active: boolean;
   sortNo: number;
   /** 该仓台账行数 */
@@ -318,6 +320,8 @@ export interface Warehouse {
 export interface WarehouseInput {
   name: string;
   remark?: string | null;
+  /** 不传 = 不改；传空串 = 清空 */
+  companyName?: string | null;
   active?: boolean | null;
   sortNo?: number | null;
 }

@@ -202,6 +202,7 @@ fn warehouses_are_isolated_and_merge_on_demand() {
         &warehouse_ledger_lib::warehouse::WarehouseInput {
             name: "二号仓".into(),
             remark: None,
+            company_name: Some("测试二号公司".into()),
             active: None,
             sort_no: None,
         },
@@ -216,6 +217,13 @@ fn warehouses_are_isolated_and_merge_on_demand() {
     let v2 = voucher::get_db(&db, two).unwrap().unwrap();
     assert_eq!(v1.doc_no, "20260905001");
     assert_eq!(v2.doc_no, "20260905001", "每个仓自己从 001 起号");
+
+    // 打印抬头跟着仓库走：主仓库沿用老公司名，二号仓用自己配的
+    let houses = warehouse_ledger_lib::warehouse::list_db(&db).unwrap();
+    let main = houses.iter().find(|w| w.id == 1).unwrap();
+    let second = houses.iter().find(|w| w.id == wh2).unwrap();
+    assert_eq!(main.company_name.as_deref(), Some("温州乾力机械有限公司"));
+    assert_eq!(second.company_name.as_deref(), Some("测试二号公司"));
 
     // 单据列表按仓：各自只看得到自己那一张
     assert_eq!(voucher::list_db(&db, 1, None, 50).unwrap().len(), 1);

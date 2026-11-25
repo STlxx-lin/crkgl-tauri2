@@ -258,6 +258,7 @@ export default function App() {
               active={page === "voucher"}
               warehouseId={activeWarehouseId}
               warehouseName={activeWarehouse?.name ?? null}
+              companyName={activeWarehouse?.companyName ?? null}
               onChanged={refreshBoot}
             />
           </div>

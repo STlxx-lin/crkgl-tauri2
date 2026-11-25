@@ -22,6 +22,8 @@ pub struct Warehouse {
     pub id: i64,
     pub name: String,
     pub remark: Option<String>,
+    /// 打印抬头（公司名，可带地址/电话，最多 3 行）；空表示纸面上不打这一行
+    pub company_name: Option<String>,
     pub active: bool,
     pub sort_no: i64,
     /// 该仓库的台账行数（切仓库时给用户一个体量参考）
@@ -39,6 +41,10 @@ pub struct WarehouseInput {
     pub name: String,
     #[serde(default)]
     pub remark: Option<String>,
+    /// 打印抬头。`None` 表示「不改」（改名时前端只传改动的字段也无妨）；
+    /// `Some("")` 表示清空。
+    #[serde(default)]
+    pub company_name: Option<String>,
     #[serde(default)]
     pub active: Option<bool>,
     #[serde(default)]
@@ -64,10 +70,31 @@ fn trim_opt(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 打印抬头：允许换行（公司名 + 地址/电话），但拒绝空行挤在一起和超长。
+///
+/// 空字符串表示「不打这一行」，返回 `Ok(None)`。
+fn clean_company(raw: &str) -> DbResult<Option<String>> {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    if lines.len() > 3 {
+        return Err("打印抬头最多 3 行".into());
+    }
+    if lines.iter().any(|line| line.chars().count() > 60) {
+        return Err("打印抬头每行最多 60 个字".into());
+    }
+    Ok(Some(lines.join("\n")))
+}
+
 pub fn list(conn: &Connection) -> DbResult<Vec<Warehouse>> {
     let mut stmt = conn
         .prepare(
-            "SELECT w.id, w.name, w.remark, w.active, w.sort_no, w.created_at,
+            "SELECT w.id, w.name, w.remark, w.company_name, w.active, w.sort_no, w.created_at,
                     (SELECT COUNT(*) FROM ledger   l WHERE l.warehouse_id = w.id),
                     (SELECT COUNT(*) FROM vouchers v WHERE v.warehouse_id = w.id),
                     (SELECT COUNT(*) FROM imports  i WHERE i.warehouse_id = w.id)
@@ -81,12 +108,13 @@ pub fn list(conn: &Connection) -> DbResult<Vec<Warehouse>> {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 remark: r.get(2)?,
-                active: r.get::<_, i64>(3)? != 0,
-                sort_no: r.get(4)?,
-                created_at: r.get(5)?,
-                ledger_rows: r.get(6)?,
-                vouchers: r.get(7)?,
-                imports: r.get(8)?,
+                company_name: r.get(3)?,
+                active: r.get::<_, i64>(4)? != 0,
+                sort_no: r.get(5)?,
+                created_at: r.get(6)?,
+                ledger_rows: r.get(7)?,
+                vouchers: r.get(8)?,
+                imports: r.get(9)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -158,11 +186,16 @@ pub fn create(conn: &Connection, input: &WarehouseInput) -> DbResult<i64> {
             .query_row("SELECT COALESCE(MAX(sort_no), 0) + 1 FROM warehouses", [], |r| r.get(0))
             .map_err(|e| e.to_string())?,
     };
+    let company_name = match input.company_name.as_deref() {
+        Some(raw) => clean_company(raw)?,
+        None => None,
+    };
     conn.execute(
-        "INSERT INTO warehouses (name, remark, active, sort_no) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO warehouses (name, remark, company_name, active, sort_no) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             name,
             trim_opt(&input.remark),
+            company_name,
             if input.active.unwrap_or(true) { 1i64 } else { 0i64 },
             sort_no,
         ],
@@ -202,13 +235,22 @@ pub fn update(conn: &Connection, id: i64, input: &WarehouseInput) -> DbResult<()
             return Err("至少要保留一个启用的仓库".into());
         }
     }
+    // 抬头：`None` 表示这次没传（保留原值），`Some("")` 表示清空。
+    // 用一个 0/1 标志区分，避免 COALESCE 把「清空」当成「没传」。
+    let (company_set, company_value) = match input.company_name.as_deref() {
+        Some(raw) => (1i64, clean_company(raw)?),
+        None => (0i64, None),
+    };
     conn.execute(
         "UPDATE warehouses SET name = ?1, remark = ?2,
-                active = COALESCE(?3, active), sort_no = COALESCE(?4, sort_no)
-         WHERE id = ?5",
+                company_name = CASE WHEN ?3 = 1 THEN ?4 ELSE company_name END,
+                active = COALESCE(?5, active), sort_no = COALESCE(?6, sort_no)
+         WHERE id = ?7",
         rusqlite::params![
             name,
             trim_opt(&input.remark),
+            company_set,
+            company_value,
             input.active.map(|v| if v { 1i64 } else { 0i64 }),
             input.sort_no,
             id,
@@ -335,6 +377,8 @@ mod tests {
         let rows = list_db(&db).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "主仓库");
+        // 迁移 015 把原来写死在打印页上的公司名落到主仓库，升级后纸面不变
+        assert_eq!(rows[0].company_name.as_deref(), Some("温州乾力机械有限公司"));
         assert_eq!(current_id_db(&db).unwrap(), rows[0].id);
     }
 
@@ -346,12 +390,14 @@ mod tests {
             &WarehouseInput {
                 name: " 二号仓 ".into(),
                 remark: Some("备件".into()),
+                company_name: Some("乾力机械 · 二号仓".into()),
                 active: None,
                 sort_no: None,
             },
         )
         .unwrap();
         assert_eq!(get_db_name(&db, id).as_deref(), Some("二号仓"));
+        assert_eq!(get_db_company(&db, id).as_deref(), Some("乾力机械 · 二号仓"));
         set_current_db(&db, id).unwrap();
         assert_eq!(current_id_db(&db).unwrap(), id);
 
@@ -361,12 +407,66 @@ mod tests {
             &WarehouseInput {
                 name: "备件仓".into(),
                 remark: None,
+                company_name: None,
                 active: Some(true),
                 sort_no: Some(5),
             },
         )
         .unwrap();
         assert_eq!(get_db_name(&db, id).as_deref(), Some("备件仓"));
+        // 没传 company_name 就是「不改」，不是清空
+        assert_eq!(get_db_company(&db, id).as_deref(), Some("乾力机械 · 二号仓"));
+    }
+
+    /// 抬头可换行（公司名 + 地址/电话），空串表示清空，超过 3 行则拒绝。
+    #[test]
+    fn company_name_is_optional_multiline_and_clearable() {
+        let db = mem();
+        let id = create_db(
+            &db,
+            &WarehouseInput {
+                name: "客户仓".into(),
+                remark: None,
+                company_name: Some("  某某贸易有限公司 \n  地址：温州 \n\n 电话：0577-1 \n".into()),
+                active: None,
+                sort_no: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_db_company(&db, id).as_deref(),
+            Some("某某贸易有限公司\n地址：温州\n电话：0577-1"),
+            "空行要挤掉，前后空格要去掉"
+        );
+
+        // 清空
+        update_db(
+            &db,
+            id,
+            &WarehouseInput {
+                name: "客户仓".into(),
+                remark: None,
+                company_name: Some("   ".into()),
+                active: None,
+                sort_no: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(get_db_company(&db, id), None);
+
+        // 超过 3 行
+        assert!(update_db(
+            &db,
+            id,
+            &WarehouseInput {
+                name: "客户仓".into(),
+                remark: None,
+                company_name: Some("一\n二\n三\n四".into()),
+                active: None,
+                sort_no: None,
+            },
+        )
+        .is_err());
     }
 
     #[test]
@@ -377,6 +477,7 @@ mod tests {
             &WarehouseInput {
                 name: "主仓库".into(),
                 remark: None,
+                company_name: None,
                 active: None,
                 sort_no: None,
             }
@@ -387,6 +488,7 @@ mod tests {
             &WarehouseInput {
                 name: "   ".into(),
                 remark: None,
+                company_name: None,
                 active: None,
                 sort_no: None,
             }
@@ -402,6 +504,7 @@ mod tests {
             &WarehouseInput {
                 name: "临时仓".into(),
                 remark: None,
+                company_name: None,
                 active: None,
                 sort_no: None,
             },
@@ -460,5 +563,13 @@ mod tests {
 
     fn get_db_name(db: &Db, id: i64) -> Option<String> {
         list_db(db).ok()?.into_iter().find(|w| w.id == id).map(|w| w.name)
+    }
+
+    fn get_db_company(db: &Db, id: i64) -> Option<String> {
+        list_db(db)
+            .ok()?
+            .into_iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.company_name)
     }
 }

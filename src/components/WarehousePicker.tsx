@@ -200,6 +200,7 @@ function ManageWarehousesDialog({
 }) {
   const [draftName, setDraftName] = useState("");
   const [draftRemark, setDraftRemark] = useState("");
+  const [draftCompany, setDraftCompany] = useState("");
   const [editing, setEditing] = useState<Warehouse | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Warehouse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -228,6 +229,7 @@ function ManageWarehousesDialog({
     setEditing(null);
     setDraftName("");
     setDraftRemark("");
+    setDraftCompany("");
   };
 
   const submit = async () => {
@@ -242,18 +244,24 @@ function ManageWarehousesDialog({
         await updateWarehouse(editing.id, {
           name,
           remark: draftRemark.trim() || null,
+          // 空串是「清空抬头」，不是「不改」，所以这里一定要显式传
+          companyName: draftCompany.trim(),
           active: editing.active,
           sortNo: editing.sortNo,
         });
         toast("仓库已更新", { description: name, status: "success" });
       } else {
-        await createWarehouse({ name, remark: draftRemark.trim() || null });
+        await createWarehouse({
+          name,
+          remark: draftRemark.trim() || null,
+          companyName: draftCompany.trim() || null,
+        });
         toast("仓库已新建", { description: name, status: "success" });
       }
       resetForm();
       afterChange();
     } catch (err) {
-      toast(editing ? "改名失败" : "新建失败", { description: String(err), status: "error" });
+      toast(editing ? "保存失败" : "新建失败", { description: String(err), status: "error" });
     } finally {
       setBusy(false);
     }
@@ -327,13 +335,13 @@ function ManageWarehousesDialog({
           <>
             <ModalHeader
               title="管理仓库"
-              description="业务数据按仓库分开记，物料、供应商、字典全库通用。"
+              description="业务数据按仓库分开记，物料、供应商、字典全库通用；打印抬头每个仓库各自设置。"
             />
             <ModalBody>
               <div className="flex flex-col gap-4">
                 <div className="flex flex-col gap-2 rounded-xl border border-separator-border bg-background-secondary-default p-3">
                   <p className="text-body-2-medium text-text-primary">
-                    {editing ? `改名：${editing.name}` : "新建仓库"}
+                    {editing ? `编辑：${editing.name}` : "新建仓库"}
                   </p>
                   <input
                     value={draftName}
@@ -352,6 +360,20 @@ function ManageWarehousesDialog({
                     aria-label="仓库备注"
                     className="h-9 w-full rounded-lg border border-border-button-default bg-background-primary-default px-2.5 text-body-regular text-text-primary outline-none placeholder:text-text-tertiary hover:border-border-button-hover focus:border-border-focus-ring focus:ring-2 focus:ring-border-focus-ring/20"
                   />
+                  <div className="flex flex-col gap-1">
+                    <span className="text-caption-1-regular text-text-secondary">打印抬头</span>
+                    <textarea
+                      value={draftCompany}
+                      onChange={(e) => setDraftCompany(e.target.value)}
+                      rows={2}
+                      placeholder="例如：温州乾力机械有限公司"
+                      aria-label="打印抬头"
+                      className="w-full resize-y rounded-lg border border-border-button-default bg-background-primary-default px-2.5 py-2 text-body-regular text-text-primary outline-none placeholder:text-text-tertiary hover:border-border-button-hover focus:border-border-focus-ring focus:ring-2 focus:ring-border-focus-ring/20"
+                    />
+                    <p className="text-[0.6875rem] text-text-tertiary">
+                      打印单据时印在标题上方，各仓库可以不同。可换行（公司名 + 地址/电话），最多 3 行、每行 60 字；留空则纸面不打这一行。
+                    </p>
+                  </div>
                   <div className="flex items-center justify-end gap-2">
                     {editing ? (
                       <Button size="small" variant="secondary" onClick={resetForm} disabled={busy}>
@@ -359,7 +381,7 @@ function ManageWarehousesDialog({
                       </Button>
                     ) : null}
                     <Button size="small" leadingIcon={editing ? RiCheckLine : RiAddLine} onClick={submit} disabled={busy}>
-                      {editing ? "保存改名" : "新建"}
+                      {editing ? "保存" : "新建"}
                     </Button>
                   </div>
                 </div>
@@ -391,6 +413,9 @@ function ManageWarehousesDialog({
                             {count(item.ledgerRows)} 行 · {count(item.vouchers)} 张单 · {count(item.imports)} 次导入
                             {item.remark ? ` · ${item.remark}` : ""}
                           </p>
+                          <p className="truncate text-[0.6875rem] text-text-tertiary">
+                            抬头：{item.companyName ? item.companyName.split("\n").join(" / ") : "未设置"}
+                          </p>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
                           <Button
@@ -420,10 +445,11 @@ function ManageWarehousesDialog({
                               setEditing(item);
                               setDraftName(item.name);
                               setDraftRemark(item.remark ?? "");
+                              setDraftCompany(item.companyName ?? "");
                             }}
                             disabled={busy}
                           >
-                            改名
+                            编辑
                           </Button>
                           <Button
                             size="small"

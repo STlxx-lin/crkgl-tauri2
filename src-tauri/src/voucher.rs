@@ -925,6 +925,7 @@ mod tests {
             &crate::warehouse::WarehouseInput {
                 name: "二号仓".into(),
                 remark: None,
+                company_name: None,
                 active: None,
                 sort_no: None,
             },
