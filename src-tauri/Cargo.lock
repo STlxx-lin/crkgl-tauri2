@@ -4525,6 +4525,7 @@ dependencies = [
  "axum",
  "calamine",
  "chrono",
+ "http-body-util",
  "if-addrs",
  "log",
  "mime_guess",
@@ -4539,6 +4540,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tokio",
+ "tower",
  "tower-http",
  "windows-sys 0.59.0",
 ]

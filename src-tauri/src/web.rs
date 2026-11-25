@@ -961,6 +961,214 @@ mod tests {
         assert!(!bucket.tokens.contains_key(&idle), "闲置的满桶条目应被回收");
     }
 
+    // ---- handler 级测试：用 oneshot 直接打 Router，不起真实监听 ----
+    //
+    // 这一层以前只有纯函数测试（is_private / Bucket / resolve_static_path），
+    // 中间件与路由的分支（403 / 429 / 405 / 404 / 路径穿越）全靠人肉点。
+    // 重构路由表或改中间件顺序时，那些边界会静默失效。
+
+    fn test_state(dist: Option<std::path::PathBuf>) -> WebState {
+        WebState {
+            db: std::sync::Arc::new(Db::open_in_memory().expect("内存库")),
+            dist,
+            started_at: Instant::now(),
+            rate: std::sync::Arc::new(Mutex::new(Bucket::default())),
+        }
+    }
+
+    /// 一次请求：带上来源地址（中间件据此判私网），返回状态码与响应。
+    async fn send(
+        state: WebState,
+        method: axum::http::Method,
+        uri: &str,
+        peer: &str,
+    ) -> (StatusCode, Response) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            peer.parse::<std::net::IpAddr>().expect("来源地址"),
+            50000,
+        )));
+        let response = router(state).oneshot(req).await.expect("router 不应 panic");
+        (response.status(), response)
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_public_source_ip() {
+        let (status, _) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/health",
+            "8.8.8.8",
+        )
+        .await;
+        // 公网来源直接 403，不能先执行任何查询
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn handler_allows_private_source_and_sets_secure_headers() {
+        let (status, response) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/health",
+            "192.168.1.20",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert!(headers
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn handler_rate_limits_one_source_without_touching_others() {
+        let state = test_state(None);
+        let mut limited = 0;
+        // 同一来源连打，超出容量后必须是 429
+        for _ in 0..(RATE_PER_SECOND as usize + 10) {
+            let (status, _) = send(
+                state.clone(),
+                axum::http::Method::GET,
+                "/api/health",
+                "192.168.1.30",
+            )
+            .await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                limited += 1;
+            }
+        }
+        assert!(limited >= 5, "超出令牌桶容量后应持续拒绝，实际 {limited}");
+        // 别的来源不受影响
+        let (status, _) = send(
+            state,
+            axum::http::Method::GET,
+            "/api/health",
+            "192.168.1.31",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handler_has_no_write_routes() {
+        let state = test_state(None);
+        // 只读站没有任何写入口。已知路由上的写方法由 axum 判 405，未注册的
+        // /api 路径落到兜底路由、返回 404——两种都算拒绝，重点是绝不能 2xx
+        // 被当成查询真的执行一次。
+        for method in [axum::http::Method::POST, axum::http::Method::DELETE] {
+            let (status, _) =
+                send(state.clone(), method.clone(), "/api/ledger/page", "10.0.0.5").await;
+            assert!(
+                status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
+                "{method} 应被拒绝，实际 {status}"
+            );
+        }
+        // 连未注册的 /api 路径也不给写
+        let (status, _) = send(
+            state.clone(),
+            axum::http::Method::POST,
+            "/api/whatever",
+            "10.0.0.5",
+        )
+        .await;
+        assert!(
+            status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
+            "未注册的写路径应被拒绝，实际 {status}"
+        );
+        // 导出接口也不接受写方法（否则就能用 POST 触发一次导出）
+        let (status, _) = send(
+            state,
+            axum::http::Method::POST,
+            "/api/ledger/export.csv",
+            "10.0.0.5",
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handler_unknown_api_is_404_not_a_page() {
+        let (status, _) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/no-such-endpoint",
+            "10.0.0.6",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handler_blocks_absolute_path_read() {
+        // 只读站曾经能用盘符/绝对路径读到本机任意文件
+        let state = test_state(Some(std::env::temp_dir().join("ledger-web-handler-test")));
+        for uri in [
+            "/C:/Windows/win.ini",
+            "/c:\\\\Windows\\\\win.ini",
+            "/../secret.txt",
+        ] {
+            let (status, _) = send(state.clone(), axum::http::Method::GET, uri, "10.0.0.7").await;
+            assert_ne!(status, StatusCode::OK, "{uri} 不应能读到文件");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_bad_page_params_are_400_without_leaking_sql() {
+        let state = test_state(None);
+        for uri in [
+            "/api/ledger/page?page=0",
+            "/api/ledger/page?pageSize=0",
+            "/api/ledger/page?pageSize=99999",
+        ] {
+            let (status, response) =
+                send(state.clone(), axum::http::Method::GET, uri, "10.0.0.8").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let body = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let text = String::from_utf8_lossy(&body);
+            assert!(!text.contains("SELECT"), "不该把 SQL 回给局域网: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_detail_missing_row_is_404() {
+        let (status, _) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/ledger/detail?id=99999",
+            "10.0.0.9",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handler_server_error_hides_internal_message() {
+        // 直接调 server_error 确认对外文案是固定的，原文只进日志
+        let response = server_error("no such table: secret_sql".into());
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("secret_sql"), "{text}");
+        assert!(text.contains("INTERNAL"), "{text}");
+    }
+
     #[test]
     fn static_path_blocks_traversal_and_drive_prefix() {
         let root = std::env::temp_dir().join("ledger-web-static-test");

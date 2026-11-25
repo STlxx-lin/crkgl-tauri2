@@ -1,16 +1,56 @@
 // 端到端验证：用真实的「仓库进销存-外购件.xlsx」跑一遍 pivot 导入，
 // 然后把每个物料的台账结存与源表 12 月「现结存」逐行比对。
 //
-// 跑法：cargo test --lib pivot_real -- --ignored --nocapture
+// 工作簿是几百 MB 的真实账本，不进仓库，所以用例默认 ignore，靠环境变量
+// 指定位置（原来硬编码 `E:\2025\Trae2\...`，换台机器等于这条用例不存在）：
+//
+//   $env:LEDGER_E2E_WORKBOOK = 'D:\样本\仓库进销存-外购件.xlsx'
+//   $env:LEDGER_E2E_FLOW = 'D:\样本\仓库出入库明细_5611_Modified.xlsm'
+//   cargo test --lib pivot_real -- --ignored --nocapture
+//
+// 也支持把文件放 `src-tauri/tests/fixtures/` 下，按文件名直接命中，
+// 不需要每次在命令行里敲路径。
+
+/// 端到端用例的样本工作簿路径。
+///
+/// 优先读环境变量，其次找仓库里的 `tests/fixtures/<文件名>`。两处都没有就
+/// 返回 None，让用例自己 skip 并打印提示——
+/// 硬编码本机绝对路径时，CI 与别人的机器上这条用例只能靠「找不到文件」失败。
+fn sample_workbook(env_key: &str, file_name: &str) -> Option<std::path::PathBuf> {
+    if let Ok(raw) = std::env::var(env_key) {
+        let p = std::path::PathBuf::from(raw.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(file_name);
+    if local.is_file() {
+        return Some(local);
+    }
+    None
+}
+
+/// 找不到样本时统一走这里：打印怎么准备，然后安静跳过。
+fn skip_missing(env_key: &str, file_name: &str) {
+    eprintln!(
+        "跳过端到端用例：没有样本工作簿 {file_name}。\
+         设置环境变量 {env_key}=<路径>，或放到 src-tauri/tests/fixtures/{file_name}。"
+    );
+}
 
 #[test]
 #[ignore]
 fn e2e_real_workbook() {
     use crate::db::Db;
-    use std::path::Path;
 
-    let path = Path::new(r"E:\2025\Trae2\crkgl-tauri2\仓库进销存-外购件.xlsx");
-    assert!(path.is_file(), "找不到测试工作簿: {}", path.display());
+    let Some(path) = sample_workbook("LEDGER_E2E_WORKBOOK", "仓库进销存-外购件.xlsx") else {
+        skip_missing("LEDGER_E2E_WORKBOOK", "仓库进销存-外购件.xlsx");
+        return;
+    };
+    let path = path.as_path();
 
     let report = crate::import::inspect(path).expect("inspect");
     let pivots: Vec<_> = report.sheets.iter().filter(|s| s.pivot).collect();
@@ -159,14 +199,13 @@ fn e2e_real_workbook() {
 #[ignore]
 fn benchmark_all_imports() {
     use crate::db::Db;
-    use std::path::Path;
     use std::time::Instant;
 
-    let path_flow = Path::new(r"E:\2025\Trae2\crkgl-tauri2\仓库出入库明细_5611_Modified.xlsm");
-    let path_pivot = Path::new(r"E:\2025\Trae2\crkgl-tauri2\仓库进销存-外购件.xlsx");
+    let flow = sample_workbook("LEDGER_E2E_FLOW", "仓库出入库明细_5611_Modified.xlsm");
+    let pivot_workbook = sample_workbook("LEDGER_E2E_WORKBOOK", "仓库进销存-外购件.xlsx");
 
     println!("\n=== 基准测试：常规流水表 (5611_Modified.xlsm) ===");
-    if path_flow.is_file() {
+    if let Some(path_flow) = flow.as_deref() {
         let t0 = Instant::now();
         let rep = crate::import::inspect(path_flow).expect("inspect");
         let t_inspect = t0.elapsed();
@@ -192,8 +231,12 @@ fn benchmark_all_imports() {
         println!("master 导入主数据耗时: {:?} (物料 +{} 更新{})", t_master, ms.items_added, ms.items_updated);
     }
 
+    if flow.is_none() {
+        skip_missing("LEDGER_E2E_FLOW", "仓库出入库明细_5611_Modified.xlsm");
+    }
+
     println!("\n=== 基准测试：月度进销存宽表 (仓库进销存-外购件.xlsx) ===");
-    if path_pivot.is_file() {
+    if let Some(path_pivot) = pivot_workbook.as_deref() {
         // 先清空缓存以测冷启动
         let t0 = Instant::now();
         let _rep = crate::import::inspect(path_pivot).expect("inspect");
@@ -212,4 +255,23 @@ fn benchmark_all_imports() {
         let t_run = t2.elapsed();
         println!("run 写入台账耗时: {:?} (导入 {} 行)", t_run, out.rows);
     }
+    if pivot_workbook.is_none() {
+        skip_missing("LEDGER_E2E_WORKBOOK", "仓库进销存-外购件.xlsx");
+    }
+}
+
+/// 样本解析：没有环境变量、fixtures 里也没有时必须返回 None，
+/// 由用例自己 skip，而不是 panic 成「文件不存在」把 CI 判红。
+#[test]
+fn sample_workbook_returns_none_for_unknown_file() {
+    assert!(sample_workbook("LEDGER_E2E_NOT_SET_XYZ", "没有这个文件.xlsx").is_none());
+}
+
+/// 显式给了不存在的路径时同样退回到 fixtures，而不是直接失败。
+#[test]
+fn sample_workbook_ignores_broken_env_value() {
+    // 用本进程独有的变量名，避免和别的用例抢同一个 env
+    std::env::set_var("LEDGER_E2E_BROKEN_XYZ", "Z:/definitely/missing.xlsx");
+    assert!(sample_workbook("LEDGER_E2E_BROKEN_XYZ", "没有这个文件.xlsx").is_none());
+    std::env::remove_var("LEDGER_E2E_BROKEN_XYZ");
 }
