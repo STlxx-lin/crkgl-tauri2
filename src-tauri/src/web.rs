@@ -214,10 +214,17 @@ impl Bucket {
     /// 令牌桶：容量 RATE_PER_SECOND，按真实经过的时间补充。
     /// 注意不能让“本次补充”影响“本次是否存在令牌”：先补 → 再判 → 再扣。
     fn allow(&mut self, ip: IpAddr) -> bool {
-        let now = Instant::now();
+        self.allow_at(ip, Instant::now())
+    }
+
+    /// 与 allow 相同，只是「当前时刻」由调用方传入，便于测试模拟时间流逝。
+    ///
+    /// 测试不能把 Instant 往回拨：Windows 上它是开机以来的时间，全新的 CI 机器
+    /// 绝对值可能不足 600 秒，相减会溢出 panic。把「现在」往后挪才是安全的。
+    fn allow_at(&mut self, ip: IpAddr, now: Instant) -> bool {
         self.sweep_if_needed(now);
         let entry = self.tokens.entry(ip).or_insert((RATE_PER_SECOND, now));
-        let elapsed = now.duration_since(entry.1).as_secs_f64();
+        let elapsed = now.saturating_duration_since(entry.1).as_secs_f64();
         if elapsed > 0.0 {
             entry.0 = (entry.0 + elapsed * RATE_PER_SECOND).min(RATE_PER_SECOND);
             entry.1 = now;
@@ -233,7 +240,7 @@ impl Bucket {
     /// 超过上限时立刻收紧；「满桶 + 闲置」的回收最多每 60 秒一次，避免每个请求都遍历整表。
     fn sweep_if_needed(&mut self, now: Instant) {
         let due = match self.swept_at {
-            Some(at) => now.duration_since(at).as_secs_f64() >= 60.0,
+            Some(at) => now.saturating_duration_since(at).as_secs_f64() >= 60.0,
             None => true,
         };
         if self.tokens.len() < BUCKET_MAX_IPS {
@@ -245,7 +252,7 @@ impl Bucket {
         // 先按「满桶 + 长时间没动」清，满桶等同于从未出现过
         self.tokens.retain(|_, (tokens, seen)| {
             let full = *tokens >= RATE_PER_SECOND - f64::EPSILON;
-            let idle = now.duration_since(*seen).as_secs_f64() > BUCKET_IDLE_SECS;
+            let idle = now.saturating_duration_since(*seen).as_secs_f64() > BUCKET_IDLE_SECS;
             !(full && idle)
         });
         // 还超就当 LRU：保留最近活跃的一半。硬上限不能等 60 秒窗口，否则
@@ -887,13 +894,13 @@ mod tests {
     fn bucket_refills_over_time() {
         let mut bucket = Bucket::default();
         let ip: IpAddr = "10.0.0.2".parse().unwrap();
-        // 手动把时间戳往回拨一秒，模拟“过了一秒”
-        assert!(bucket.allow(ip));
+        // 把「现在」往后挪一秒模拟时间流逝；回拨时间戳在新机器上会溢出 panic
+        let t0 = Instant::now();
+        assert!(bucket.allow_at(ip, t0));
         if let Some(entry) = bucket.tokens.get_mut(&ip) {
             entry.0 = 0.0;
-            entry.1 -= std::time::Duration::from_secs(1);
         }
-        assert!(bucket.allow(ip));
+        assert!(bucket.allow_at(ip, t0 + std::time::Duration::from_secs(1)));
     }
 
     #[test]
@@ -924,16 +931,17 @@ mod tests {
     fn bucket_drops_idle_full_entries() {
         let mut bucket = Bucket::default();
         let idle: IpAddr = "10.2.0.1".parse().unwrap();
-        bucket.allow(idle);
-        // 立刻补满桶（allow 之后只剩 <1 个令牌），并把时间戳往回拨到过期
+        let t0 = Instant::now();
+        bucket.allow_at(idle, t0);
+        // 立刻补满桶（allow 之后只剩 <1 个令牌），之后直接跳到闲置阈值之外
         if let Some(entry) = bucket.tokens.get_mut(&idle) {
             entry.0 = RATE_PER_SECOND;
-            entry.1 -= std::time::Duration::from_secs((BUCKET_IDLE_SECS as u64) + 10);
         }
         // 撑满表宽度触发清理
+        let later = t0 + std::time::Duration::from_secs((BUCKET_IDLE_SECS as u64) + 10);
         for i in 0..(BUCKET_MAX_IPS + 10) {
             let ip: IpAddr = format!("10.3.{}.{}", (i / 250) % 250, (i % 250) + 1).parse().unwrap();
-            bucket.allow(ip);
+            bucket.allow_at(ip, later);
         }
         assert!(!bucket.tokens.contains_key(&idle), "闲置的满桶条目应被回收");
     }

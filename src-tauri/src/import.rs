@@ -369,10 +369,25 @@ struct CachedWorkbook {
 
 /// 缓存是否还新鲜。文件被改过（大小/mtime 变化）或超过 TTL 都算过期。
 fn cache_fresh(cached: &CachedWorkbook, path: &Path, size_bytes: u64, modified: Option<std::time::SystemTime>) -> bool {
+    cache_fresh_at(cached, path, size_bytes, modified, std::time::Instant::now())
+}
+
+/// 与 cache_fresh 相同，只是「当前时刻」由调用方传入，便于测试。
+///
+/// 测试不能靠「Instant::now() 减去 Duration」造过期数据：Windows 上 Instant 是开机
+/// 以来的时间，全新的 CI 机器绝对值可能还不到 TTL 那么大，相减直接溢出 panic。
+/// 反过来把「现在」往后挪，只有到表示上限才会溢出。
+fn cache_fresh_at(
+    cached: &CachedWorkbook,
+    path: &Path,
+    size_bytes: u64,
+    modified: Option<std::time::SystemTime>,
+    now: std::time::Instant,
+) -> bool {
     cached.path == path
         && cached.size_bytes == size_bytes
         && cached.modified == modified
-        && cached.cached_at.elapsed().as_secs() < CACHE_TTL_SECS
+        && now.saturating_duration_since(cached.cached_at).as_secs() < CACHE_TTL_SECS
 }
 
 /// 主动清缓存。导入/主数据写入完成后调用：那之后不再需要缓存的整本工作簿。
@@ -1739,7 +1754,7 @@ mod tests {
     #[test]
     fn stale_cache_is_not_fresh() {
         let path = std::path::PathBuf::from("C:/x/y.xlsx");
-        let mut cached = CachedWorkbook {
+        let cached = CachedWorkbook {
             path: path.clone(),
             size_bytes: 10,
             modified: None,
@@ -1757,9 +1772,10 @@ mod tests {
         assert!(cache_fresh(&cached, &path, 10, None));
         // 文件变大说明被改过
         assert!(!cache_fresh(&cached, &path, 11, None));
-        // 时间拨到 TTL 之外
-        cached.cached_at -= std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
-        assert!(!cache_fresh(&cached, &path, 10, None));
+        // 时间拨到 TTL 之外。注意是往后拨「现在」，不能回拨 cached_at：
+        // 新机器上 Instant 的绝对值可能小于 TTL，减法会溢出 panic。
+        let later = cached.cached_at + std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
+        assert!(!cache_fresh_at(&cached, &path, 10, None, later));
     }
 
     fn guesses(headers: &[&str]) -> Vec<HeaderGuess> {
