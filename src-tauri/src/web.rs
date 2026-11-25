@@ -9,10 +9,10 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Query, State};
@@ -58,6 +58,8 @@ pub struct WebHandle {
     pub stop: Arc<AtomicBool>,
     pub status: Arc<Mutex<WebStatus>>,
     pub port: Arc<AtomicUsize>,
+    ready: Arc<(Mutex<bool>, Condvar)>,
+    exited: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl WebHandle {
@@ -77,8 +79,26 @@ impl WebHandle {
             })
     }
 
+    /// 等待首次端口绑定流程完成（成功或全部候选端口失败），返回最新状态快照。
+    pub fn wait_ready(&self, timeout: Duration) -> WebStatus {
+        let (lock, cvar) = &*self.ready;
+        if let Ok(guard) = lock.lock() {
+            let _ = cvar.wait_timeout_while(guard, timeout, |done| !*done);
+        }
+        self.snapshot()
+    }
+
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// 发出停止信号并等待监听任务退出释放端口，避免关闭后立即重启撞端口。
+    pub fn shutdown_and_wait(&self, timeout: Duration) {
+        self.shutdown();
+        let (lock, cvar) = &*self.exited;
+        if let Ok(guard) = lock.lock() {
+            let _ = cvar.wait_timeout_while(guard, timeout, |done| !*done);
+        }
     }
 }
 
@@ -392,28 +412,57 @@ async fn api_not_found() -> Response {
         .into_response()
 }
 
+/// 把请求路径安全解析为 `dir` 目录内的真实文件，防止 `..`、反斜杠、Windows 盘符或符号链接逃逸。
+pub(crate) fn resolve_static_path(dir: &Path, uri_path: &str) -> Option<PathBuf> {
+    let canon_dir = std::fs::canonicalize(dir).ok()?;
+    let relative = uri_path.trim_start_matches('/');
+    // 拒绝反斜杠、盘符冒号与父目录引用；Windows 上 Path::join 遇盘符或前缀会直接丢弃基目录
+    if relative.contains('\\') || relative.contains(':') || relative.contains("..") {
+        return None;
+    }
+
+    let mut clean = PathBuf::new();
+    for seg in relative.split('/').filter(|s| !s.is_empty()) {
+        let mut comps = Path::new(seg).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(part)), None) => clean.push(part),
+            _ => return None,
+        }
+    }
+
+    if !clean.as_os_str().is_empty() && !relative.ends_with('/') {
+        let candidate = canon_dir.join(&clean);
+        if candidate.is_file() {
+            if let Ok(canon_target) = std::fs::canonicalize(&candidate) {
+                if canon_target.starts_with(&canon_dir) {
+                    return Some(canon_target);
+                }
+            }
+            return None;
+        }
+        let last = relative.rsplit('/').next().unwrap_or_default();
+        if last.contains('.') && last != "html" {
+            return None;
+        }
+    }
+
+    let index = canon_dir.join("index.html");
+    let canon_index = std::fs::canonicalize(&index).ok()?;
+    if canon_index.is_file() && canon_index.starts_with(&canon_dir) {
+        Some(canon_index)
+    } else {
+        None
+    }
+}
+
 async fn index_fallback(State(state): State<WebState>, uri: axum::http::Uri) -> Response {
     let Some(dir) = state.dist.as_ref() else {
         return (StatusCode::NOT_FOUND, "只读页面没有打包").into_response();
     };
-    let relative = uri.path().trim_start_matches('/');
-    // 只允许 dist 目录里的文件：拒绝 `..` 和绝对路径
-    if relative.contains("..") {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    match resolve_static_path(dir, uri.path()) {
+        Some(target) => serve_file(&target),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
-    let target = if relative.is_empty() || relative.ends_with('/') {
-        dir.join("index.html")
-    } else {
-        dir.join(relative)
-    };
-    if target.is_file() {
-        return serve_file(&target);
-    }
-    let last = relative.rsplit('/').next().unwrap_or_default();
-    if last.contains('.') && last != "html" {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    serve_file(&dir.join("index.html"))
 }
 
 fn serve_file(path: &std::path::Path) -> Response {
@@ -546,7 +595,8 @@ async fn stock_check_handler(State(state): State<WebState>) -> Response {
 
 async fn summary_handler(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let group_by = query.group_by.clone().unwrap_or_else(|| "month".into());
-    match state.db.with(|c| summary::grouped(c, &query.filter(), &group_by, 50).map_err(crate::db::DbError::from)) {
+    let limit = query.limit.unwrap_or(50);
+    match state.db.with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from)) {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
@@ -575,10 +625,20 @@ async fn compare(State(state): State<WebState>, Query(query): Query<SummaryQuery
     }
 }
 
+fn mark_flag(signal: &(Mutex<bool>, Condvar)) {
+    let (lock, cvar) = signal;
+    if let Ok(mut done) = lock.lock() {
+        *done = true;
+    }
+    cvar.notify_all();
+}
+
 /// 启动监听。先试指定端口（默认 80），失败退到 8080，再失败就报出来。
 pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let port = Arc::new(AtomicUsize::new(preferred as usize));
+    let ready = Arc::new((Mutex::new(false), Condvar::new()));
+    let exited = Arc::new((Mutex::new(false), Condvar::new()));
     let status = Arc::new(Mutex::new(WebStatus {
         enabled: true,
         listening: false,
@@ -593,6 +653,8 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
         stop: stop.clone(),
         status: status.clone(),
         port: port.clone(),
+        ready: ready.clone(),
+        exited: exited.clone(),
     };
 
     let state = WebState {
@@ -617,18 +679,18 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                     // 再绑一份 IPv6：本机 localhost 在 Windows 上常先解析到 ::1，
                     // 只绑 0.0.0.0 会让 http://localhost 直接连不上。
                     // 绑定失败不算错误（有的系统关掉了 IPv6，或端口已被 v6 独占）。
-                    match tokio::net::TcpListener::bind(v6).await {
+                    let v6_task = match tokio::net::TcpListener::bind(v6).await {
                         Ok(v6_listener) => {
                             let v6_app = router(state.clone())
                                 .into_make_service_with_connect_info::<SocketAddr>();
                             let v6_stop = stop.clone();
-                            tauri::async_runtime::spawn(async move {
+                            let task = tauri::async_runtime::spawn(async move {
                                 let v6_shutdown = async move {
                                     loop {
                                         if v6_stop.load(Ordering::SeqCst) {
                                             break;
                                         }
-                                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                        tokio::time::sleep(Duration::from_millis(50)).await;
                                     }
                                 };
                                 if let Err(err) = axum::serve(v6_listener, v6_app)
@@ -639,9 +701,13 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                                 }
                             });
                             log::info!("IPv6 监听已开启: [::]:{candidate}");
+                            Some(task)
                         }
-                        Err(err) => log::info!("IPv6 监听跳过（{err}）"),
-                    }
+                        Err(err) => {
+                            log::info!("IPv6 监听跳过（{err}）");
+                            None
+                        }
+                    };
                     port.store(candidate as usize, Ordering::SeqCst);
                     if let Ok(mut s) = status.lock() {
                         s.listening = true;
@@ -650,6 +716,7 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                         s.urls = local_urls(candidate);
                         s.started_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                     }
+                    mark_flag(&ready);
                     log::info!("只读站已启动: {}", local_urls(candidate).join(" "));
                     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
                     let server = axum::serve(listener, app);
@@ -659,7 +726,7 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                             if stop_flag.load(Ordering::SeqCst) {
                                 break;
                             }
-                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                         }
                     };
                     if let Err(err) = server.with_graceful_shutdown(shutdown).await {
@@ -668,7 +735,13 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                             s.listening = false;
                             s.error = Some(err.to_string());
                         }
+                    } else if let Ok(mut s) = status.lock() {
+                        s.listening = false;
                     }
+                    if let Some(task) = v6_task {
+                        let _ = task.await;
+                    }
+                    mark_flag(&exited);
                     return;
                 }
                 Err(err) => {
@@ -681,6 +754,8 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
             s.listening = false;
             s.error = last_error;
         }
+        mark_flag(&ready);
+        mark_flag(&exited);
     });
 
     handle
@@ -792,5 +867,28 @@ mod tests {
         assert!(validate_page(0, 100).is_err());
         assert!(validate_page(1, 0).is_err());
         assert!(validate_page(1, 501).is_err());
+    }
+
+    #[test]
+    fn static_path_blocks_traversal_and_drive_prefix() {
+        let root = std::env::temp_dir().join("ledger-web-static-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(root.join("assets/app.js"), "console.log(1)").unwrap();
+
+        assert!(resolve_static_path(&root, "/").is_some());
+        assert!(resolve_static_path(&root, "/assets/app.js").is_some());
+        assert!(resolve_static_path(&root, "/ledger").unwrap().ends_with("index.html"));
+        assert!(resolve_static_path(&root, "/assets/missing.js").is_none());
+
+        // 各类路径穿越必须全部拒绝
+        assert!(resolve_static_path(&root, "/../secret.txt").is_none());
+        assert!(resolve_static_path(&root, "/assets/../../secret.txt").is_none());
+        assert!(resolve_static_path(&root, "/..\\secret.txt").is_none());
+        assert!(resolve_static_path(&root, "/C:/Windows/win.ini").is_none());
+        assert!(resolve_static_path(&root, "/c:\\Windows\\win.ini").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

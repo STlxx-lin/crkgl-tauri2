@@ -268,7 +268,7 @@ pub fn page_with_opt(
     skip_totals: bool,
 ) -> DbResult<LedgerPage> {
     let page = page.max(1);
-    let page_size = page_size.clamp(20, 500);
+    let page_size = page_size.clamp(1, 500);
     let (where_sql, params) = compile_where(filter);
     let totals = if skip_totals {
         LedgerTotals::default()
@@ -321,7 +321,7 @@ pub fn detail(conn: &Connection, id: i64) -> DbResult<Option<LedgerRow>> {
     }
 }
 
-/// 可编辑字段白名单。金额按“元”传入，落库统一转分。
+/// 可编辑字段白名单：单价按万分之一元（`price_micros`），金额按分（`amount_cents`）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerPatch {
@@ -354,7 +354,8 @@ fn reconcile_vouchers(conn: &Connection) -> DbResult<()> {
 }
 
 pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    tx.execute(
         "UPDATE ledger SET
             doc_date = COALESCE(?1, doc_date),
             doc_no = COALESCE(?2, doc_no),
@@ -382,7 +383,8 @@ pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
         ],
     )
     .map_err(DbError::from)?;
-    reconcile_vouchers(conn)?;
+    reconcile_vouchers(&tx)?;
+    tx.commit().map_err(DbError::from)?;
     Ok(())
 }
 

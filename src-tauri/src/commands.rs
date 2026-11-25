@@ -23,15 +23,17 @@ use crate::web::{self, WebHandle, WebStatus};
 pub struct AppState {
     pub db: Arc<Db>,
     pub dev_root: Option<PathBuf>,
+    pub resource_dir: Option<PathBuf>,
     pub web: std::sync::Mutex<Option<WebHandle>>,
     pub last_import: std::sync::Mutex<Option<import::ImportOutcome>>,
 }
 
 impl AppState {
-    pub fn new(db: Arc<Db>, dev_root: Option<PathBuf>) -> Self {
+    pub fn new(db: Arc<Db>, dev_root: Option<PathBuf>, resource_dir: Option<PathBuf>) -> Self {
         AppState {
             db,
             dev_root,
+            resource_dir,
             web: std::sync::Mutex::new(None),
             last_import: std::sync::Mutex::new(None),
         }
@@ -428,13 +430,17 @@ pub fn web_status(state: State<'_, Arc<AppState>>) -> Result<WebStatus, String> 
 pub fn web_start(state: State<'_, Arc<AppState>>) -> Result<WebStatus, String> {
     let mut guard = state.web.lock().map_err(|_| "状态不可用".to_string())?;
     if let Some(handle) = guard.as_ref() {
-        if handle.snapshot().listening {
-            return Ok(handle.snapshot());
+        let snap = handle.snapshot();
+        if snap.listening {
+            return Ok(snap);
         }
     }
-    let dist = paths::remote_dist(None, remote_dev_dir().as_deref());
+    if let Some(old) = guard.take() {
+        old.shutdown_and_wait(std::time::Duration::from_secs(2));
+    }
+    let dist = paths::remote_dist(state.resource_dir.as_deref(), remote_dev_dir().as_deref());
     let handle = web::start(state.db.clone(), dist, web::DEFAULT_PORT);
-    let snapshot = handle.snapshot();
+    let snapshot = handle.wait_ready(std::time::Duration::from_secs(3));
     *guard = Some(handle);
     Ok(snapshot)
 }
@@ -442,7 +448,7 @@ pub fn web_start(state: State<'_, Arc<AppState>>) -> Result<WebStatus, String> {
 #[tauri::command]
 pub fn web_stop(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     if let Some(handle) = state.web.lock().map_err(|_| "状态不可用".to_string())?.take() {
-        handle.shutdown();
+        handle.shutdown_and_wait(std::time::Duration::from_secs(2));
     }
     Ok(())
 }

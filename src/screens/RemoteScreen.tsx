@@ -4,7 +4,6 @@ import {
   RiPlayCircleLine,
   RiRefreshLine,
   RiServerLine,
-  RiStopCircleLine,
 } from "@remixicon/react";
 import { accessLog, startWeb, stopWeb, webStatus } from "../lib/api";
 import type { AccessEntry, BootstrapInfo, WebStatus } from "../lib/types";
@@ -153,11 +152,7 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
               </div>
             ) : (
               <div className="flex items-start gap-2 rounded-lg border border-separator-border bg-background-secondary-default px-3 py-2">
-                {listening ? (
-                  <RiStopCircleLine className="mt-0.5 size-4 text-text-tertiary" aria-hidden />
-                ) : (
-                  <RiPlayCircleLine className="mt-0.5 size-4 text-text-tertiary" aria-hidden />
-                )}
+                <RiPlayCircleLine className="mt-0.5 size-4 text-text-tertiary" aria-hidden />
                 <p className="text-caption-1-regular text-text-tertiary">
                   打开开关后，同一局域网的人用浏览器就能查台账、筛条件、导 CSV。他们看不到导入与删除按钮，接口层也没有写入口。
                 </p>

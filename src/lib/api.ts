@@ -149,27 +149,25 @@ export function fetchDetail(id: number): Promise<LedgerRow | null> {
 
 export function fetchSummary(filter: LedgerFilter): Promise<SummaryBundle> {
   if (isTauri) return call<SummaryBundle>("summary_bundle", { args: { filter } });
-  // 远程端把几个只读接口拼起来，形状与桌面端保持一致
+  // 远程端把几个只读接口并行拼起来，形状与桌面端保持一致
   const base = qs(filter);
-  return getJson<null>(`/api/summary/compare?${base}`).then(async (compare) => {
-    const [page, monthly, byOwner, byPartner, topOut, topIn] = await Promise.all([
-      getJson<LedgerPage>(`/api/ledger/page?${base}&page=1&pageSize=20`),
-      getJson<SummaryBundle["monthly"]>(`/api/summary/monthly?${base}`),
-      getJson<SummaryBundle["byOwner"]>(`/api/summary?${base}&groupBy=owner&limit=12`),
-      getJson<SummaryBundle["byPartner"]>(`/api/summary?${base}&groupBy=partner&limit=12`),
-      getJson<SummaryBundle["topOut"]>(`/api/summary/top?${base}&kindOfTop=out&limit=10`),
-      getJson<SummaryBundle["topIn"]>(`/api/summary/top?${base}&kindOfTop=in&limit=10`),
-    ]);
-    return {
-      totals: page.totals,
-      monthly,
-      byOwner,
-      byPartner,
-      topOut,
-      topIn,
-      compare,
-    };
-  });
+  return Promise.all([
+    getJson<LedgerPage>(`/api/ledger/page?${base}&page=1&pageSize=20`),
+    getJson<SummaryBundle["monthly"]>(`/api/summary/monthly?${base}`),
+    getJson<SummaryBundle["byOwner"]>(`/api/summary?${base}&groupBy=owner&limit=12`),
+    getJson<SummaryBundle["byPartner"]>(`/api/summary?${base}&groupBy=partner&limit=12`),
+    getJson<SummaryBundle["topOut"]>(`/api/summary/top?${base}&kindOfTop=out&limit=10`),
+    getJson<SummaryBundle["topIn"]>(`/api/summary/top?${base}&kindOfTop=in&limit=10`),
+    getJson<SummaryBundle["compare"]>(`/api/summary/compare?${base}`),
+  ]).then(([page, monthly, byOwner, byPartner, topOut, topIn, compare]) => ({
+    totals: page.totals,
+    monthly,
+    byOwner,
+    byPartner,
+    topOut,
+    topIn,
+    compare,
+  }));
 }
 
 export function exportUrl(filter: LedgerFilter): string {
@@ -200,22 +198,26 @@ export function previewImport(path: string, plans?: SheetPlan[], year?: number):
   return call<PreviewResult>("import_preview", { args: { path, plans, sampleLimit: 8, year } });
 }
 
-export function runImport(
+export async function runImport(
   path: string,
   plans: SheetPlan[] | undefined,
   replace: boolean,
   master = true,
   year?: number,
 ): Promise<ImportOutcome> {
-  return call<ImportOutcome>("import_run", { args: { path, plans, replace, master, year } });
+  const outcome = await call<ImportOutcome>("import_run", { args: { path, plans, replace, master, year } });
+  invalidateFacetsCache();
+  return outcome;
 }
 
 export function importHistory(): Promise<ImportRecord[]> {
   return call<ImportRecord[]>("import_history");
 }
 
-export function deleteImport(id: number): Promise<number> {
-  return call<number>("import_delete", { id });
+export async function deleteImport(id: number): Promise<number> {
+  const removed = await call<number>("import_delete", { id });
+  invalidateFacetsCache();
+  return removed;
 }
 
 export function webStatus(): Promise<WebStatus> {
@@ -241,16 +243,21 @@ export function clientLog(level: "info" | "warn" | "error", message: string): vo
 
 // ---------- 开单 ----------
 
-export function createVoucher(input: VoucherInput): Promise<number> {
-  return call<number>("voucher_create", { args: input });
+export async function createVoucher(input: VoucherInput): Promise<number> {
+  const id = await call<number>("voucher_create", { args: input });
+  invalidateFacetsCache();
+  return id;
 }
 
-export function updateVoucher(id: number, input: VoucherInput): Promise<void> {
-  return call<void>("voucher_update", { id, args: input });
+export async function updateVoucher(id: number, input: VoucherInput): Promise<void> {
+  await call<void>("voucher_update", { id, args: input });
+  invalidateFacetsCache();
 }
 
-export function deleteVoucher(id: number): Promise<number> {
-  return call<number>("voucher_delete", { id });
+export async function deleteVoucher(id: number): Promise<number> {
+  const removed = await call<number>("voucher_delete", { id });
+  invalidateFacetsCache();
+  return removed;
 }
 
 export function getVoucher(id: number): Promise<Voucher | null> {
@@ -449,8 +456,10 @@ export function createDict(input: DictInput): Promise<number> {
 }
 
 /** 改字典值会同步改写台账/物料里用到它的行，返回受影响行数。 */
-export function updateDict(id: number, input: DictInput): Promise<number> {
-  return call<number>("dict_update", { id, args: input });
+export async function updateDict(id: number, input: DictInput): Promise<number> {
+  const touched = await call<number>("dict_update", { id, args: input });
+  invalidateFacetsCache();
+  return touched;
 }
 
 export function deleteDict(id: number): Promise<void> {
@@ -519,8 +528,10 @@ export async function fetchStockCheck(): Promise<{ issues: StockIssue[]; summary
 
 // ---------- 数据管理 ----------
 
-export function clearData(includeMaster = false): Promise<ClearOutcome> {
-  return call<ClearOutcome>("data_clear", { includeMaster });
+export async function clearData(includeMaster = false): Promise<ClearOutcome> {
+  const outcome = await call<ClearOutcome>("data_clear", { includeMaster });
+  invalidateFacetsCache();
+  return outcome;
 }
 
 // ---------- 后台与开机自启 ----------

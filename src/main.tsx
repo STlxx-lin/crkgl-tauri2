@@ -6,7 +6,7 @@ import { applyTheme, storedTheme } from "./lib/theme";
 import { applyFontScale, storedFontScale } from "./lib/fontScale";
 import "./styles/app.css";
 
-// index.html 里的内联脚本已经定过首帧主题；这里只按存储再确认一次（不写盘）。
+// public/init.js 已经在首帧定过主题与字号；这里按存储再确认一次（并同步桌面窗口标题栏）。
 applyTheme(storedTheme(), { persist: false });
 applyFontScale(storedFontScale(), { persist: false });
 document.documentElement.lang = "zh-CN";

@@ -29,12 +29,16 @@ src-tauri/gen/
 **/*.rs.bk
 # cargo 本地目标目录（若被重定向到工程内）
 src-tauri/.cargo/target/
+# 本机个人工具链路径覆盖（通用工具链版本见 rust-toolchain.toml）
+src-tauri/.cargo/config.toml
 
 # ===== 本地工具缓存 =====
 # mimosa 钩子的运行记录与状态缓存
 .mimosa/
 # 子工程内的 mimosa 缓存
 src-tauri/.mimosa/
+# zcode 规划与会话产物
+.zcode/
 
 # ===== 测试与截图产物 =====
 # 页面截图脚本输出目录
