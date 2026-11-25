@@ -37,13 +37,14 @@ fn group_expr(group_by: &str) -> &'static str {
         "owner" => "COALESCE(NULLIF(TRIM(owner), ''), '未标注')",
         "item" => "COALESCE(NULLIF(TRIM(item_code), ''), NULLIF(TRIM(item_name), ''), '未命名')",
         "partner" => "COALESCE(NULLIF(TRIM(partner), ''), '未标注')",
-        _ => "substr(doc_date, 1, 7)",
+        _ => "COALESCE(NULLIF(substr(doc_date, 1, 7), ''), '未填日期')",
     }
 }
 
 pub fn grouped(conn: &Connection, filter: &LedgerFilter, group_by: &str, limit: i64) -> DbResult<Vec<GroupRow>> {
     let (where_sql, params) = compile_where(filter);
     let expr = group_expr(group_by);
+    let limit = limit.clamp(1, 500);
     let order = if group_by == "month" {
         "key ASC"
     } else {
@@ -186,7 +187,7 @@ pub fn monthly(conn: &Connection, filter: &LedgerFilter) -> DbResult<Vec<MonthPo
     let rows = grouped(conn, filter, "month", 240)?;
     Ok(rows
         .into_iter()
-        .filter(|r| !r.key.is_empty())
+        .filter(|r| !r.key.is_empty() && r.key != "未填日期")
         .map(|r| MonthPoint {
             month: r.key,
             amount_in_cents: r.amount_in_cents,
@@ -255,6 +256,38 @@ mod tests {
         assert_eq!(cmp.now.out_rows, 1);
         assert_eq!(cmp.previous.in_rows, 1);
         assert_eq!(cmp.previous_label, "2025-01-04 至 2025-01-31");
+    }
+
+    #[test]
+    fn grouped_handles_null_doc_date_and_clamps_limit() {
+        let db = seeded();
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, doc_date, item_name, qty, amount_cents)
+                 VALUES ('t', 99, 'in', NULL, '无日期物料', 1, 100)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let grouped_rows = db
+            .with(|c| grouped(c, &LedgerFilter::default(), "month", 50).map_err(DbError::from))
+            .unwrap();
+        assert!(grouped_rows.iter().any(|r| r.key == "未填日期"));
+
+        // 传入非法负 limit 不会退化成 SQLite 的无限返回，被钳制为 1
+        let clamped = db
+            .with(|c| grouped(c, &LedgerFilter::default(), "month", -1).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(clamped.len(), 1);
+
+        // 月度图表仍只展示合法 YYYY-MM 桶
+        let points = db
+            .with(|c| monthly(c, &LedgerFilter::default()).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(points.len(), 3);
     }
 }
 

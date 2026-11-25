@@ -13,12 +13,14 @@ import {
   bulkUpdateRows,
   deleteRow,
   exportLedger,
+  exportUrl,
   fetchDetail,
   fetchFacets,
   fetchPage,
   isTauri,
 } from "../lib/api";
 import type { BootstrapInfo, Facets, Kind, LedgerFilter, LedgerPage, LedgerRow } from "../lib/types";
+import { exportFileName, saveCsvFile } from "../lib/exportCsv";
 import { amount, count, date, flagLabel, kindLabel, money, priceText, qty } from "../lib/format";
 import { useVirtualRows } from "../lib/useVirtualRows";
 import { mergeRowsByDoc, onMergeByDocChange, saveMergeByDoc, storedMergeByDoc } from "../lib/mergeDocs";
@@ -260,28 +262,12 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
 
   const doExport = async () => {
     if (!isTauri) {
-      window.location.href = `/api/ledger/export.csv?${new URLSearchParams(
-        Object.entries(filter).reduce<Record<string, string>>((acc, [key, value]) => {
-          if (value !== null && value !== undefined && value !== "") acc[key] = String(value);
-          return acc;
-        }, {}),
-      )}`;
+      window.location.href = exportUrl(filter);
       return;
     }
+    setBusy(true);
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-      const path = await save({
-        title: "导出台账",
-        defaultPath: `仓库出入库明细_${stamp}.csv`,
-        filters: [{ name: "CSV", extensions: ["csv"] }],
-      });
-      if (!path) return;
-      setBusy(true);
-      const result = await exportLedger(filter, path);
-      toast("已导出", { description: `${result.rows.toLocaleString()} 行 → ${result.path}`, status: "success" });
-    } catch (err) {
-      toast("导出失败", { description: String(err), status: "error" });
+      await saveCsvFile("导出台账", exportFileName("仓库出入库明细"), (path) => exportLedger(filter, path));
     } finally {
       setBusy(false);
     }

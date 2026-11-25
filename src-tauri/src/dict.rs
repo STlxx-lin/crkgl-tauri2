@@ -81,28 +81,30 @@ fn trim_opt(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 某个值在业务表里出现在哪一列。改字典值时按这张表回写。
-fn usage_sql(kind: &str) -> Option<(&'static str, &'static str)> {
+/// 某个值在业务表里出现在哪些列。统计引用与改名同步都按这张表处理。
+fn usage_targets(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
-        "unit" => Some(("items", "unit")),
-        "category" => Some(("items", "category")),
-        "item_type" => Some(("items", "item_type")),
-        "owner" => Some(("ledger", "owner")),
-        "buyer" => Some(("ledger", "buyer")),
-        _ => None,
+        "unit" => &[("items", "unit"), ("ledger", "unit")],
+        "category" => &[("items", "category")],
+        "item_type" => &[("items", "item_type")],
+        "owner" => &[("ledger", "owner")],
+        "buyer" => &[("ledger", "buyer")],
+        _ => &[],
     }
 }
 
 fn usage_count(conn: &Connection, kind: &str, value: &str) -> i64 {
-    let Some((table, column)) = usage_sql(kind) else {
-        return 0;
-    };
-    conn.query_row(
-        &format!("SELECT COUNT(*) FROM {table} WHERE TRIM({column}) = ?1"),
-        [value],
-        |r| r.get(0),
-    )
-    .unwrap_or(0)
+    let mut total = 0i64;
+    for (table, column) in usage_targets(kind) {
+        total += conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE TRIM({column}) = ?1"),
+                [value],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+    }
+    total
 }
 
 /// 字典列表。`hit` 记过的使用次数和实时统计各算一份，取大的那个展示。
@@ -248,8 +250,8 @@ pub fn update(conn: &Connection, id: i64, input: &DictInput) -> DbResult<usize> 
 
     let mut touched = 0usize;
     if old.1 != value {
-        if let Some((table, column)) = usage_sql(kind) {
-            touched = tx
+        for (table, column) in usage_targets(kind) {
+            touched += tx
                 .execute(
                     &format!("UPDATE {table} SET {column} = ?1 WHERE TRIM({column}) = ?2"),
                     rusqlite::params![value, old.1],
@@ -324,8 +326,9 @@ pub fn sync_from_data(conn: &Connection) -> DbResult<usize> {
         .query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0))
         .map_err(DbError::from)?;
 
-    let sources: [(&str, &str, &str); 5] = [
+    let sources: [(&str, &str, &str); 6] = [
         ("unit", "items", "unit"),
+        ("unit", "ledger", "unit"),
         ("category", "items", "category"),
         ("item_type", "items", "item_type"),
         ("owner", "ledger", "owner"),
@@ -554,5 +557,58 @@ mod tests {
         let (csv, n) = export_db(&db, "unit", None, false).unwrap();
         assert_eq!(n, 1);
         assert!(csv.contains("\"套,件\""), "含逗号的值要加引号");
+    }
+
+    #[test]
+    fn unit_rename_and_delete_cover_ledger_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO items (item_code, item_name, unit) VALUES ('WG-9', '垫片', '片')",
+                [],
+            )
+            .map_err(DbError::from)?;
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, item_name, unit, qty) VALUES ('t', 1, 'in', '垫片', '片', 5)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, item_name, unit, qty) VALUES ('t', 2, 'out', '仅台账单位', '箱', 1)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+
+        sync_db(&db).unwrap();
+        let box_unit = list_db(&db, "unit", Some("箱"), false).unwrap().remove(0);
+        assert_eq!(box_unit.used, 1);
+        assert!(delete_db(&db, box_unit.id).is_err(), "台账仍在引用时不能删除单位");
+
+        let piece_unit = list_db(&db, "unit", Some("片"), false).unwrap().remove(0);
+        assert_eq!(piece_unit.used, 2, "items 与 ledger 引用数应合并统计");
+        let touched = update_db(
+            &db,
+            piece_unit.id,
+            &DictInput {
+                kind: "unit".into(),
+                value: "张".into(),
+                sort_no: None,
+                remark: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(touched, 2, "改名应同步回写 items 与 ledger 两张表");
+
+        let ledger_unit: String = db
+            .with(|c| {
+                c.query_row("SELECT unit FROM ledger WHERE row_no = 1", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
+            .unwrap();
+        assert_eq!(ledger_unit, "张");
     }
 }

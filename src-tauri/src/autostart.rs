@@ -22,7 +22,7 @@ pub const AUTOSTART_ARG: &str = "--autostart";
 mod win {
     use super::{OsStr, OsStrExt, AUTOSTART_ARG, VALUE_NAME};
     use std::path::Path;
-    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
         HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
@@ -101,7 +101,7 @@ mod win {
             None => unsafe { RegDeleteValueW(key, name.as_ptr()) },
         };
         unsafe { RegCloseKey(key) };
-        if rc == ERROR_SUCCESS {
+        if rc == ERROR_SUCCESS || (value.is_none() && rc == ERROR_FILE_NOT_FOUND) {
             Ok(())
         } else {
             Err(format!("写开机启动项失败（错误码 {rc}）"))
@@ -183,6 +183,8 @@ mod tests {
 
         set_enabled(&exe, false).expect("删除开机自启");
         assert!(!is_enabled(&exe), "关闭后应读到未启用");
+        // 幂等：值已不存在时再次关闭不应报错
+        set_enabled(&exe, false).expect("重复关闭开机自启应幂等成功");
 
         // 还原测试前的状态
         match before {

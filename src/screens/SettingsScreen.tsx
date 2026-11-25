@@ -88,7 +88,7 @@ export function SettingsScreen({
             <dl className="flex flex-col gap-2 text-body-2-regular">
               <Row label="台账明细" value={`${count(boot?.rowCount ?? 0)} 行`} />
               <Row label="导入批次" value={`${count(boot?.importCount ?? 0)} 批`} />
-              <Row label="数据库结构" value={`v${boot?.schemaVersion ?? 0} · 程序 v${boot?.appVersion ?? "0.2.0"}`} />
+              <Row label="数据库结构" value={`v${boot?.schemaVersion ?? 0} · 程序 v${boot?.appVersion ?? "—"}`} />
               <Row label="数据库文件" value={boot?.dbPath ?? "—"} />
             </dl>
 
