@@ -76,7 +76,7 @@ pub fn stock_report(
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{}%", k));
+        .map(crate::ledger::like_pattern);
     let limit = limit.clamp(1, 2000);
     let offset = offset.max(0);
 
@@ -96,7 +96,8 @@ pub fn stock_report(
             FROM ledger l
             LEFT JOIN items it ON it.item_code = l.item_code
             WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
-              AND (?1 IS NULL OR l.item_code LIKE ?1 OR l.item_name LIKE ?1 OR it.location LIKE ?1 OR l.spec LIKE ?1 OR it.spec LIKE ?1)
+              AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
+                   OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
             GROUP BY l.item_code
             HAVING (?2 = 0 OR stock_qty < 0)
             ORDER BY ABS(stock_qty) DESC, l.item_code
@@ -149,7 +150,7 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{}%", k));
+        .map(crate::ledger::like_pattern);
     let sql = "
         SELECT COUNT(*) FROM (
           SELECT l.item_code,
@@ -157,7 +158,8 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
           FROM ledger l
           LEFT JOIN items it ON it.item_code = l.item_code
           WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
-            AND (?1 IS NULL OR l.item_code LIKE ?1 OR l.item_name LIKE ?1 OR it.location LIKE ?1 OR l.spec LIKE ?1 OR it.spec LIKE ?1)
+            AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
+                   OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
           GROUP BY l.item_code
           HAVING (?2 = 0 OR stock_qty < 0)
         )";

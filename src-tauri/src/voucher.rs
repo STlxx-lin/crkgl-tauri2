@@ -133,7 +133,7 @@ pub fn next_doc_no(conn: &Connection, kind: &str, date: &str) -> DbResult<String
     let max: Option<String> = conn
         .query_row(
             "SELECT doc_no FROM ledger
-             WHERE kind = ?1 AND doc_no LIKE ?2 AND length(doc_no) = 11
+             WHERE kind = ?1 AND doc_no LIKE ?2 ESCAPE '\\' AND length(doc_no) = 11
              ORDER BY doc_no DESC LIMIT 1",
             rusqlite::params![kind, prefix],
             |r| r.get(0),
@@ -168,7 +168,7 @@ pub fn item_master(
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{}%", k));
+        .map(crate::ledger::like_pattern);
     let limit = limit.clamp(1, 500);
     let (hits_expr, kind_sub) = if inbound_only {
         ("SUM(CASE WHEN kind = 'in' THEN 1 ELSE 0 END)", "AND l2.kind = 'in'")
@@ -187,7 +187,8 @@ pub fn item_master(
                    0 AS from_master
             FROM ledger
             WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
-              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1 OR spec LIKE ?1)
+              AND (?1 IS NULL OR item_code LIKE ?1 ESCAPE '\\' OR item_name LIKE ?1 ESCAPE '\\'
+                   OR spec LIKE ?1 ESCAPE '\\')
             GROUP BY item_code
             HAVING (?3 = 0 OR hits > 0)
                AND (?4 = 0 OR stock_qty > 0)
@@ -204,8 +205,8 @@ pub fn item_master(
             FROM items
             WHERE active = 1
               AND TRIM(item_code) NOT IN ('-', '0')
-              AND (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                   OR drawing_no LIKE ?1 OR spec LIKE ?1)
+              AND (?1 IS NULL OR item_code LIKE ?1 ESCAPE '\\' OR item_name LIKE ?1 ESCAPE '\\'
+                   OR drawing_no LIKE ?1 ESCAPE '\\' OR spec LIKE ?1 ESCAPE '\\')
               -- 只有库存过滤时才排除基础资料项：它们本来就没有结存
               AND ?4 = 0
         ),
@@ -397,7 +398,7 @@ pub fn search_docs(conn: &Connection, keyword: &str, kind: Option<&str>, limit: 
     }
     let limit = limit.clamp(1, 200);
     let exact = raw.to_string();
-    let like = format!("%{raw}%");
+    let like = crate::ledger::like_pattern(raw);
 
     // 1) 本机开单
     let mut hits: Vec<DocHit> = Vec::new();
@@ -407,7 +408,7 @@ pub fn search_docs(conn: &Connection, keyword: &str, kind: Option<&str>, limit: 
                 "SELECT id, doc_no, kind, doc_date, partner, owner, buyer, delivery_no, row_count, amount_cents
                  FROM vouchers
                  WHERE (?1 IS NULL OR kind = ?1)
-                   AND (doc_no = ?2 OR doc_no LIKE ?3)
+                   AND (doc_no = ?2 OR doc_no LIKE ?3 ESCAPE '\\')
                  ORDER BY doc_no DESC
                  LIMIT ?4",
             )
@@ -444,7 +445,7 @@ pub fn search_docs(conn: &Connection, keyword: &str, kind: Option<&str>, limit: 
                  WHERE voucher_id IS NULL
                    AND TRIM(COALESCE(doc_no, '')) <> ''
                    AND (?1 IS NULL OR kind = ?1)
-                   AND (doc_no = ?2 OR doc_no LIKE ?3)
+                   AND (doc_no = ?2 OR doc_no LIKE ?3 ESCAPE '\\')
                  GROUP BY doc_no, kind
                  ORDER BY doc_no DESC
                  LIMIT ?4",
