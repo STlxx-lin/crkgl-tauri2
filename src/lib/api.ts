@@ -36,6 +36,9 @@ import type {
   StockIssue,
   StockRow,
   SummaryBundle,
+  Warehouse,
+  WarehouseDeleteOutcome,
+  WarehouseInput,
   WebStatus,
   WorkbookReport,
 } from "./types";
@@ -68,9 +71,22 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   }
 }
 
+// ---------- 只读站的仓库选择 ----------
+//
+// 桌面端每个命令都由 Rust 侧注入当前仓库，前端不用传；只有在浏览器里
+// （80 端口只读站）才把选中的仓库拼进查询参数，让每个同事各看各的仓。
+// 「全部仓库」只在汇总页有意义，所以单独存一个开关，别污染台账/库存。
+
+let remoteWarehouseId: number | null = null;
+
+export function setRemoteWarehouse(id: number | null): void {
+  remoteWarehouseId = id;
+  invalidateFacetsCache();
+}
+
 // ---------- 只读查询：桌面端走 invoke，远程走 HTTP ----------
 
-function qs(filter: LedgerFilter): string {
+function qs(filter: LedgerFilter, mergeAll = false): string {
   const params = new URLSearchParams();
   const put = (key: string, value: unknown) => {
     if (value === undefined || value === null || value === "") return;
@@ -86,7 +102,18 @@ function qs(filter: LedgerFilter): string {
   if (filter.flagged) put("flagged", "true");
   put("sort", filter.sort);
   if (filter.desc) put("desc", "true");
+  // 只读站：带上选中的仓库；桌面端由命令层注入，不发这个参数
+  if (!isTauri) {
+    if (mergeAll) put("warehouse", "all");
+    else if (remoteWarehouseId !== null) put("warehouse", remoteWarehouseId);
+  }
   return params.toString();
+}
+
+/** 只读站的仓库参数：库存、筛选候选这些不分仓的接口共用。 */
+function whParam(): string {
+  if (isTauri || remoteWarehouseId === null) return "";
+  return `warehouse=${remoteWarehouseId}`;
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -140,7 +167,7 @@ export function fetchFacets(forceRefresh = false): Promise<Facets> {
   if (!forceRefresh && facetsPromise) {
     return facetsPromise;
   }
-  const p = isTauri ? call<Facets>("ledger_facets") : getJson<Facets>("/api/ledger/facets");
+  const p = isTauri ? call<Facets>("ledger_facets") : getJson<Facets>(`/api/ledger/facets?${whParam()}`);
   facetsPromise = p
     .then((res) => {
       cachedFacets = res;
@@ -162,23 +189,27 @@ export function invalidateFacetsCache(): void {
 
 export function fetchDetail(id: number): Promise<LedgerRow | null> {
   if (isTauri) return call<LedgerRow | null>("ledger_detail", { id });
-  return getJson<LedgerRow | null>(`/api/ledger/detail?id=${id}`);
+  // 只读站：带上自己选的仓库，避免翻出别仓的行
+  const query = whParam();
+  return getJson<LedgerRow | null>(`/api/ledger/detail?id=${id}${query ? `&${query}` : ""}`);
 }
 
-export function fetchSummary(filter: LedgerFilter): Promise<SummaryBundle> {
-  if (isTauri) return call<SummaryBundle>("summary_bundle", { args: { filter } });
+export function fetchSummary(filter: LedgerFilter, mergeAll = false): Promise<SummaryBundle> {
+  if (isTauri) {
+    return call<SummaryBundle>("summary_bundle", { args: { filter, mergeAll } });
+  }
   // 远程端把几个只读接口并行拼起来，形状与桌面端保持一致
-  const base = qs(filter);
+  const base = qs(filter, mergeAll);
   return Promise.all([
-    getJson<LedgerPage>(`/api/ledger/page?${base}&page=1&pageSize=20`),
+    getJson<SummaryBundle["totals"]>(`/api/summary/totals?${base}`),
     getJson<SummaryBundle["monthly"]>(`/api/summary/monthly?${base}`),
     getJson<SummaryBundle["byOwner"]>(`/api/summary?${base}&groupBy=owner&limit=12`),
     getJson<SummaryBundle["byPartner"]>(`/api/summary?${base}&groupBy=partner&limit=12`),
     getJson<SummaryBundle["topOut"]>(`/api/summary/top?${base}&kindOfTop=out&limit=10`),
     getJson<SummaryBundle["topIn"]>(`/api/summary/top?${base}&kindOfTop=in&limit=10`),
     getJson<SummaryBundle["compare"]>(`/api/summary/compare?${base}`),
-  ]).then(([page, monthly, byOwner, byPartner, topOut, topIn, compare]) => ({
-    totals: page.totals,
+  ]).then(([totals, monthly, byOwner, byPartner, topOut, topIn, compare]) => ({
+    totals,
     monthly,
     byOwner,
     byPartner,
@@ -515,6 +546,7 @@ export function fetchStockReport(opts: {
     if (opts.onlyNegative) params.set("onlyNegative", "true");
     params.set("limit", String(opts.limit ?? 500));
     params.set("offset", String(opts.offset ?? 0));
+    if (remoteWarehouseId !== null) params.set("warehouse", String(remoteWarehouseId));
     return getJson<StockRow[]>(`/api/stock?${params}`);
   }
   return call<StockRow[]>("stock_report", {
@@ -532,6 +564,7 @@ export function countStock(keyword?: string, onlyNegative = false): Promise<numb
     const params = new URLSearchParams();
     if (keyword) params.set("keyword", keyword);
     if (onlyNegative) params.set("onlyNegative", "true");
+    if (remoteWarehouseId !== null) params.set("warehouse", String(remoteWarehouseId));
     return getJson<number>(`/api/stock/count?${params}`);
   }
   return call<number>("stock_count", { keyword: keyword ?? null, onlyNegative });
@@ -539,12 +572,46 @@ export function countStock(keyword?: string, onlyNegative = false): Promise<numb
 
 /** 只读站一次拿回清单与汇总，省一次请求。 */
 export async function fetchStockCheck(): Promise<{ issues: StockIssue[]; summary: StockCheckSummary }> {
-  if (!isTauri) return getJson<{ issues: StockIssue[]; summary: StockCheckSummary }>("/api/stock/check");
+  if (!isTauri) {
+    return getJson<{ issues: StockIssue[]; summary: StockCheckSummary }>(`/api/stock/check?${whParam()}`);
+  }
   const [issues, summary] = await Promise.all([
     call<StockIssue[]>("stock_check", { limit: 300 }),
     call<StockCheckSummary>("stock_check_summary"),
   ]);
   return { issues, summary };
+}
+
+// ---------- 仓库 ----------
+
+export function listWarehouses(): Promise<Warehouse[]> {
+  return call<Warehouse[]>("warehouse_list");
+}
+
+export function createWarehouse(input: WarehouseInput): Promise<number> {
+  return call<number>("warehouse_create", { args: input });
+}
+
+export function updateWarehouse(id: number, input: WarehouseInput): Promise<void> {
+  return call<void>("warehouse_update", { id, args: input });
+}
+
+export async function deleteWarehouse(id: number, force = false): Promise<WarehouseDeleteOutcome> {
+  const outcome = await call<WarehouseDeleteOutcome>("warehouse_delete", { id, force });
+  // 删掉的那个仓的筛选候选、行数缓存都不能再用
+  invalidateFacetsCache();
+  return outcome;
+}
+
+/** 切换当前仓库：只写设置，数据不动。 */
+export async function switchWarehouse(id: number): Promise<void> {
+  await call<void>("warehouse_switch", { id });
+  invalidateFacetsCache();
+}
+
+/** 只读站：仓库清单（浏览器里没有 Tauri 桥）。 */
+export function fetchWarehouses(): Promise<{ warehouses: Warehouse[]; activeWarehouseId: number }> {
+  return getJson<{ warehouses: Warehouse[]; activeWarehouseId: number }>("/api/warehouses");
 }
 
 // ---------- 数据管理 ----------

@@ -68,6 +68,7 @@ pub struct CheckSummary {
 /// 结存报表：只在 `in_stock_only` 或关键字下筛选，排序按结存绝对值降序。
 pub fn stock_report(
     conn: &Connection,
+    warehouse_id: i64,
     keyword: Option<&str>,
     only_negative: bool,
     limit: i64,
@@ -95,7 +96,8 @@ pub fn stock_report(
                    MAX(l.doc_date) AS last_date
             FROM ledger l
             LEFT JOIN items it ON it.item_code = l.item_code
-            WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
+            WHERE l.warehouse_id = ?5
+              AND l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
               AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
                    OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
             GROUP BY l.item_code
@@ -114,7 +116,7 @@ pub fn stock_report(
                p.in_rows,
                p.out_rows,
                (SELECT l2.price_micros FROM ledger l2
-                 WHERE l2.item_code = p.item_code AND l2.kind = 'in'
+                 WHERE l2.item_code = p.item_code AND l2.kind = 'in' AND l2.warehouse_id = ?5
                    AND l2.price_micros IS NOT NULL AND l2.price_micros > 0
                  ORDER BY l2.doc_date DESC, l2.id DESC LIMIT 1) AS last_price,
                p.last_date
@@ -123,7 +125,13 @@ pub fn stock_report(
     let mut stmt = conn.prepare(sql).map_err(|e| DbError::from(e).0)?;
     let rows = stmt
         .query_map(
-            rusqlite::params![like, if only_negative { 1i64 } else { 0i64 }, limit, offset],
+            rusqlite::params![
+                like,
+                if only_negative { 1i64 } else { 0i64 },
+                limit,
+                offset,
+                warehouse_id
+            ],
             |r| {
                 Ok(StockRow {
                     item_code: r.get(0)?,
@@ -146,7 +154,7 @@ pub fn stock_report(
     Ok(rows)
 }
 
-pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool) -> DbResult<i64> {
+pub fn stock_count(conn: &Connection, warehouse_id: i64, keyword: Option<&str>, only_negative: bool) -> DbResult<i64> {
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
@@ -157,7 +165,8 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
                  COALESCE(SUM(CASE WHEN l.kind = 'in' THEN l.qty ELSE -l.qty END), 0) AS stock_qty
           FROM ledger l
           LEFT JOIN items it ON it.item_code = l.item_code
-          WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
+          WHERE l.warehouse_id = ?3
+            AND l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
             AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
                    OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
           GROUP BY l.item_code
@@ -165,14 +174,14 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
         )";
     conn.query_row(
         sql,
-        rusqlite::params![like, if only_negative { 1i64 } else { 0i64 }],
+        rusqlite::params![like, if only_negative { 1i64 } else { 0i64 }, warehouse_id],
         |r| r.get(0),
     )
     .map_err(|e| DbError::from(e).0)
 }
 
 /// 核对清单：负库存物料、缺编码的行、数量异常的行。
-pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
+pub fn check_issues(conn: &Connection, warehouse_id: i64, limit: i64) -> DbResult<Vec<IssueRow>> {
     let limit = limit.clamp(1, 500);
     let mut out = Vec::new();
 
@@ -186,7 +195,7 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
                         COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock,
                         MAX(doc_date)
                  FROM ledger
-                 WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
+                 WHERE warehouse_id = ?2 AND item_code IS NOT NULL AND TRIM(item_code) <> ''
                  GROUP BY item_code
                  HAVING stock < 0
                  ORDER BY stock ASC
@@ -194,7 +203,7 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
             )
             .map_err(|e| DbError::from(e).0)?;
         let rows = stmt
-            .query_map([limit], |r| {
+            .query_map(rusqlite::params![limit, warehouse_id], |r| {
                 let code: String = r.get(0)?;
                 let stock: f64 = r.get(3)?;
                 Ok(IssueRow {
@@ -221,13 +230,13 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
             .prepare(
                 "SELECT id, item_name, unit, qty, doc_no, doc_date, kind
                  FROM ledger
-                 WHERE item_code IS NULL OR TRIM(item_code) = ''
+                 WHERE warehouse_id = ?2 AND (item_code IS NULL OR TRIM(item_code) = '')
                  ORDER BY doc_date DESC, id DESC
                  LIMIT ?1",
             )
             .map_err(|e| DbError::from(e).0)?;
         let rows = stmt
-            .query_map([limit], |r| {
+            .query_map(rusqlite::params![limit, warehouse_id], |r| {
                 let kind: String = r.get(6)?;
                 Ok(IssueRow {
                     kind: "missing_code".into(),
@@ -253,13 +262,13 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
             .prepare(
                 "SELECT id, item_code, item_name, unit, qty, doc_no, doc_date, kind
                  FROM ledger
-                 WHERE qty IS NULL OR qty <= 0
+                 WHERE warehouse_id = ?2 AND (qty IS NULL OR qty <= 0)
                  ORDER BY doc_date DESC, id DESC
                  LIMIT ?1",
             )
             .map_err(|e| DbError::from(e).0)?;
         let rows = stmt
-            .query_map([limit], |r| {
+            .query_map(rusqlite::params![limit, warehouse_id], |r| {
                 let kind: String = r.get(7)?;
                 let qty: Option<f64> = r.get(4)?;
                 Ok(IssueRow {
@@ -287,30 +296,32 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
     Ok(out)
 }
 
-pub fn check_summary(conn: &Connection) -> DbResult<CheckSummary> {
+pub fn check_summary(conn: &Connection, warehouse_id: i64) -> DbResult<CheckSummary> {
     let (negative_items, negative_gap): (i64, f64) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(-SUM(stock), 0) FROM (
                SELECT COALESCE(SUM(CASE WHEN kind = 'in' THEN qty ELSE -qty END), 0) AS stock
                FROM ledger
-               WHERE item_code IS NOT NULL AND TRIM(item_code) <> ''
+               WHERE warehouse_id = ?1 AND item_code IS NOT NULL AND TRIM(item_code) <> ''
                GROUP BY item_code
              ) WHERE stock < 0",
-            [],
+            [warehouse_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| DbError::from(e).0)?;
     let missing_code_rows: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM ledger WHERE item_code IS NULL OR TRIM(item_code) = ''",
-            [],
+            "SELECT COUNT(*) FROM ledger WHERE warehouse_id = ?1 AND (item_code IS NULL OR TRIM(item_code) = '')",
+            [warehouse_id],
             |r| r.get(0),
         )
         .map_err(|e| DbError::from(e).0)?;
     let bad_qty_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM ledger WHERE qty IS NULL OR qty <= 0", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM ledger WHERE warehouse_id = ?1 AND (qty IS NULL OR qty <= 0)",
+            [warehouse_id],
+            |r| r.get(0),
+        )
         .map_err(|e| DbError::from(e).0)?;
     Ok(CheckSummary {
         negative_items,
@@ -332,24 +343,25 @@ fn kind_label(kind: &str) -> String {
 
 pub fn stock_report_db(
     db: &Db,
+    warehouse_id: i64,
     keyword: Option<&str>,
     only_negative: bool,
     limit: i64,
     offset: i64,
 ) -> DbResult<Vec<StockRow>> {
-    db.with(|c| stock_report(c, keyword, only_negative, limit, offset).map_err(DbError))
+    db.with(|c| stock_report(c, warehouse_id, keyword, only_negative, limit, offset).map_err(DbError))
 }
 
-pub fn stock_count_db(db: &Db, keyword: Option<&str>, only_negative: bool) -> DbResult<i64> {
-    db.with(|c| stock_count(c, keyword, only_negative).map_err(DbError))
+pub fn stock_count_db(db: &Db, warehouse_id: i64, keyword: Option<&str>, only_negative: bool) -> DbResult<i64> {
+    db.with(|c| stock_count(c, warehouse_id, keyword, only_negative).map_err(DbError))
 }
 
-pub fn check_issues_db(db: &Db, limit: i64) -> DbResult<Vec<IssueRow>> {
-    db.with(|c| check_issues(c, limit).map_err(DbError))
+pub fn check_issues_db(db: &Db, warehouse_id: i64, limit: i64) -> DbResult<Vec<IssueRow>> {
+    db.with(|c| check_issues(c, warehouse_id, limit).map_err(DbError))
 }
 
-pub fn check_summary_db(db: &Db) -> DbResult<CheckSummary> {
-    db.with(|c| check_summary(c).map_err(DbError))
+pub fn check_summary_db(db: &Db, warehouse_id: i64) -> DbResult<CheckSummary> {
+    db.with(|c| check_summary(c, warehouse_id).map_err(DbError))
 }
 
 #[cfg(test)]
@@ -362,7 +374,8 @@ mod tests {
                 id INTEGER PRIMARY KEY, kind TEXT, doc_date TEXT, doc_no TEXT,
                 item_code TEXT, item_name TEXT, spec TEXT, unit TEXT, qty REAL,
                 price_micros INTEGER, amount_cents INTEGER, remark TEXT,
-                partner TEXT, buyer TEXT, owner TEXT, receiver TEXT, flags TEXT
+                partner TEXT, buyer TEXT, owner TEXT, receiver TEXT, flags TEXT,
+                warehouse_id INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE items (
                 id INTEGER PRIMARY KEY, item_code TEXT UNIQUE, item_name TEXT,
@@ -408,7 +421,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         seed(&conn);
 
-        let all = stock_report(&conn, None, false, 50, 0).unwrap();
+        let all = stock_report(&conn, 1, None, false, 50, 0).unwrap();
         assert_eq!(all.len(), 3);
         let a = all.iter().find(|r| r.item_code == "A").unwrap();
         assert_eq!(a.in_qty, 10.0);
@@ -417,23 +430,25 @@ mod tests {
         assert_eq!(a.location.as_deref(), Some("E-01-02-4F"));
         assert_eq!(a.spec.as_deref(), Some("5*5"));
 
-        let neg = stock_report(&conn, None, true, 50, 0).unwrap();
+        let neg = stock_report(&conn, 1, None, true, 50, 0).unwrap();
         assert_eq!(neg.len(), 1);
         assert_eq!(neg[0].item_code, "C");
         assert_eq!(neg[0].stock_qty, -2.0);
+        // 换个不存在的仓库：什么也看不到
+        assert!(stock_report(&conn, 99, None, false, 50, 0).unwrap().is_empty());
     }
 
     #[test]
     fn check_summary_counts_three_kinds() {
         let conn = Connection::open_in_memory().unwrap();
         seed(&conn);
-        let s = check_summary(&conn).unwrap();
+        let s = check_summary(&conn, 1).unwrap();
         assert_eq!(s.negative_items, 1, "只有 C 是负库存");
         assert_eq!(s.negative_gap, 2.0, "缺 2 个");
         assert_eq!(s.missing_code_rows, 1);
         assert_eq!(s.bad_qty_rows, 1);
 
-        let issues = check_issues(&conn, 100).unwrap();
+        let issues = check_issues(&conn, 1, 100).unwrap();
         assert!(issues
             .iter()
             .any(|i| i.kind == "negative_stock" && i.item_code.as_deref() == Some("C")));

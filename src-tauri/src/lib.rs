@@ -21,6 +21,7 @@ mod pivot_e2e;
 pub mod stock;
 pub mod summary;
 pub mod voucher;
+pub mod warehouse;
 pub mod web;
 
 use std::sync::Arc;
@@ -183,6 +184,11 @@ pub fn run() {
             commands::ledger_bulk_update,
             commands::ledger_bulk_delete,
             commands::data_clear,
+            commands::warehouse_list,
+            commands::warehouse_create,
+            commands::warehouse_update,
+            commands::warehouse_delete,
+            commands::warehouse_switch,
             commands::local_addresses,
             commands::client_log,
             commands::autostart_status,

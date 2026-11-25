@@ -1,6 +1,6 @@
 {
   "name": "warehouse-ledger-desktop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "仓库出入库明细 · Tauri 2 + BoardUI",
   "scripts": {
     "dev": "vite",

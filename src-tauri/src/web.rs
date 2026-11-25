@@ -27,6 +27,7 @@ use serde_json::json;
 use crate::db::{self, Db};
 use crate::ledger::{self, LedgerFilter};
 use crate::summary;
+use crate::warehouse;
 
 pub const DEFAULT_PORT: u16 = 80;
 pub const FALLBACK_PORT: u16 = 8080;
@@ -321,10 +322,12 @@ struct PageQuery {
     page: Option<i64>,
     page_size: Option<i64>,
     skip_totals: Option<bool>,
+    /// 仓库 id；不传跟桌面端当前仓库
+    warehouse: Option<String>,
 }
 
 impl PageQuery {
-    fn filter(&self) -> LedgerFilter {
+    fn filter(&self, warehouse_id: Option<i64>) -> LedgerFilter {
         LedgerFilter {
             from: self.from.clone(),
             to: self.to.clone(),
@@ -336,6 +339,7 @@ impl PageQuery {
             flagged: self.flagged,
             sort: self.sort.clone(),
             desc: self.desc,
+            warehouse_id,
         }
     }
 }
@@ -354,10 +358,12 @@ struct SummaryQuery {
     group_by: Option<String>,
     kind_of_top: Option<String>,
     limit: Option<i64>,
+    /// 仓库 id，`all` 表示跨仓合并（只有汇总接口认这个值）
+    warehouse: Option<String>,
 }
 
 impl SummaryQuery {
-    fn filter(&self) -> LedgerFilter {
+    fn filter(&self, warehouse_id: Option<i64>) -> LedgerFilter {
         LedgerFilter {
             from: self.from.clone(),
             to: self.to.clone(),
@@ -369,13 +375,34 @@ impl SummaryQuery {
             flagged: self.flagged,
             sort: None,
             desc: false,
+            warehouse_id,
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+/// 解析只读站的仓库参数。
+///
+/// - 不传：跟桌面端当前仓库（同事第一次打开网站时就是这一页）；
+/// - `warehouse=3`：只看三号仓，与桌面端此刻停在哪无关；
+/// - `warehouse=all`：只有汇总类接口接受，其余接口明确报错而不是悄悄合并。
+fn resolve_warehouse(state: &WebState, raw: &Option<String>, allow_all: bool) -> Result<Option<i64>, String> {
+    match raw.as_deref().map(str::trim) {
+        Some("all") if allow_all => Ok(None),
+        Some("all") => Err("该接口不支持「全部仓库」".into()),
+        Some(text) if !text.is_empty() => text
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| format!("仓库参数不对: {text}")),
+        _ => Ok(Some(warehouse::current_id_db(&state.db)?)),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 struct IdQuery {
     id: i64,
+    /// 仓库 id；只读站按自己选的仓过滤，桌面端不传这个接口
+    warehouse: Option<String>,
 }
 
 pub fn router(state: WebState) -> Router {
@@ -383,11 +410,13 @@ pub fn router(state: WebState) -> Router {
 
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/warehouses", get(warehouses))
         .route("/api/ledger/page", get(page))
         .route("/api/ledger/facets", get(facets))
         .route("/api/ledger/detail", get(detail))
         .route("/api/ledger/export.csv", get(export_csv))
         .route("/api/summary", get(summary_handler))
+        .route("/api/summary/totals", get(summary_totals))
         .route("/api/summary/monthly", get(monthly))
         .route("/api/summary/top", get(top_items))
         .route("/api/summary/compare", get(compare))
@@ -536,9 +565,13 @@ async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>) -> 
     if let Err(err) = validate_page(page, size) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
     }
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match ledger::page_from_opt(
         &state.db,
-        &query.filter(),
+        &query.filter(warehouse_id),
         page,
         size,
         query.skip_totals.unwrap_or(false),
@@ -548,15 +581,48 @@ async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>) -> 
     }
 }
 
-async fn facets(State(state): State<WebState>) -> Response {
-    match ledger::facets_from(&state.db) {
+/// 仓库清单：只读站自己渲染的仓库选择器用，含每个仓的名字与体量。
+async fn warehouses(State(state): State<WebState>) -> Response {
+    match warehouse::list_db(&state.db) {
+        Ok(rows) => {
+            let current = warehouse::current_id_db(&state.db).unwrap_or(0);
+            Json(json!({ "warehouses": rows, "activeWarehouseId": current })).into_response()
+        }
+        Err(err) => server_error(err),
+    }
+}
+
+async fn facets(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "该接口不支持「全部仓库」" })),
+            )
+                .into_response()
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
+    match ledger::facets_from(&state.db, warehouse_id) {
         Ok(facets) => Json(facets).into_response(),
         Err(err) => server_error(err),
     }
 }
 
 async fn detail(State(state): State<WebState>, Query(query): Query<IdQuery>) -> Response {
-    match ledger::detail_from(&state.db, query.id) {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "该接口不支持「全部仓库」" })),
+            )
+                .into_response()
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
+    match ledger::detail_from(&state.db, query.id, Some(warehouse_id)) {
         Ok(Some(row)) => Json(row).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "不存在" }))).into_response(),
         Err(err) => server_error(err),
@@ -589,7 +655,11 @@ fn percent_encode(input: &str) -> String {
 }
 
 async fn export_csv(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
-    match ledger::export_csv_from(&state.db, &query.filter(), EXPORT_ROW_LIMIT) {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
+    match ledger::export_csv_from(&state.db, &query.filter(warehouse_id), EXPORT_ROW_LIMIT) {
         Ok((csv, _rows)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
@@ -611,12 +681,26 @@ struct StockQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    #[serde(default)]
+    warehouse: Option<String>,
 }
 
 async fn stock_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "该接口不支持「全部仓库」" })),
+            )
+                .into_response()
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state.db.with(|c| {
         crate::stock::stock_report(
             c,
+            warehouse_id,
             query.keyword.as_deref(),
             query.only_negative.unwrap_or(false),
             query.limit.unwrap_or(500),
@@ -630,19 +714,46 @@ async fn stock_handler(State(state): State<WebState>, Query(query): Query<StockQ
 }
 
 async fn stock_count_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "该接口不支持「全部仓库」" })),
+            )
+                .into_response()
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state.db.with(|c| {
-        crate::stock::stock_count(c, query.keyword.as_deref(), query.only_negative.unwrap_or(false))
-            .map_err(crate::db::DbError::from)
+        crate::stock::stock_count(
+            c,
+            warehouse_id,
+            query.keyword.as_deref(),
+            query.only_negative.unwrap_or(false),
+        )
+        .map_err(crate::db::DbError::from)
     }) {
         Ok(n) => Json(n).into_response(),
         Err(err) => server_error(err),
     }
 }
 
-async fn stock_check_handler(State(state): State<WebState>) -> Response {
+async fn stock_check_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, false) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "该接口不支持「全部仓库」" })),
+            )
+                .into_response()
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state.db.with(|c| {
-        let issues = crate::stock::check_issues(c, 300).map_err(crate::db::DbError::from)?;
-        let summary = crate::stock::check_summary(c).map_err(crate::db::DbError::from)?;
+        let issues = crate::stock::check_issues(c, warehouse_id, 300).map_err(crate::db::DbError::from)?;
+        let summary = crate::stock::check_summary(c, warehouse_id).map_err(crate::db::DbError::from)?;
         Ok(serde_json::json!({ "issues": issues, "summary": summary }))
     }) {
         Ok(body) => Json(body).into_response(),
@@ -653,19 +764,42 @@ async fn stock_check_handler(State(state): State<WebState>) -> Response {
 async fn summary_handler(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let group_by = query.group_by.clone().unwrap_or_else(|| "month".into());
     let limit = query.limit.unwrap_or(50);
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, true) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state
         .db
-        .with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from))
+        .with(|c| summary::grouped(c, &query.filter(warehouse_id), &group_by, limit).map_err(crate::db::DbError::from))
     {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
 }
 
-async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
+/// 汇总合计。单独一个接口是为了让只读站也能开「全部仓库」，不必拆一次分页查询。
+async fn summary_totals(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, true) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state
         .db
-        .with(|c| summary::monthly(c, &query.filter()).map_err(crate::db::DbError::from))
+        .with(|c| ledger::totals(c, &query.filter(warehouse_id)).map_err(crate::db::DbError::from))
+    {
+        Ok(totals) => Json(totals).into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
+async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, true) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
+    match state
+        .db
+        .with(|c| summary::monthly(c, &query.filter(warehouse_id)).map_err(crate::db::DbError::from))
     {
         Ok(points) => Json(points).into_response(),
         Err(err) => server_error(err),
@@ -674,8 +808,13 @@ async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery
 
 async fn top_items(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let kind = query.kind_of_top.clone().unwrap_or_else(|| "out".into());
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, true) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state.db.with(|c| {
-        summary::top_items(c, &query.filter(), &kind, query.limit.unwrap_or(10)).map_err(crate::db::DbError::from)
+        summary::top_items(c, &query.filter(warehouse_id), &kind, query.limit.unwrap_or(10))
+            .map_err(crate::db::DbError::from)
     }) {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
@@ -683,9 +822,13 @@ async fn top_items(State(state): State<WebState>, Query(query): Query<SummaryQue
 }
 
 async fn compare(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
+    let warehouse_id = match resolve_warehouse(&state, &query.warehouse, true) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response(),
+    };
     match state
         .db
-        .with(|c| summary::compare_previous(c, &query.filter()).map_err(crate::db::DbError::from))
+        .with(|c| summary::compare_previous(c, &query.filter(warehouse_id)).map_err(crate::db::DbError::from))
     {
         Ok(Some(cmp)) => Json(cmp).into_response(),
         Ok(None) => Json(serde_json::Value::Null).into_response(),

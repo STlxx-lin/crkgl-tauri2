@@ -26,6 +26,9 @@ pub struct LedgerFilter {
     /// `date` | `amount` | `qty` | `name`
     pub sort: Option<String>,
     pub desc: bool,
+    /// 仓库：`Some` 只看这一个仓，`None` 表示不分仓（只有汇总页的「全部仓库」会传 None）。
+    /// 桌面端其余入口与只读站都由命令层强制注入当前仓库。
+    pub warehouse_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +122,10 @@ pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
     let mut clauses: Vec<&str> = vec!["1 = 1"];
     let mut params: Vec<Value> = Vec::new();
 
+    if let Some(warehouse_id) = filter.warehouse_id {
+        clauses.push("warehouse_id = ?");
+        params.push(Value::Integer(warehouse_id));
+    }
     if let Some(from) = text(&filter.from) {
         clauses.push("doc_date >= ?");
         params.push(Value::Text(normalize_date(from)));
@@ -335,9 +342,14 @@ pub fn page_from_opt(
     db.with(|c| page_with_opt(c, filter, page_no, page_size, skip_totals).map_err(DbError::from))
 }
 
-pub fn detail(conn: &Connection, id: i64) -> DbResult<Option<LedgerRow>> {
-    let sql = format!("SELECT {SELECT_COLUMNS_PUB} FROM ledger WHERE id = ?1");
-    match conn.query_row(&sql, [id], bind_row_pub) {
+/// 单行详情。`warehouse_id` 为 `Some` 时只在该仓里找：
+/// 只读站的 id 是客户端传的，不按仓过滤就等于把别仓的行也交出去。
+pub fn detail(conn: &Connection, id: i64, warehouse_id: Option<i64>) -> DbResult<Option<LedgerRow>> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS_PUB} FROM ledger
+         WHERE id = ?1 AND (?2 IS NULL OR warehouse_id = ?2)"
+    );
+    match conn.query_row(&sql, rusqlite::params![id, warehouse_id], bind_row_pub) {
         Ok(row) => Ok(Some(row)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(DbError::from(err).0),
@@ -548,26 +560,27 @@ pub fn bulk_delete_db(db: &Db, ids: &[i64]) -> DbResult<usize> {
 }
 
 /// 带连接封装的查询入口：80 端口服务的处理器直接用。
-pub fn facets_from(db: &Db) -> DbResult<Facets> {
-    db.with(|c| facets(c).map_err(DbError::from))
+pub fn facets_from(db: &Db, warehouse_id: i64) -> DbResult<Facets> {
+    db.with(|c| facets(c, warehouse_id).map_err(DbError::from))
 }
 
-pub fn detail_from(db: &Db, id: i64) -> DbResult<Option<LedgerRow>> {
-    db.with(|c| detail(c, id).map_err(DbError::from))
+pub fn detail_from(db: &Db, id: i64, warehouse_id: Option<i64>) -> DbResult<Option<LedgerRow>> {
+    db.with(|c| detail(c, id, warehouse_id).map_err(DbError::from))
 }
 
 pub fn export_csv_from(db: &Db, filter: &LedgerFilter, limit: i64) -> DbResult<(String, i64)> {
     db.with(|c| export_csv(c, filter, limit).map_err(DbError::from))
 }
 
-pub fn facets(conn: &Connection) -> DbResult<Facets> {
+/// 台账筛选面板的候选值，按仓库取。
+pub fn facets(conn: &Connection, warehouse_id: i64) -> DbResult<Facets> {
     let distinct = |column: &str| -> DbResult<Vec<String>> {
         let sql = format!(
-            "SELECT DISTINCT {column} FROM ledger WHERE {column} IS NOT NULL AND TRIM({column}) <> '' ORDER BY {column}"
+            "SELECT DISTINCT {column} FROM ledger WHERE warehouse_id = ?1 AND {column} IS NOT NULL AND TRIM({column}) <> '' ORDER BY {column}"
         );
         let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
         let rows = stmt
-            .query_map([], |r| r.get(0))
+            .query_map([warehouse_id], |r| r.get(0))
             .and_then(|it| it.collect())
             .map_err(DbError::from)?;
         Ok(rows)
@@ -577,8 +590,8 @@ pub fn facets(conn: &Connection) -> DbResult<Facets> {
             "SELECT MIN(doc_date), MAX(doc_date),
                     COUNT(DISTINCT COALESCE(item_code, item_name)),
                     COALESCE(SUM(kind='in'),0), COALESCE(SUM(kind='out'),0)
-             FROM ledger",
-            [],
+             FROM ledger WHERE warehouse_id = ?1",
+            [warehouse_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(DbError::from)?;
@@ -710,10 +723,14 @@ fn csv_cell(field: &str) -> String {
     }
 }
 
-pub fn count(db: &Db) -> DbResult<i64> {
+pub fn count(db: &Db, warehouse_id: i64) -> DbResult<i64> {
     db.with(|c| {
-        c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
-            .map_err(DbError::from)
+        c.query_row(
+            "SELECT COUNT(*) FROM ledger WHERE warehouse_id = ?1",
+            [warehouse_id],
+            |r| r.get(0),
+        )
+        .map_err(DbError::from)
     })
 }
 
@@ -857,11 +874,22 @@ mod tests {
             owner: None,
         };
         db.with(|c| update(c, id, &patch).map_err(DbError::from)).unwrap();
-        let row = db.with(|c| detail(c, id).map_err(DbError::from)).unwrap().unwrap();
+        let row = db
+            .with(|c| detail(c, id, None).map_err(DbError::from))
+            .unwrap()
+            .unwrap();
         assert_eq!(row.price_micros, Some(1234));
         assert_eq!(row.remark.as_deref(), Some("补录"));
+        // 换一个仓就查不到：详情也必须按仓过滤
+        assert!(db
+            .with(|c| detail(c, id, Some(999)).map_err(DbError::from))
+            .unwrap()
+            .is_none());
         db.with(|c| delete(c, id).map_err(DbError::from)).unwrap();
-        assert!(db.with(|c| detail(c, id).map_err(DbError::from)).unwrap().is_none());
+        assert!(db
+            .with(|c| detail(c, id, None).map_err(DbError::from))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

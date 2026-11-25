@@ -73,7 +73,7 @@ fn e2e_real_workbook() {
     assert_eq!(pivots.len(), 12, "应该认出 12 张月度表");
 
     let db = Db::open_in_memory().expect("db");
-    let outcome = crate::import::run_with_year(&db, path, None, true, 2026).expect("run");
+    let outcome = crate::import::run_with_year(&db, 1, path, None, true, 2026).expect("run");
     println!(
         "导入 {} 行，跳过 {}，提醒 {}",
         outcome.rows, outcome.skipped, outcome.flagged
@@ -221,7 +221,7 @@ fn benchmark_all_imports() {
 
         let db = Db::open_in_memory().expect("db");
         let t2 = Instant::now();
-        let out = crate::import::run(&db, path_flow, None, true).expect("run");
+        let out = crate::import::run(&db, 1, path_flow, None, true).expect("run");
         let t_run = t2.elapsed();
         println!("run 写入台账耗时: {:?} (导入 {} 行)", t_run, out.rows);
 
@@ -256,7 +256,7 @@ fn benchmark_all_imports() {
 
         let db = Db::open_in_memory().expect("db");
         let t2 = Instant::now();
-        let out = crate::import::run_with_year(&db, path_pivot, None, true, 2026).expect("run");
+        let out = crate::import::run_with_year(&db, 1, path_pivot, None, true, 2026).expect("run");
         let t_run = t2.elapsed();
         println!("run 写入台账耗时: {:?} (导入 {} 行)", t_run, out.rows);
     }

@@ -50,7 +50,14 @@ interface DraftPlan {
 }
 
 /** 导入向导：选文件 → 认表头 → 预览校验 → 落库。 */
-export function ImportScreen({ onImported }: { onImported: () => void }) {
+export function ImportScreen({
+  warehouseName,
+  onImported,
+}: {
+  /** 当前仓库：导入的行只会落到这个仓 */
+  warehouseName: string | null;
+  onImported: () => void;
+}) {
   const [step, setStep] = useState<Step>("pick");
   const [report, setReport] = useState<WorkbookReport | null>(null);
   const [plans, setPlans] = useState<DraftPlan[]>([]);
@@ -205,7 +212,11 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
     <>
       <PageHeader
         title="导入"
-        description="从 Excel 的入库明细 / 出库明细表读数据。原文件不改，只把行落进本机台账。"
+        description={
+          warehouseName
+            ? `导入到：${warehouseName} · 原文件不改，只把行落进本仓台账`
+            : "从 Excel 的入库明细 / 出库明细表读数据。原文件不改，只把行落进本机台账。"
+        }
         actions={
           step === "pick" ? (
             <Button size="small" leadingIcon={RiFolderOpenLine} onClick={openFile} disabled={busy || !isTauri}>

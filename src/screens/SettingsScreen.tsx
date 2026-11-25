@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { RiComputerLine, RiDatabase2Line, RiDeleteBinLine, RiPrinterLine } from "@remixicon/react";
 import { autostartSet, autostartStatus, clearData, isTauri } from "../lib/api";
-import type { BootstrapInfo } from "../lib/types";
+import type { BootstrapInfo, Warehouse } from "../lib/types";
 import { count } from "../lib/format";
 import {
   PRINT_ROWS_DEFAULT,
@@ -20,7 +20,19 @@ import { PageHeader } from "../components/AppShell";
 /**
  * 设置页：打印设置 + 本机数据管理（清空数据）。
  */
-export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null; onChanged: () => void }) {
+export function SettingsScreen({
+  boot,
+  warehouse,
+  warehouses,
+  onChanged,
+}: {
+  boot: BootstrapInfo | null;
+  /** 当前仓库：清空只清这个仓的业务数据 */
+  warehouse: Warehouse | null;
+  /** 全部仓库，用来展示各仓数据量 */
+  warehouses: Warehouse[];
+  onChanged: () => void;
+}) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [includeMaster, setIncludeMaster] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -37,7 +49,7 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
       if (includeMaster) {
         parts.push(`物料 ${count(out.items)} 条`, `供应商 ${count(out.suppliers)} 家`, `字典 ${count(out.dict)} 项`);
       }
-      toast("数据已清空", {
+      toast(`已清空«${warehouse?.name ?? "当前仓库"}»`, {
         description: parts.join(" · "),
         status: "success",
         duration: 6000,
@@ -68,17 +80,46 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
             </div>
 
             <dl className="flex flex-col gap-2 text-body-2-regular">
-              <Row label="台账明细" value={`${count(boot?.rowCount ?? 0)} 行`} />
-              <Row label="导入批次" value={`${count(boot?.importCount ?? 0)} 批`} />
+              <Row label="当前仓库" value={warehouse?.name ?? "—"} />
+              <Row
+                label="打印抬头"
+                value={
+                  warehouse?.companyName ? warehouse.companyName.split("\n").join(" / ") : "未设置（纸面不打公司名）"
+                }
+              />
+              <Row label="本仓台账" value={`${count(warehouse?.ledgerRows ?? boot?.rowCount ?? 0)} 行`} />
+              <Row
+                label="本仓单据"
+                value={`${count(warehouse?.vouchers ?? 0)} 张 · 导入 ${count(warehouse?.imports ?? 0)} 批`}
+              />
               <Row label="数据库结构" value={`v${boot?.schemaVersion ?? 0} · 程序 v${boot?.appVersion ?? "—"}`} />
               <Row label="数据库文件" value={boot?.dbPath ?? "—"} />
             </dl>
 
+            {warehouses.length > 1 ? (
+              <div className="rounded-xl border border-separator-border bg-background-secondary-default px-3.5 py-2.5">
+                <p className="text-caption-1-semibold text-text-tertiary">各仓数据量</p>
+                <ul className="mt-1 flex flex-col gap-0.5 text-caption-1-regular text-text-secondary">
+                  {warehouses.map((item) => (
+                    <li key={item.id} className="flex items-baseline justify-between gap-2">
+                      <span className="truncate">
+                        {item.name}
+                        {item.id === warehouse?.id ? "（当前）" : ""}
+                      </span>
+                      <span className="shrink-0 font-mono tabular-nums">
+                        {count(item.ledgerRows)} 行 / {count(item.vouchers)} 单
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             <div className="mt-auto flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-500/25 bg-red-500/6 px-3.5 py-3">
               <div className="min-w-0 flex-1">
-                <p className="text-body-2-medium text-text-primary">清空数据</p>
+                <p className="text-body-2-medium text-text-primary">清空当前仓库</p>
                 <p className="mt-0.5 text-caption-1-regular text-text-tertiary">
-                  清空本机台账明细、开单与导入记录，可选一并清理基础资料。
+                  只清 «{warehouse?.name ?? "当前仓库"}» 的台账、开单与导入记录，其他仓库不受影响；基础资料全库通用。
                 </p>
               </div>
               <Button
@@ -91,7 +132,7 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
                   setConfirmOpen(true);
                 }}
               >
-                清空数据
+                清空当前仓库
               </Button>
             </div>
           </section>
@@ -109,17 +150,17 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
           {({ close }) => (
             <>
               <ModalHeader
-                title="确认清空本机数据？"
-                description="清空后无法恢复，原 Excel 文件不受影响，之后可随时重新导入。"
+                title={`确认清空«${warehouse?.name ?? "当前仓库"}»？`}
+                description="只清这个仓库的业务数据，其他仓库保持原样；清空后无法恢复，原 Excel 文件不受影响，可随时重新导入。"
               />
               <ModalBody>
                 <div className="flex flex-col gap-3">
                   <div className="rounded-xl border border-separator-border bg-background-secondary-default px-3.5 py-2.5 text-body-2-regular text-text-secondary">
                     <p className="font-medium text-text-primary">默认将清空：</p>
                     <ul className="mt-1 list-inside list-disc text-caption-1-regular text-text-tertiary">
-                      <li>全部出入库台账明细（共 {count(boot?.rowCount ?? 0)} 行）</li>
-                      <li>本机新开的入库单 / 出库单</li>
-                      <li>Excel 导入历史批次（共 {count(boot?.importCount ?? 0)} 批）</li>
+                      <li>本仓出入库台账明细（共 {count(warehouse?.ledgerRows ?? boot?.rowCount ?? 0)} 行）</li>
+                      <li>本仓新开的入库单 / 出库单（共 {count(warehouse?.vouchers ?? 0)} 张）</li>
+                      <li>本仓 Excel 导入历史批次（共 {count(warehouse?.imports ?? boot?.importCount ?? 0)} 批）</li>
                     </ul>
                   </div>
 
@@ -135,6 +176,7 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
                       <span className="text-body-2-medium text-text-primary">同时清空基础资料</span>
                       <span className="text-caption-1-regular text-text-tertiary">
                         一并删除所有物料主数据、加工件图号、供应商名录及常用词典（单位/类别/部门/采购人）。
+                        基础资料是全库通用的，清掉之后所有仓库都会一起没有。
                       </span>
                     </span>
                   </label>
@@ -157,9 +199,9 @@ export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null
                       正在清空…
                     </span>
                   ) : includeMaster ? (
-                    "确认清空全部数据"
+                    "确认清空本仓与基础资料"
                   ) : (
-                    "确认清空台账与开单"
+                    "确认清空本仓"
                   )}
                 </Button>
               </ModalFooter>
