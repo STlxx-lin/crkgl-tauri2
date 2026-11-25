@@ -24,8 +24,8 @@ mod win {
     use std::path::Path;
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_READ, KEY_SET_VALUE, REG_SZ,
+        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
     };
 
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -34,17 +34,27 @@ mod win {
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    /// 打开 Run 键；`write` 为真时要求可写。
+    /// 打开 Run 键；`write` 为真时缺失就建出来。
+    ///
+    /// 正常安装的 Windows 一定有这个键，但清理工具会删它，极简的用户配置文件里
+    /// 也可能没有（CI 的 runner 账户上就遇到过）。所以先按最小权限
+    /// `KEY_SET_VALUE` 打开，失败再降级到 `RegCreateKeyW` 补一条，免得开关只报
+    /// 「打不开开机启动项」却无计可施。只读时不建键：看一眼状态不该改注册表。
     fn open_run_key(write: bool) -> Option<HKEY> {
         let sub = wide(RUN_KEY);
         let mut key: HKEY = std::ptr::null_mut();
         let access = if write { KEY_SET_VALUE } else { KEY_READ };
         let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, access, &mut key) };
         if rc == ERROR_SUCCESS {
-            Some(key)
-        } else {
-            None
+            return Some(key);
         }
+        if write {
+            let rc = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, sub.as_ptr(), &mut key) };
+            if rc == ERROR_SUCCESS {
+                return Some(key);
+            }
+        }
+        None
     }
 
     /// 读回 Run 项里我们自己写的那条值。
