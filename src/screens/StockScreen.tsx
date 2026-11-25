@@ -9,6 +9,7 @@ import {
 import { countStock, fetchStockCheck, fetchStockReport, isTauri, updateRow } from "../lib/api";
 import type { StockCheckSummary, StockIssue, StockRow } from "../lib/types";
 import { count, date, qty } from "../lib/format";
+import { exportFileName } from "../lib/exportCsv";
 import { Button } from "@/components/base/buttons/button";
 import { ItemPicker } from "../components/ItemPicker";
 import { SearchField } from "@/components/base/search-field/search-field";
@@ -165,7 +166,7 @@ function StockTable() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `库存结存_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = exportFileName("库存结存");
     a.click();
     URL.revokeObjectURL(url);
     toast("已导出当前页", { description: `${count(rows.length)} 行`, status: "success" });
