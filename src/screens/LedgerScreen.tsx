@@ -84,10 +84,12 @@ function rangeFor(preset: string): { from: string | null; to: string | null } {
 
 interface LedgerScreenProps {
   boot: BootstrapInfo | null;
+  /** 当前仓库名：导出文件名与页头用，避免两个仓的 CSV 混在一起 */
+  warehouseName?: string | null;
   onChanged: () => void;
 }
 
-export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
+export function LedgerScreen({ boot, warehouseName, onChanged }: LedgerScreenProps) {
   const [filter, setFilter] = useState<LedgerFilter>({ sort: "date", desc: true });
   const [keyword, setKeyword] = useState("");
   const [kind, setKind] = useState("all");
@@ -283,7 +285,11 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     }
     setBusy(true);
     try {
-      await saveCsvFile("导出台账", exportFileName("仓库出入库明细"), (path) => exportLedger(filter, path));
+      await saveCsvFile(
+        "导出台账",
+        exportFileName(warehouseName ? `仓库出入库明细_${warehouseName}` : "仓库出入库明细"),
+        (path) => exportLedger(filter, path),
+      );
     } finally {
       setBusy(false);
     }
@@ -356,7 +362,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
         title="台账"
         description={
           boot
-            ? `共 ${count(boot.rowCount)} 行 · 入库 ${count(boot.inRows)} · 出库 ${count(boot.outRows)}`
+            ? `${warehouseName ? `${warehouseName} · ` : ""}共 ${count(boot.rowCount)} 行 · 入库 ${count(boot.inRows)} · 出库 ${count(boot.outRows)}`
             : "入库与出库明细"
         }
         actions={

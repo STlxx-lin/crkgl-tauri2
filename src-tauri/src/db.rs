@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-static MIGRATIONS: [(&str, &str); 13] = [
+static MIGRATIONS: [(&str, &str); 15] = [
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_voucher", include_str!("../migrations/002_voucher.sql")),
     ("003_master_data", include_str!("../migrations/003_master_data.sql")),
@@ -29,6 +29,11 @@ static MIGRATIONS: [(&str, &str); 13] = [
     ("011_import_perf", include_str!("../migrations/011_import_perf.sql")),
     ("012_item_seq", include_str!("../migrations/012_item_seq.sql")),
     ("013_ledger_perf", include_str!("../migrations/013_ledger_perf.sql")),
+    ("014_warehouse", include_str!("../migrations/014_warehouse.sql")),
+    (
+        "015_warehouse_company",
+        include_str!("../migrations/015_warehouse_company.sql"),
+    ),
 ];
 
 pub struct Db {
@@ -187,13 +192,29 @@ fn structure_already_applied(conn: &Connection, index: usize) -> rusqlite::Resul
         7 => has("items", "location"),
         // 009 字典
         8 => object_exists(conn, "table", "dict"),
-        // 010-013 索引
-        9 => object_exists(conn, "index", "ix_ledger_stock_perf"),
-        10 => object_exists(conn, "index", "ix_ledger_import_id"),
+        // 010-013 索引（014 把其中几条换成了仓库前缀版，任一在即视作已生效）
+        9 => {
+            Ok(object_exists(conn, "index", "ix_ledger_stock_perf")?
+                || object_exists(conn, "index", "ix_ledger_wh_item")?)
+        }
+        10 => Ok(object_exists(conn, "index", "ix_ledger_import_id")?
+            || object_exists(conn, "index", "ix_ledger_wh_import")?),
         11 => Ok(has("items", "seq")? && object_exists(conn, "trigger", "trg_items_seq_ai")?),
         12 => {
-            Ok(object_exists(conn, "index", "ix_ledger_date_id")? && object_exists(conn, "index", "ix_ledger_buyer")?)
+            // 014 会把这两条旧索引换成仓库前缀版；两者任一在都算 013 已生效，
+            // 免得版本号回退时又把旧索引建回来
+            Ok((object_exists(conn, "index", "ix_ledger_date_id")?
+                || object_exists(conn, "index", "ix_ledger_wh_date_id")?)
+                && (object_exists(conn, "index", "ix_ledger_buyer")?
+                    || object_exists(conn, "index", "ix_ledger_wh_buyer")?))
         }
+        // 014 多仓库：仓库表在、三张业务表都有 warehouse_id 才算完整
+        13 => Ok(object_exists(conn, "table", "warehouses")?
+            && has("ledger", "warehouse_id")?
+            && has("vouchers", "warehouse_id")?
+            && has("imports", "warehouse_id")?),
+        // 015 每仓打印抬头
+        14 => has("warehouses", "company_name"),
         _ => Ok(false),
     }
 }
@@ -409,16 +430,23 @@ pub struct ClearOutcome {
     pub dict: usize,
 }
 
-/// 清空业务数据。
-/// - 默认清空 `ledger`、`vouchers`、`imports`；
-/// - `include_master` 为真时一并清空 `items`、`suppliers`、`dict`；
+/// 清空业务数据（按仓库）。
+/// - 默认清空当前仓库的 `ledger`、`vouchers`、`imports`；
+/// - `include_master` 为真时一并清空 `items`、`suppliers`、`dict`（这三张是**全库通用**的，
+///   清的是所有仓库共用的档案，不是单个仓库的数据）；
 /// - 写入 `settings.manual_clear = "1"`，防止下次启动自动回灌示例工作簿。
-pub fn clear_data(db: &Db, include_master: bool) -> DbResult<ClearOutcome> {
+pub fn clear_data(db: &Db, include_master: bool, warehouse_id: i64) -> DbResult<ClearOutcome> {
     db.with(|c| {
         let tx = c.unchecked_transaction().map_err(DbError::from)?;
-        let ledger_rows = tx.execute("DELETE FROM ledger", []).map_err(DbError::from)?;
-        let vouchers = tx.execute("DELETE FROM vouchers", []).map_err(DbError::from)?;
-        let imports = tx.execute("DELETE FROM imports", []).map_err(DbError::from)?;
+        let ledger_rows = tx
+            .execute("DELETE FROM ledger WHERE warehouse_id = ?1", [warehouse_id])
+            .map_err(DbError::from)?;
+        let vouchers = tx
+            .execute("DELETE FROM vouchers WHERE warehouse_id = ?1", [warehouse_id])
+            .map_err(DbError::from)?;
+        let imports = tx
+            .execute("DELETE FROM imports WHERE warehouse_id = ?1", [warehouse_id])
+            .map_err(DbError::from)?;
         let (items, suppliers, dict) = if include_master {
             let i = tx.execute("DELETE FROM items", []).map_err(DbError::from)?;
             let s = tx.execute("DELETE FROM suppliers", []).map_err(DbError::from)?;
@@ -464,12 +492,12 @@ mod tests {
         })
         .unwrap();
 
-        let out1 = clear_data(&db, false).unwrap();
+        let out1 = clear_data(&db, false, 1).unwrap();
         assert_eq!(out1.ledger_rows, 1);
         assert_eq!(out1.items, 0);
         assert_eq!(get_setting(&db, "manual_clear").as_deref(), Some("1"));
 
-        let out2 = clear_data(&db, true).unwrap();
+        let out2 = clear_data(&db, true, 1).unwrap();
         assert_eq!(out2.items, 1);
     }
 

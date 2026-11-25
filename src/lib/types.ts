@@ -13,6 +13,8 @@ export interface LedgerFilter {
   flagged?: boolean;
   sort?: "date" | "amount" | "qty" | "name" | null;
   desc?: boolean;
+  /** 仓库：桌面端由命令层注入，前端一般不用传 */
+  warehouseId?: number | null;
 }
 
 export interface LedgerRow {
@@ -293,6 +295,41 @@ export interface BootstrapInfo {
   startupImport: ImportOutcome | null;
   lastError: string | null;
   sampleWorkbooks: string[];
+  /** 仓库清单，含每个仓的数据量 */
+  warehouses: Warehouse[];
+  activeWarehouseId: number;
+  activeWarehouseName: string | null;
+}
+
+/** 仓库档案。业务数据按仓隔离，基础资料全库通用。 */
+export interface Warehouse {
+  id: number;
+  name: string;
+  remark: string | null;
+  /** 打印抬头（公司名，可带地址/电话，用换行分隔）；空表示纸面不打这一行 */
+  companyName: string | null;
+  active: boolean;
+  sortNo: number;
+  /** 该仓台账行数 */
+  ledgerRows: number;
+  vouchers: number;
+  imports: number;
+  createdAt: string;
+}
+
+export interface WarehouseInput {
+  name: string;
+  remark?: string | null;
+  /** 不传 = 不改；传空串 = 清空 */
+  companyName?: string | null;
+  active?: boolean | null;
+  sortNo?: number | null;
+}
+
+export interface WarehouseDeleteOutcome {
+  ledgerRows: number;
+  vouchers: number;
+  imports: number;
 }
 
 export interface ExportResult {

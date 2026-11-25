@@ -40,6 +40,8 @@ interface AppShellProps {
   /** 只读站里只给能看的页 */
   nav?: { key: PageKey; label: string }[];
   remote: boolean;
+  /** 侧栏标题下方的一块内容（仓库切换器） */
+  top?: ReactNode;
   footer?: ReactNode;
   children: ReactNode;
 }
@@ -48,7 +50,7 @@ interface AppShellProps {
  * 左侧导航 + 内容区。导航是应用里密度最高的地方：
  * 行高 32、图标一列、标签一行，选中态是一层浅表面加一条强调线，不做发光。
  */
-export function AppShell({ page, onPage, nav, remote, footer, children }: AppShellProps) {
+export function AppShell({ page, onPage, nav, remote, top, footer, children }: AppShellProps) {
   const items = nav
     ? ITEMS.filter((item) => nav.some((entry) => entry.key === item.key))
     : ITEMS;
@@ -65,6 +67,8 @@ export function AppShell({ page, onPage, nav, remote, footer, children }: AppShe
             </p>
           </div>
         </div>
+
+        {top ? <div className="mt-3">{top}</div> : null}
 
         <nav className="mt-4 flex flex-col gap-0.5 px-2" aria-label="主导航">
           {items.map((item) => {

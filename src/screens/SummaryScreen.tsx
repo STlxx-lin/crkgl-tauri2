@@ -5,6 +5,7 @@ import type { GroupRow, LedgerFilter, SummaryBundle, TopItem } from "../lib/type
 import { count, delta, money, moneyCompact, qty } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { Select, SelectItem } from "@/components/base/select/select";
+import { Switch } from "@/components/base/switch/switch";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { toast } from "@/components/base/toast/toast";
 import { EmptyState } from "../components/EmptyState";
@@ -44,6 +45,8 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
   const [rangeId, setRangeId] = useState<string>(boot?.minDate && boot.maxDate ? "all" : "thisYear");
   const [data, setData] = useState<SummaryBundle | null>(null);
   const [loading, setLoading] = useState(false);
+  // 合并看全部仓库：只有汇总页支持，台账/库存/导出都严格单仓
+  const [mergeAll, setMergeAll] = useState(false);
   const seq = useRef(0);
 
   const filter = useMemo<LedgerFilter>(() => {
@@ -55,14 +58,14 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
     const ticket = ++seq.current;
     setLoading(true);
     try {
-      const bundle = await fetchSummary(filter);
+      const bundle = await fetchSummary(filter, mergeAll);
       if (ticket === seq.current) setData(bundle);
     } catch (err) {
       toast("汇总读取失败", { description: String(err), status: "error" });
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [filter]);
+  }, [filter, mergeAll]);
 
   useEffect(() => {
     load();
@@ -112,9 +115,21 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
     <>
       <PageHeader
         title="汇总"
-        description="按筛选期统计入库与出库；环比对比的是等长的上一期"
+        description={
+          mergeAll
+            ? "合并显示全部仓库，只用于看总量；台账、库存、导出仍然按单个仓库"
+            : "按筛选期统计入库与出库；环比对比的是等长的上一期"
+        }
         actions={
           <>
+            <Switch
+              size="sm"
+              isSelected={mergeAll}
+              onChange={setMergeAll}
+              aria-label="合并全部仓库（只用于查看，不可导出）"
+            >
+              全部仓库
+            </Switch>
             <Select
               aria-label="统计区间"
               size="sm"

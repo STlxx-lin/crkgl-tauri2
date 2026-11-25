@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RiArrowDownSFill, RiArrowUpSFill, RiDatabase2Line, RiRefreshLine, RiServerLine } from "@remixicon/react";
 import { cx } from "@/utils/cx";
-import { bootstrap, fetchFacets, isTauri, readonly } from "./lib/api";
-import type { BootstrapInfo } from "./lib/types";
+import { bootstrap, fetchFacets, fetchWarehouses, isTauri, listWarehouses, readonly } from "./lib/api";
+import type { BootstrapInfo, Warehouse } from "./lib/types";
 import { count } from "./lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { Toaster, toast } from "@/components/base/toast/toast";
 import { AppShell, type PageKey } from "./components/AppShell";
+import { WarehousePicker, loadRemoteWarehouses, rememberRemoteWarehouse } from "./components/WarehousePicker";
 import { LedgerScreen } from "./screens/LedgerScreen";
 import { VoucherScreen } from "./screens/VoucherScreen";
 import { MasterScreen } from "./screens/MasterScreen";
@@ -31,6 +32,11 @@ export default function App() {
     minDate: null,
     maxDate: null,
   });
+  // 仓库：桌面端从 bootstrap 读，只读站从 /api/warehouses 读并记住自己的选择
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [activeWarehouseId, setActiveWarehouseId] = useState<number>(0);
+  // 切换仓库后加一：给各页面当 key，强制重新挂载重新拉数
+  const [warehouseEpoch, setWarehouseEpoch] = useState(0);
   const loaded = useRef(false);
 
   const load = useCallback(async (silent = false) => {
@@ -43,6 +49,8 @@ export default function App() {
       if (isTauri) {
         const info = await bootstrap();
         setBoot(info);
+        setWarehouses(info.warehouses);
+        setActiveWarehouseId(info.activeWarehouseId);
         setPhase("ready");
         if (info.startupImport) {
           toast("已自动导入示例明细", {
@@ -52,7 +60,10 @@ export default function App() {
         }
       } else {
         // 80 端口只读站：没有 Tauri 桥，只展示台账与汇总
-        const [facets] = await Promise.all([fetchFacets()]);
+        const remote = await loadRemoteWarehouses();
+        setWarehouses(remote.warehouses);
+        setActiveWarehouseId(remote.activeWarehouseId);
+        const [facets] = await Promise.all([fetchFacets(true)]);
         setLedgerRows(facets.inRows + facets.outRows);
         setRangeFacets({ minDate: facets.minDate, maxDate: facets.maxDate });
         setBoot(null);
@@ -76,6 +87,76 @@ export default function App() {
     // 已经在用的时候静默刷新：数据会更新，但页面不重建
     void load(true);
   }, [load]);
+
+  /**
+   * 切仓：桌面端让 Rust 写 settings，只读站只改本地选择。
+   *
+   * 各页面用 `warehouseEpoch` 重挂载；开单页是常驻挂载的（草稿要保住），
+   * 所以单独给它一个 `warehouseId`，草稿按仓存。
+   */
+  const handleWarehouseChanged = useCallback(
+    (id: number) => {
+      // 先把 id 落进 state：开单页的草稿按仓取，晚一步就会先闪一下旧仓
+      setActiveWarehouseId(id);
+      setWarehouseEpoch((n) => n + 1);
+      const name = warehouses.find((w) => w.id === id)?.name;
+      if (name) {
+        toast(`已切到「${name}」`, {
+          description: "开单草稿按仓库分开保存，切回去接着录。",
+          duration: 3500,
+        });
+      }
+      if (!isTauri) {
+        // 只读站：切仓后重新读本仓的候选与行数
+        void (async () => {
+          try {
+            const facets = await fetchFacets(true);
+            setLedgerRows(facets.inRows + facets.outRows);
+            setRangeFacets({ minDate: facets.minDate, maxDate: facets.maxDate });
+          } catch {
+            setLedgerRows(0);
+          }
+          // 仓库列表里的行数也要跟着更新
+          try {
+            const info = await fetchWarehouses();
+            setWarehouses(info.warehouses);
+          } catch {
+            // 忽略：下次刷新会重试
+          }
+        })();
+        return;
+      }
+      refreshBoot();
+    },
+    [refreshBoot, warehouses],
+  );
+
+  // 仓库档案变更（新建/改名/停用/删除）：只重读仓库清单，不动当前页面
+  const refreshWarehouses = useCallback(async () => {
+    try {
+      if (isTauri) {
+        const list = await listWarehouses();
+        setWarehouses(list);
+        // 删掉的正好是当前仓库：后端已回落到另一个仓，这里跟着换过去
+        if (list.length > 0 && !list.some((w) => w.id === activeWarehouseId)) {
+          setWarehouseEpoch((n) => n + 1);
+          refreshBoot();
+        }
+      } else {
+        const info = await fetchWarehouses();
+        setWarehouses(info.warehouses);
+        // 自己在浏览器里选的仓被桌面端删了：跟回桌面端当前仓，别继续发无效 id
+        if (info.warehouses.length > 0 && !info.warehouses.some((w) => w.id === activeWarehouseId)) {
+          const fallback = info.activeWarehouseId;
+          rememberRemoteWarehouse(fallback);
+          setActiveWarehouseId(fallback);
+          setWarehouseEpoch((n) => n + 1);
+        }
+      }
+    } catch {
+      // 忽略：下次 bootstrap 会带回最新清单
+    }
+  }, [activeWarehouseId, refreshBoot]);
 
   const nav = useMemo(() => {
     if (readonly) {
@@ -117,6 +198,7 @@ export default function App() {
   const minDate = boot?.minDate ?? rangeFacets.minDate;
   const maxDate = boot?.maxDate ?? rangeFacets.maxDate;
   const dateRange = minDate && maxDate ? `${minDate} → ${maxDate}` : "—";
+  const activeWarehouse = warehouses.find((w) => w.id === activeWarehouseId) ?? null;
 
   return (
     <>
@@ -124,7 +206,17 @@ export default function App() {
         page={page}
         onPage={setPage}
         nav={nav}
-        remote={readonly}
+        remote={!isTauri}
+        top={
+          warehouses.length > 0 && activeWarehouseId > 0 ? (
+            <WarehousePicker
+              warehouses={warehouses}
+              activeId={activeWarehouseId}
+              onSwitch={handleWarehouseChanged}
+              onChanged={refreshWarehouses}
+            />
+          ) : null
+        }
         footer={
           isTauri ? (
             <div className="flex flex-col gap-3">
@@ -164,24 +256,42 @@ export default function App() {
         {/* 开单工作台保持常驻挂载：切换到其他页面查资料时，正在录入的内容、明细行和光标完整保留 */}
         {isTauri ? (
           <div className={cx("flex min-h-0 flex-1 flex-col", page !== "voucher" && "hidden")}>
-            <VoucherScreen active={page === "voucher"} onChanged={refreshBoot} />
+            <VoucherScreen
+              active={page === "voucher"}
+              warehouseId={activeWarehouseId}
+              warehouseName={activeWarehouse?.name ?? null}
+              companyName={activeWarehouse?.companyName ?? null}
+              onChanged={refreshBoot}
+            />
           </div>
         ) : null}
 
+        {/* 其余页面用 key 强制重挂载：切仓后所有分页、筛选、缓存都从新仓重新开始 */}
         {page === "ledger" ? (
-          <LedgerScreen boot={boot} onChanged={refreshBoot} />
+          <LedgerScreen
+            key={warehouseEpoch}
+            boot={boot}
+            warehouseName={activeWarehouse?.name ?? null}
+            onChanged={refreshBoot}
+          />
         ) : page === "master" ? (
           <MasterScreen onChanged={refreshBoot} />
         ) : page === "summary" ? (
-          <SummaryScreen boot={boot} />
+          <SummaryScreen key={warehouseEpoch} boot={boot} />
         ) : page === "stock" ? (
-          <StockScreen onChanged={refreshBoot} />
+          <StockScreen key={warehouseEpoch} warehouseName={activeWarehouse?.name ?? null} onChanged={refreshBoot} />
         ) : page === "import" ? (
-          <ImportScreen onImported={refreshBoot} />
+          <ImportScreen key={warehouseEpoch} warehouseName={activeWarehouse?.name ?? null} onImported={refreshBoot} />
         ) : page === "settings" ? (
-          <SettingsScreen boot={boot} onChanged={refreshBoot} />
+          <SettingsScreen
+            key={warehouseEpoch}
+            boot={boot}
+            warehouse={activeWarehouse}
+            warehouses={warehouses}
+            onChanged={refreshBoot}
+          />
         ) : page === "remote" ? (
-          <RemoteScreen boot={boot} onChanged={refreshBoot} />
+          <RemoteScreen key={warehouseEpoch} boot={boot} onChanged={refreshBoot} />
         ) : null}
       </AppShell>
       <Toaster />
