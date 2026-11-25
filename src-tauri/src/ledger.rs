@@ -96,6 +96,24 @@ fn text(v: &Option<String>) -> Option<&str> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// 把用户输入包装成 `LIKE` 模式，并转义 `%` / `_` / `\`。
+///
+/// 直接 `format!("%{}%")` 时，输入一个 `%` 会匹配全表、`_` 变成单字符通配，
+/// 而且没法搜索字面量 `%`（物料名里确实会出现）。配套 SQL 必须写
+/// `LIKE ? ESCAPE '\'`。
+pub(crate) fn like_pattern(keyword: &str) -> String {
+    let mut out = String::with_capacity(keyword.len() + 2);
+    out.push('%');
+    for ch in keyword.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
+}
+
 /// 把筛选编译成 SQL 片段 + 参数。汇总、导出、计数都走这里。
 pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
     let mut clauses: Vec<&str> = vec!["1 = 1"];
@@ -129,9 +147,11 @@ pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
     }
     if let Some(keyword) = text(&filter.keyword) {
         clauses.push(
-            "(doc_no LIKE ? OR delivery_no LIKE ? OR item_code LIKE ? OR item_name LIKE ? OR partner LIKE ? OR remark LIKE ? OR owner LIKE ?)",
+            "(doc_no LIKE ? ESCAPE '\\' OR delivery_no LIKE ? ESCAPE '\\' OR item_code LIKE ? ESCAPE '\\'
+              OR item_name LIKE ? ESCAPE '\\' OR partner LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\'
+              OR owner LIKE ? ESCAPE '\\')",
         );
-        let like = format!("%{}%", keyword);
+        let like = like_pattern(keyword);
         for _ in 0..7 {
             params.push(Value::Text(like.clone()));
         }
@@ -164,6 +184,10 @@ fn order_by(sort: &Option<String>, desc: bool) -> String {
 }
 
 /// `2025-1-5` / `2025/1/5` → `2025-01-05`，非法值原样返回（SQL 里自然筛不到）。
+///
+/// 除了月份 1..=12、日 1..=31 的粗校验，还要真的存在这一天：
+/// `2025-02-31` / `2025-04-31` 以前能通过，筛选时静默返回空集，
+/// 用户会以为「那天没数据」。这里用 NaiveDate 判闰年与每月天数。
 pub fn normalize_date(raw: &str) -> String {
     let parts: Vec<&str> = raw
         .split(['-', '/', '.'])
@@ -176,8 +200,8 @@ pub fn normalize_date(raw: &str) -> String {
             parts[1].parse::<u32>(),
             parts[2].parse::<u32>(),
         ) {
-            if (1..=12).contains(&m) && (1..=31).contains(&d) {
-                return format!("{y:04}-{m:02}-{d:02}");
+            if let Some(date) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+                return date.format("%Y-%m-%d").to_string();
             }
         }
     }
@@ -649,18 +673,42 @@ pub fn trim_float(v: f64) -> String {
 /// 一行 CSV：字段里有逗号/引号/换行时用引号包起来并把引号翻倍。
 ///
 /// 台账导出与基础资料导出共用，避免两套转义规则写岔。
+///
+/// 另外要防公式注入：备注、物料名称、供应商名都来自别人给的 Excel，
+/// 以 `= + - @` 或制表符/回车开头的字段在 Excel 里会被当成公式解析
+/// （`=cmd|'/c calc'!A1` 这类）。做法是前置一个单引号把它钉成文本。
+/// 纯数字不处理，否则负数金额会多出一个引号。
 pub(crate) fn csv_row(fields: &[String]) -> String {
     let escaped: Vec<String> = fields
         .iter()
-        .map(|f| {
-            if f.contains([',', '"', '\n', '\r']) {
-                format!("\"{}\"", f.replace('"', "\"\""))
-            } else {
-                f.clone()
-            }
-        })
+        .map(|f| csv_cell(f))
         .collect();
     escaped.join(",") + "\n"
+}
+
+/// 单个 CSV 单元格：公式注入防护 + 引号转义。
+fn csv_cell(field: &str) -> String {
+    // `-5` / `-0.25` 这类纯数字是正常的负数，不能被当成公式
+    let numeric = field
+        .strip_prefix('-')
+        .map(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .unwrap_or(false);
+    let dangerous = !numeric
+        && field
+            .chars()
+            .next()
+            .map(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+            .unwrap_or(false);
+    let body = if dangerous {
+        format!("'{field}")
+    } else {
+        field.to_string()
+    };
+    if body.contains([',', '"', '\n', '\r']) || body.starts_with('\'') {
+        format!("\"{}\"", body.replace('"', "\"\""))
+    } else {
+        body
+    }
 }
 
 pub fn count(db: &Db) -> DbResult<i64> {
@@ -713,6 +761,20 @@ mod tests {
         assert_eq!(normalize_date("2025.12.31"), "2025-12-31");
         assert_eq!(normalize_date("2025/13/1"), "2025/13/1");
         assert_eq!(normalize_date("上周"), "上周");
+        // 不存在的日子不能在筛选时静默返回空集
+        assert_eq!(normalize_date("2025-02-31"), "2025-02-31");
+        assert_eq!(normalize_date("2025-04-31"), "2025-04-31");
+        // 闰年 2 月 29 是合法的
+        assert_eq!(normalize_date("2024-2-29"), "2024-02-29");
+        assert_eq!(normalize_date("2023-2-29"), "2023-2-29");
+    }
+
+    #[test]
+    fn keyword_like_escapes_wildcards() {
+        assert_eq!(like_pattern("轴承"), "%轴承%");
+        assert_eq!(like_pattern("100%"), "%100\\%%");
+        assert_eq!(like_pattern("a_b"), "%a\\_b%");
+        assert_eq!(like_pattern("c\\d"), "%c\\\\d%");
     }
 
     #[test]
@@ -1017,6 +1079,26 @@ mod tests {
         assert!(csv.starts_with('\u{feff}'));
         assert!(csv.contains("\"a,b\""));
         assert!(csv.contains("15.00"));
+    }
+
+    #[test]
+    fn csv_escapes_formula_injection() {
+        // 导入来的备注可能以公式开头，Excel 打开导出结果时会执行
+        let row = csv_row(&[
+            "=1+1".into(),
+            "@SUM(A1)".into(),
+            "+86".into(),
+            "-5".into(),
+            "-0.25".into(),
+            "普通文本".into(),
+        ]);
+        assert!(row.contains("\"'=1+1\""), "{row}");
+        assert!(row.contains("\"'@SUM(A1)\""), "{row}");
+        assert!(row.contains("\"'+86\""), "{row}");
+        // 纯负数不是公式，保持原样
+        assert!(row.contains(",-5,"), "{row}");
+        assert!(row.contains(",-0.25,"), "{row}");
+        assert!(row.ends_with("普通文本\n"));
     }
 
 #[test]
