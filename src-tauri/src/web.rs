@@ -563,12 +563,37 @@ async fn detail(State(state): State<WebState>, Query(query): Query<IdQuery>) -> 
     }
 }
 
+/// 导出文件的 `Content-Disposition`：ASCII 兜底名 + RFC 5987 中文名。
+///
+/// 中文不能直接进 header（`HeaderValue` 只接受可见 ASCII），所以给一个
+/// `ledger_20261125.csv` 兜底，再补 `filename*=UTF-8''...` 让浏览器用中文名。
+/// 日期取本地时间而不是 UTC，和桌面端 `exportFileName()` 的口径保持一致。
+fn export_disposition() -> HeaderValue {
+    let stamp = chrono::Local::now().format("%Y%m%d");
+    let ascii = format!("ledger_{stamp}.csv");
+    let utf8 = percent_encode(&format!("仓库出入库明细_{stamp}.csv"));
+    HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{utf8}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"ledger.csv\""))
+}
+
+/// RFC 3986 非保留字符原样保留，其余按 UTF-8 字节百分号编码。
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 async fn export_csv(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
     match ledger::export_csv_from(&state.db, &query.filter(), EXPORT_ROW_LIMIT) {
         Ok((csv, _rows)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
-            .header(header::CONTENT_DISPOSITION, "attachment; filename=\"ledger.csv\"")
+            .header(header::CONTENT_DISPOSITION, export_disposition())
             .body(Body::from(csv))
             .unwrap_or_else(|_| server_error("导出失败".into())),
         Err(err) => server_error(err),
@@ -1128,5 +1153,28 @@ mod tests {
         assert!(resolve_static_path(&root, "/c:\\Windows\\win.ini").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn export_disposition_has_ascii_fallback_and_utf8_name() {
+        let value = export_disposition();
+        let text = value.to_str().unwrap();
+        // 中文不能直接进 header，必须有纯 ASCII 的兜底名
+        assert!(text.starts_with("attachment; filename=\"ledger_"), "{text}");
+        assert!(text.contains(".csv\""), "{text}");
+        // 再补 RFC 5987 的 UTF-8 名，中文按百分号编码
+        assert!(text.contains("filename*=UTF-8''"), "{text}");
+        // 整个头必须是合法的可见 ASCII，否则 HeaderValue 会拒收
+        assert!(text.is_ascii(), "{text}");
+    }
+
+    #[test]
+    fn percent_encode_escapes_non_reserved_only() {
+        assert_eq!(percent_encode("abc-._~123"), "abc-._~123");
+        assert_eq!(percent_encode("a b"), "a%20b");
+        // 中文按 UTF-8 三字节展开
+        assert_eq!(percent_encode("仓"), "%E4%BB%93");
+        // 空格和括号这类在文件名里常见的字符也要转义
+        assert_eq!(percent_encode("a(1)"), "a%281%29");
     }
 }
