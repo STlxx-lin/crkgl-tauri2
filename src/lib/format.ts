@@ -52,10 +52,20 @@ export function date(value: string | null | undefined): string {
   return value.slice(0, 10);
 }
 
-/** 环比：正数带 `+`，没有基期给空。 */
+/**
+ * 环比：正数带 `+`，没有基期给空。
+ *
+ * 基期为 0 时不能一律算「新增 ↑」：净入库由 0 变成负数（退货多于入库）
+ * 方向与事实相反，汇总卡片会显示「新增 ↑」但数字是负的。
+ */
 export function delta(current: number, previous: number): { text: string; direction: "up" | "down" | "flat" } | null {
   if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
-  if (previous === 0) return current === 0 ? null : { text: "新增", direction: "up" };
+  if (previous === 0) {
+    if (current === 0) return null;
+    return current > 0
+      ? { text: "新增", direction: "up" }
+      : { text: "新增（负）", direction: "down" };
+  }
   const ratio = ((current - previous) / Math.abs(previous)) * 100;
   const text = (ratio >= 0 ? "+" : "") + ratio.toFixed(1) + "%";
   return { text, direction: ratio > 0.05 ? "up" : ratio < -0.05 ? "down" : "flat" };
@@ -93,17 +103,29 @@ export function kindLabel(kind: string): string {
   return kind;
 }
 
+/**
+ * 文件大小。进位阈值留半格余量：1023.5 KB 应该显示 1.0 MB，
+ * 而不是 `toFixed(0)` 得到的「1024 KB」——那是个不存在的档位。
+ */
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 * 1024 - 512) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** `2025-10-30 10:22:01` → `10-30 10:22` */
+/** `2025-10-30 10:22:01` → `10-30 10:22`（按本地时区解析，跨时区显示才对得上） */
 export function shortTs(value: string | null | undefined): string {
   if (!value) return "—";
-  const trimmed = value.replace(/-/g, "/");
-  return trimmed.length >= 16 ? trimmed.slice(5, 16) : trimmed;
+  // 后端存的是 `YYYY-MM-DD HH:MM:SS` 本地时间；直接给 Date 解析在部分浏览器
+  // 会被当成 UTC，先换成 ISO 风格再加 T 保证按本地解读。
+  const parsed = new Date(value.replace(" ", "T"));
+  if (Number.isNaN(parsed.getTime())) {
+    // 解析不了就退回原来的字符串切法，至少不显示成 Invalid Date
+    const trimmed = value.replace(/-/g, "/");
+    return trimmed.length >= 16 ? trimmed.slice(5, 16) : trimmed;
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
 }
 
 const priceFormat = new Intl.NumberFormat("zh-CN", {
