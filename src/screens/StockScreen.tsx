@@ -56,13 +56,27 @@ export function StockScreen({ onChanged }: { onChanged?: () => void }) {
               ["stock", "库存结存"],
               ["issues", "数据核对"],
             ] as const
-          ).map(([id, label]) => (
+          ).map(([id, label], index, all) => (
             <button
               key={id}
               role="tab"
               type="button"
+              id={`stock-tab-${id}`}
               aria-selected={tab === id}
+              aria-controls={`stock-panel-${id}`}
+              // roving tabindex：Tab 键进入这一组时只停在当前选中的那个 tab 上，
+              // 组内切换交给左右方向键（WAI-ARIA tabs 模式）。
+              tabIndex={tab === id ? 0 : -1}
               onClick={() => setTab(id)}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                e.preventDefault();
+                const step = e.key === "ArrowRight" ? 1 : -1;
+                const next = all[(index + step + all.length) % all.length][0];
+                setTab(next);
+                // 焦点跟着选中项走，键盘用户可以继续用方向键连续切换
+                document.getElementById(`stock-tab-${next}`)?.focus();
+              }}
               className={
                 "h-8 rounded-lg px-3 text-body-2-medium transition-colors " +
                 (tab === id
@@ -75,7 +89,15 @@ export function StockScreen({ onChanged }: { onChanged?: () => void }) {
           ))}
         </div>
 
-        {tab === "stock" ? <StockTable /> : <IssueList />}
+        {tab === "stock" ? (
+          <div role="tabpanel" id="stock-panel-stock" aria-labelledby="stock-tab-stock" tabIndex={-1}>
+            <StockTable />
+          </div>
+        ) : (
+          <div role="tabpanel" id="stock-panel-issues" aria-labelledby="stock-tab-issues" tabIndex={-1}>
+            <IssueList />
+          </div>
+        )}
       </div>
     </>
   );

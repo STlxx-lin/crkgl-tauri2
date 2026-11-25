@@ -290,7 +290,12 @@ function MonthlyChart({
           ))}
         </div>
 
-        <div className="relative min-w-0 flex-1">
+        <div
+          className="relative min-w-0 flex-1"
+          // 用 group 而不是 img：img 会把子节点当成装饰，里面的柱子就无法聚焦了
+          role="group"
+          aria-label={`近 ${recent.length} 个月${primaryLabel}与${secondaryLabel}金额对比；每根柱子可用 Tab 聚焦查看数值，完整数据见下方「逐月明细」表`}
+        >
           <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 bottom-7 flex flex-col justify-between">
             {ticks.map((_tick, index) => (
               <span key={index} className="h-px w-full bg-separator-border" />
@@ -306,9 +311,17 @@ function MonthlyChart({
               return (
                 <div
                   key={point.month}
-                  className="group relative flex min-w-0 flex-1 items-end justify-center gap-[3px] self-stretch"
+                  className="group relative flex min-w-0 flex-1 items-end justify-center gap-[3px] self-stretch rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-border-focus-ring"
+                  // 触屏与键盘用户没有 hover：聚焦时同样弹出数值块，失焦收起
+                  tabIndex={0}
+                  role="group"
+                  aria-label={`${point.month}：${primaryLabel} ${money(point[primaryKey])}，${secondaryLabel} ${money(
+                    point[secondaryKey],
+                  )}，入库 ${count(point.inRows)} 行 / 出库 ${count(point.outRows)} 行`}
                   onMouseEnter={() => setHover(index)}
                   onMouseLeave={() => setHover(null)}
+                  onFocus={() => setHover(index)}
+                  onBlur={() => setHover(null)}
                 >
                   <div
                     className={"max-w-6 rounded-t-[3px] bg-text-quaternary/45 transition-colors group-hover:bg-text-quaternary/70 " + width}
