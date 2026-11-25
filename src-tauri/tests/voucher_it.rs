@@ -52,7 +52,11 @@ fn voucher(kind: &str, date: &str, lines: Vec<VoucherLineInput>) -> VoucherInput
         partner: Some("万杨五金".into()),
         delivery_no: Some("0023378".into()),
         buyer: Some("严兰兰".into()),
-        owner: if kind == "out" { Some("乾力车间".into()) } else { None },
+        owner: if kind == "out" {
+            Some("乾力车间".into())
+        } else {
+            None
+        },
         receiver: None,
         remark: None,
         lines,
@@ -65,10 +69,17 @@ fn voucher_round_trip_appears_in_ledger() {
     let db = Arc::new(db);
 
     // 1) 开一张入库单
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-01", vec![
-        line("WG-A", "外卡", 10.0, Some(15_000)),
-        line("WG-B", "轴承", 2.0, Some(100_000)),
-    ]))
+    let id = voucher::create_db(
+        &db,
+        &voucher(
+            "in",
+            "2026-09-01",
+            vec![
+                line("WG-A", "外卡", 10.0, Some(15_000)),
+                line("WG-B", "轴承", 2.0, Some(100_000)),
+            ],
+        ),
+    )
     .expect("create voucher");
     assert!(id > 0);
 
@@ -90,10 +101,14 @@ fn voucher_round_trip_appears_in_ledger() {
     // 4) 批量改归属
     let changed = db
         .with(|c| {
-            ledger::bulk_update(c, &ids, &BulkPatch {
-                owner: Some("批量归属".into()),
-                ..Default::default()
-            })
+            ledger::bulk_update(
+                c,
+                &ids,
+                &BulkPatch {
+                    owner: Some("批量归属".into()),
+                    ..Default::default()
+                },
+            )
             .map_err(warehouse_ledger_lib::db::DbError::from)
         })
         .expect("bulk update");
@@ -121,10 +136,12 @@ fn out_voucher_and_in_voucher_number_independently() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let in_id = voucher::create_db(&db, &voucher("in", "2026-09-02", vec![line("A", "x", 1.0, Some(10_000))]))
-        .expect("in");
-    let out_id = voucher::create_db(&db, &voucher("out", "2026-09-02", vec![line("A", "x", 3.0, None)]))
-        .expect("out");
+    let in_id = voucher::create_db(
+        &db,
+        &voucher("in", "2026-09-02", vec![line("A", "x", 1.0, Some(10_000))]),
+    )
+    .expect("in");
+    let out_id = voucher::create_db(&db, &voucher("out", "2026-09-02", vec![line("A", "x", 3.0, None)])).expect("out");
 
     let in_v = voucher::get_db(&db, in_id).expect("get in").expect("in exists");
     let out_v = voucher::get_db(&db, out_id).expect("get out").expect("out exists");
@@ -147,10 +164,14 @@ fn deleting_voucher_removes_its_rows() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-03", vec![
-        line("A", "x", 1.0, Some(10_000)),
-        line("B", "y", 2.0, Some(20_000)),
-    ]))
+    let id = voucher::create_db(
+        &db,
+        &voucher(
+            "in",
+            "2026-09-03",
+            vec![line("A", "x", 1.0, Some(10_000)), line("B", "y", 2.0, Some(20_000))],
+        ),
+    )
     .expect("create");
 
     let removed = voucher::delete_db(&db, id).expect("delete");
@@ -172,8 +193,11 @@ fn item_master_feeds_autofill() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    voucher::create_db(&db, &voucher("in", "2026-09-04", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]))
-        .expect("create");
+    voucher::create_db(
+        &db,
+        &voucher("in", "2026-09-04", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]),
+    )
+    .expect("create");
 
     let items = voucher::item_master_db(&db, Some("WG-A"), 10, true, false).expect("master");
     assert_eq!(items.len(), 1);
@@ -223,11 +247,18 @@ fn each_line_keeps_its_own_delivery_no() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-02", vec![
-        line_with_delivery("WG-D1", 3.0, Some("0023378")),
-        line_with_delivery("WG-D2", 4.0, Some("  0023401 ")),
-        line_with_delivery("WG-D3", 5.0, None),
-    ]))
+    let id = voucher::create_db(
+        &db,
+        &voucher(
+            "in",
+            "2026-09-02",
+            vec![
+                line_with_delivery("WG-D1", 3.0, Some("0023378")),
+                line_with_delivery("WG-D2", 4.0, Some("  0023401 ")),
+                line_with_delivery("WG-D3", 5.0, None),
+            ],
+        ),
+    )
     .expect("create voucher");
 
     let saved = voucher::get_db(&db, id).expect("get").expect("exists");
@@ -246,13 +277,12 @@ fn each_line_keeps_its_own_delivery_no() {
     let page = db
         .with(|c| ledger::page(c, &LedgerFilter::default(), 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
         .expect("page");
-    let mut seen: Vec<String> = page
-        .rows
-        .iter()
-        .filter_map(|r| r.delivery_no.clone())
-        .collect();
+    let mut seen: Vec<String> = page.rows.iter().filter_map(|r| r.delivery_no.clone()).collect();
     seen.sort();
-    assert_eq!(seen, vec!["0023378".to_string(), "0023378".to_string(), "0023401".to_string()]);
+    assert_eq!(
+        seen,
+        vec!["0023378".to_string(), "0023378".to_string(), "0023401".to_string()]
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }

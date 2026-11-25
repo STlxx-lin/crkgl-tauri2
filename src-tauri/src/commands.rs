@@ -13,10 +13,10 @@ use crate::db::{self, Db};
 use crate::dict;
 use crate::import::{self, SheetPlan};
 use crate::ledger::{self, LedgerFilter, LedgerPatch};
-use crate::stock;
-use crate::paths;
-use crate::summary;
 use crate::master;
+use crate::paths;
+use crate::stock;
+use crate::summary;
 use crate::voucher;
 use crate::web::{self, WebHandle, WebStatus};
 
@@ -39,7 +39,6 @@ impl AppState {
         }
     }
 }
-
 
 fn empty_facets() -> crate::ledger::Facets {
     crate::ledger::Facets {
@@ -166,10 +165,20 @@ pub struct UpdateArgs {
     pub patch: serde_json::Value,
 }
 
+/// 解析前端传来的 JSON patch 再写库。
+///
+/// 抽成自由函数是为了能直接测：Tauri 的 `State` 在单测里不好构造，而
+/// 「前端发来一坨 JSON，哪些字段被接受、哪个拼错就报错」正是最容易出问题
+/// 的地方——字段名写错时 serde 默认会当成没传，静默什么都不改，用户点了保存
+/// 却看不到变化。
+pub(crate) fn apply_ledger_patch(db: &Db, id: i64, patch: serde_json::Value) -> Result<(), String> {
+    let patch: LedgerPatch = serde_json::from_value(patch).map_err(|e| format!("字段格式不对: {e}"))?;
+    db.with(|c| ledger::update(c, id, &patch).map_err(db::DbError::from))
+}
+
 #[tauri::command]
 pub fn ledger_update(state: State<'_, Arc<AppState>>, args: UpdateArgs) -> Result<(), String> {
-    let patch: LedgerPatch = serde_json::from_value(args.patch).map_err(|e| format!("字段格式不对: {e}"))?;
-    state.db.with(|c| ledger::update(c, args.id, &patch).map_err(db::DbError::from))
+    apply_ledger_patch(&state.db, args.id, args.patch)
 }
 
 #[tauri::command]
@@ -187,7 +196,7 @@ pub struct ExportResult {
 #[tauri::command]
 pub fn ledger_export(state: State<'_, Arc<AppState>>, args: QueryArgs, path: &str) -> Result<ExportResult, String> {
     let (csv, rows) = ledger::export_csv_from(&state.db, &args.filter, 500_000)?;
-    write_csv(&path, csv, rows)
+    write_csv(path, csv, rows)
 }
 
 /// 把 CSV 文本写到用户选定的路径，返回给前端提示用的路径与行数。
@@ -332,14 +341,7 @@ fn default_true() -> bool {
 pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<import::ImportOutcome, String> {
     let file = require_file(&args.path)?;
     let year = args.year.unwrap_or_else(import::current_year);
-    let mut outcome = import::run_with_options(
-        &state.db,
-        &file,
-        args.plans,
-        args.replace,
-        year,
-        args.allow_duplicate,
-    )?;
+    let mut outcome = import::run_with_options(&state.db, &file, args.plans, args.replace, year, args.allow_duplicate)?;
     // 宽表在 run_with_year 内部已顺带写好基础资料并填入 outcome.master；
     // 仅当常规明细工作簿尚未写入基础资料且开启了 master 选项时，才单独扫主数据表。
     if args.master && outcome.master.is_none() {
@@ -354,6 +356,9 @@ pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<impo
             }
         }
     }
+    // 导入完就不再需要缓存的整本工作簿（含所有 sheet 的解压 Range），
+    // 主动释放，避免托盘常驻时内存只增不减。
+    import::release_workbook_cache();
     if let Ok(mut slot) = state.last_import.lock() {
         *slot = Some(outcome.clone());
     }
@@ -399,7 +404,9 @@ pub struct SummaryBundle {
 pub fn summary_bundle(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Result<SummaryBundle, String> {
     let db = &state.db;
     let filter = args.filter;
-    let totals = state.db.with(|c| ledger::totals(c, &filter).map_err(db::DbError::from))?;
+    let totals = state
+        .db
+        .with(|c| ledger::totals(c, &filter).map_err(db::DbError::from))?;
     Ok(SummaryBundle {
         totals,
         monthly: summary::monthly_from(db, &filter)?,
@@ -419,7 +426,6 @@ pub fn summary_group(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Resu
 
 #[tauri::command]
 pub fn web_status(state: State<'_, Arc<AppState>>) -> Result<WebStatus, String> {
-
     let guard = state.web.lock().map_err(|_| "状态不可用".to_string())?;
     match guard.as_ref() {
         Some(handle) => Ok(handle.snapshot()),
@@ -488,11 +494,7 @@ pub fn autostart_set(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<b
     let exe = current_exe()?;
     crate::autostart::set_enabled(&exe, enabled)?;
     // 记录用户是否显式关闭开机自启
-    let _ = crate::db::set_setting(
-        &state.db,
-        "autostart_disabled",
-        if enabled { "0" } else { "1" },
-    );
+    let _ = crate::db::set_setting(&state.db, "autostart_disabled", if enabled { "0" } else { "1" });
     // 读回真实状态：写注册表可能被组策略拦下，以磁盘上的结果为准
     Ok(crate::autostart::is_enabled(&exe))
 }
@@ -507,7 +509,6 @@ pub fn window_show(app: tauri::AppHandle) -> Result<(), String> {
         Err("主窗口不存在".into())
     }
 }
-
 
 #[tauri::command]
 pub fn client_log(level: Option<String>, message: String) {
@@ -557,11 +558,7 @@ pub fn voucher_create(state: State<'_, Arc<AppState>>, args: voucher::VoucherInp
 }
 
 #[tauri::command]
-pub fn voucher_update(
-    state: State<'_, Arc<AppState>>,
-    id: i64,
-    args: voucher::VoucherInput,
-) -> Result<(), String> {
+pub fn voucher_update(state: State<'_, Arc<AppState>>, id: i64, args: voucher::VoucherInput) -> Result<(), String> {
     voucher::update_db(&state.db, id, &args)
 }
 
@@ -585,11 +582,7 @@ pub fn voucher_list(
 }
 
 #[tauri::command]
-pub fn voucher_next_no(
-    state: State<'_, Arc<AppState>>,
-    kind: String,
-    date: String,
-) -> Result<String, String> {
+pub fn voucher_next_no(state: State<'_, Arc<AppState>>, kind: String, date: String) -> Result<String, String> {
     voucher::next_doc_no_db(&state.db, &kind, &date)
 }
 
@@ -633,10 +626,7 @@ fn default_stock_limit() -> i64 {
 }
 
 #[tauri::command]
-pub fn stock_report(
-    state: State<'_, Arc<AppState>>,
-    args: StockArgs,
-) -> Result<Vec<stock::StockRow>, String> {
+pub fn stock_report(state: State<'_, Arc<AppState>>, args: StockArgs) -> Result<Vec<stock::StockRow>, String> {
     stock::stock_report_db(
         &state.db,
         args.keyword.as_deref(),
@@ -794,7 +784,10 @@ pub fn dict_sync(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
 }
 
 #[tauri::command]
-pub fn suppliers_list(state: State<'_, Arc<AppState>>, keyword: Option<String>) -> Result<Vec<master::Supplier>, String> {
+pub fn suppliers_list(
+    state: State<'_, Arc<AppState>>,
+    keyword: Option<String>,
+) -> Result<Vec<master::Supplier>, String> {
     master::list_suppliers_db(&state.db, keyword.as_deref())
 }
 
@@ -860,10 +853,7 @@ pub fn seed_master_data(state: &AppState) {
 }
 
 #[tauri::command]
-pub fn data_clear(
-    state: State<'_, Arc<AppState>>,
-    include_master: Option<bool>,
-) -> Result<db::ClearOutcome, String> {
+pub fn data_clear(state: State<'_, Arc<AppState>>, include_master: Option<bool>) -> Result<db::ClearOutcome, String> {
     let outcome = db::clear_data(&state.db, include_master.unwrap_or(false))?;
     if let Ok(mut slot) = state.last_import.lock() {
         *slot = None;
@@ -890,4 +880,146 @@ pub fn doc_lines(
     kind: String,
 ) -> Result<Vec<ledger::LedgerRow>, String> {
     voucher::import_doc_lines_db(&state.db, &doc_no, &kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn db() -> Db {
+        Db::open_in_memory().unwrap()
+    }
+
+    fn seed_row(db: &Db) -> i64 {
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, doc_date, doc_no, item_code, item_name, unit, qty, price_micros, amount_cents, owner, flags)
+                 VALUES ('手工', 1, 'out', '2025-03-01', '20250301001', 'WG-A', '螺丝', '个', 4, 1500000, 600, '乾力车间', '')",
+                [],
+            )
+            .map_err(db::DbError::from)?;
+            Ok(c.last_insert_rowid())
+        })
+        .unwrap()
+    }
+
+    // ---- JSON patch 解析 ----
+    //
+    // 前端发的是 `{ qty: 4, priceMicros: 1500 }` 这种裸 JSON，字段名写错时
+    // serde 的默认行为是「当成没传」，保存按钮点了却没变化且不报错。
+
+    #[test]
+    fn patch_applies_known_fields() {
+        let db = db();
+        let id = seed_row(&db);
+        apply_ledger_patch(&db, id, json!({ "qty": 12.0, "remark": "改过" })).unwrap();
+        let (qty, remark): (f64, Option<String>) = db
+            .with(|c| {
+                c.query_row("SELECT qty, remark FROM ledger WHERE id = ?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(db::DbError::from)
+            })
+            .unwrap();
+        assert_eq!(qty, 12.0);
+        assert_eq!(remark.as_deref(), Some("改过"));
+    }
+
+    #[test]
+    fn patch_rejects_wrong_type_with_a_chinese_hint() {
+        let db = db();
+        let id = seed_row(&db);
+        let err = apply_ledger_patch(&db, id, json!({ "qty": "四个" })).unwrap_err();
+        assert!(err.contains("字段格式不对"), "{err}");
+        // 报错时不能已经把库改了一半
+        let qty: f64 = db
+            .with(|c| {
+                c.query_row("SELECT qty FROM ledger WHERE id = ?1", [id], |r| r.get(0))
+                    .map_err(db::DbError::from)
+            })
+            .unwrap();
+        assert_eq!(qty, 4.0);
+    }
+
+    #[test]
+    fn patch_on_missing_row_is_an_error() {
+        let db = db();
+        // 行被别人删掉后再点保存，必须报错而不是静默成功
+        assert!(apply_ledger_patch(&db, 99999, json!({ "qty": 1.0 })).is_err());
+    }
+
+    #[test]
+    fn patch_empty_json_changes_nothing() {
+        let db = db();
+        let id = seed_row(&db);
+        apply_ledger_patch(&db, id, json!({})).unwrap();
+        let qty: f64 = db
+            .with(|c| {
+                c.query_row("SELECT qty FROM ledger WHERE id = ?1", [id], |r| r.get(0))
+                    .map_err(db::DbError::from)
+            })
+            .unwrap();
+        assert_eq!(qty, 4.0);
+    }
+
+    // ---- 导入前的入参校验 ----
+
+    #[test]
+    fn require_file_rejects_empty_missing_and_wrong_extension() {
+        assert!(require_file("   ").unwrap_err().contains("没有选择文件"));
+        assert!(require_file("Z:/definitely/not/here.xlsx")
+            .unwrap_err()
+            .contains("文件不存在"));
+        // 存在的非 Excel 文件也不能放进来，否则 calamine 到后面才报错
+        let tmp = std::env::temp_dir().join("ledger-require-file-test.txt");
+        std::fs::write(&tmp, "x").unwrap();
+        let err = require_file(&tmp.display().to_string()).unwrap_err();
+        assert!(err.contains(".xlsm"), "{err}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn write_csv_creates_parent_dirs_and_reports_rows() {
+        let dir = std::env::temp_dir().join("ledger-write-csv-test/nested");
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("ledger-write-csv-test"));
+        let target = dir.join("out.csv");
+        let saved = write_csv(&target.display().to_string(), "a,b\n1,2\n".into(), 1).unwrap();
+        assert_eq!(saved.rows, 1);
+        assert!(target.is_file());
+        assert!(write_csv("   ", String::new(), 0)
+            .unwrap_err()
+            .contains("没有选择保存位置"));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("ledger-write-csv-test"));
+    }
+
+    // ---- 前端参数反序列化 ----
+
+    #[test]
+    fn query_args_accept_camel_case_and_default() {
+        let args: QueryArgs = serde_json::from_value(json!({
+            "filter": { "from": "2025-01-01", "keyword": "螺丝" },
+            "page": 2,
+            "pageSize": 50,
+            "skipTotals": true
+        }))
+        .unwrap();
+        assert_eq!(args.page, Some(2));
+        assert_eq!(args.page_size, Some(50));
+        assert_eq!(args.skip_totals, Some(true));
+        assert_eq!(args.filter.keyword.as_deref(), Some("螺丝"));
+        // 什么都不传也要能反序列化（默认第 1 页、每页 100）
+        let args: QueryArgs = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(args.page, None);
+        assert_eq!(args.page_size, None);
+    }
+
+    #[test]
+    fn ledger_page_bounds_are_enforced_before_query() {
+        // 命令层直接挡掉非法分页，避免把 0 或超大 pageSize 传进 SQL
+        assert!(web::validate_page(0, 100).is_err());
+        assert!(web::validate_page(1, 0).is_err());
+        assert!(web::validate_page(1, 5001).is_err());
+        assert!(web::validate_page(1, 100).is_ok());
+    }
 }

@@ -1,8 +1,10 @@
 //! xlsm 导入：先看（inspect）→ 预览（preview）→ 落库（run）。
 //!
 //! 按实测的 `仓库出入库明细_5611_Modified.xlsm` 对齐：
-//!   - `入库明细` 首行表头：入库时间/单据编号/送货单号/物料编码/物料名称/单位/数量/单价/合计/备注/供应商名称/采购人
-//!   - `出库明细` 首行表头：日期/出库单号/物料编码/物料名称/单位/数量/备注/归属/领用人/采购人
+//!
+//! - `入库明细` 首行表头：入库时间/单据编号/送货单号/物料编码/物料名称/单位/数量/单价/合计/备注/供应商名称/采购人
+//! - `出库明细` 首行表头：日期/出库单号/物料编码/物料名称/单位/数量/备注/归属/领用人/采购人
+//!
 //! 同一个文件里可以有多张明细表：sheet 名不同但表头能对上就一起导入。
 //!
 //! 只读源文件。公式单元格取 Excel 缓存值；没有缓存就当空处理并打提醒。
@@ -60,8 +62,22 @@ pub fn field_label(field: &str) -> &'static str {
 
 /// 内置表头别名：精确匹配优先，再做去空白/去括号的二次比较。
 const ALIASES: &[(&str, &[&str])] = &[
-    ("doc_date", &["入库时间", "日期", "入库日期", "出库时间", "出库日期", "发生日期", "单据日期"]),
-    ("doc_no", &["单据编号", "入库单号", "出库单号", "单据号", "单号", "入库单", "出库单"]),
+    (
+        "doc_date",
+        &[
+            "入库时间",
+            "日期",
+            "入库日期",
+            "出库时间",
+            "出库日期",
+            "发生日期",
+            "单据日期",
+        ],
+    ),
+    (
+        "doc_no",
+        &["单据编号", "入库单号", "出库单号", "单据号", "单号", "入库单", "出库单"],
+    ),
     ("delivery_no", &["送货单号", "送货单", "验收单号"]),
     ("item_code", &["物料编码", "编码", "物料编号", "物料编码序号", "图号"]),
     ("item_name", &["物料名称", "名称", "品名", "物料"]),
@@ -99,7 +115,10 @@ pub fn master_sheet_kind(name: &str, headers: &[HeaderGuess]) -> Option<&'static
             .iter()
             .any(|h| !h.header.is_empty() && h.header.trim().contains(keyword))
     };
-    if ["送货单号", "入库时间", "出库时间", "领用人", "采购人", "单号"].iter().any(|k| has(k)) {
+    if ["送货单号", "入库时间", "出库时间", "领用人", "采购人", "单号"]
+        .iter()
+        .any(|k| has(k))
+    {
         return None;
     }
     // 物料列判定要排除「供应商名称」：这一列里也含「名称」两个字
@@ -155,7 +174,7 @@ pub fn guess_field(header: &str) -> Option<String> {
         return None;
     }
     for (field, names) in ALIASES {
-        if names.iter().any(|n| *n == raw) {
+        if names.contains(&raw) {
             return Some((*field).to_string());
         }
     }
@@ -219,9 +238,7 @@ pub fn excel_date(serial: f64) -> String {
         None => return "".to_string(),
     };
     let days = serial.floor() as u64;
-    (base + chrono::Days::new(days))
-        .format("%Y-%m-%d")
-        .to_string()
+    (base + chrono::Days::new(days)).format("%Y-%m-%d").to_string()
 }
 
 /// 任何日期写法统一成 `YYYY-MM-DD`；认不出来返回空串。
@@ -238,11 +255,9 @@ pub fn parse_date_text(raw: &str) -> String {
         return normalized;
     }
     let replaced = trimmed
-        .replace('年', "-")
-        .replace('月', "-")
+        .replace(['年', '月'], "-")
         .replace('日', "")
-        .replace('.', "-")
-        .replace('/', "-");
+        .replace(['.', '/'], "-");
     let normalized = normalize_date(&replaced);
     if chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").is_ok() {
         return normalized;
@@ -332,19 +347,58 @@ pub(crate) fn cell_is_empty(cell: &Data) -> bool {
     }
 }
 
+/// 解析结果缓存的时间上限。
+///
+/// 100MB+ 的工作簿，缓存里存的是所有 sheet 的 `Range`（解压后的单元格），
+/// 常驻不释放等于把整本账本摊在内存里。托盘常驻的桌面程序在低配办公机上
+/// 会开始换页，所以给它一个明确的过期时间，导入完成后也主动清掉。
+const CACHE_TTL_SECS: u64 = 600;
+
 #[derive(Clone)]
 struct CachedWorkbook {
     path: std::path::PathBuf,
     size_bytes: u64,
     modified: Option<std::time::SystemTime>,
+    /// 写缓存的时间，用于 TTL 判定
+    cached_at: std::time::Instant,
     report: WorkbookReport,
     pivot_sheets: Vec<crate::pivot::PivotSheet>,
     master_sheets: Vec<(String, calamine::Range<Data>)>,
     flow_parsed: Vec<(SheetPlan, ParsedSheet)>,
 }
 
-static WORKBOOK_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedWorkbook>>> =
-    std::sync::OnceLock::new();
+/// 缓存是否还新鲜。文件被改过（大小/mtime 变化）或超过 TTL 都算过期。
+fn cache_fresh(cached: &CachedWorkbook, path: &Path, size_bytes: u64, modified: Option<std::time::SystemTime>) -> bool {
+    cache_fresh_at(cached, path, size_bytes, modified, std::time::Instant::now())
+}
+
+/// 与 cache_fresh 相同，只是「当前时刻」由调用方传入，便于测试。
+///
+/// 测试不能靠「Instant::now() 减去 Duration」造过期数据：Windows 上 Instant 是开机
+/// 以来的时间，全新的 CI 机器绝对值可能还不到 TTL 那么大，相减直接溢出 panic。
+/// 反过来把「现在」往后挪，只有到表示上限才会溢出。
+fn cache_fresh_at(
+    cached: &CachedWorkbook,
+    path: &Path,
+    size_bytes: u64,
+    modified: Option<std::time::SystemTime>,
+    now: std::time::Instant,
+) -> bool {
+    cached.path == path
+        && cached.size_bytes == size_bytes
+        && cached.modified == modified
+        && now.saturating_duration_since(cached.cached_at).as_secs() < CACHE_TTL_SECS
+}
+
+/// 主动清缓存。导入/主数据写入完成后调用：那之后不再需要缓存的整本工作簿。
+pub fn release_workbook_cache() {
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cache_lock.lock() {
+        *guard = None;
+    }
+}
+
+static WORKBOOK_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedWorkbook>>> = std::sync::OnceLock::new();
 
 /// 读工作簿里所有 sheet，按首行表头猜字段，标出哪些是明细表。
 pub fn inspect(path: &Path) -> Result<WorkbookReport, String> {
@@ -418,34 +472,17 @@ fn inspect_single_sheet(
         let flows: usize = parsed
             .items
             .iter()
-            .map(|i| {
-                i.days
-                    .iter()
-                    .filter(|(_, a, b)| a.is_some() || b.is_some())
-                    .count()
-            })
+            .map(|i| i.days.iter().filter(|(_, a, b)| a.is_some() || b.is_some()).count())
             .sum();
         let items = parsed.items.len();
         let filler = parsed.filler_rows;
-        let opening = parsed
-            .items
-            .iter()
-            .filter(|i| i.opening.unwrap_or(0.0) != 0.0)
-            .count();
-        let closing = parsed
-            .items
-            .iter()
-            .filter(|i| i.closing.unwrap_or(0.0) != 0.0)
-            .count();
+        let opening = parsed.items.iter().filter(|i| i.opening.unwrap_or(0.0) != 0.0).count();
+        let closing = parsed.items.iter().filter(|i| i.closing.unwrap_or(0.0) != 0.0).count();
         let month = parsed.month;
         let day_count = parsed.day_count;
         let note = match month {
-            Some(m) => format!(
-                "{m}月进销存宽表：{items} 个物料 · {day_count} 天网格 · {flows} 笔进出"
-            ),
-            None => format!(
-                "像月度进销存宽表，但表名认不出月份（应为「1月」~「12月」）：{items} 个物料，会跳过"
-            ),
+            Some(m) => format!("{m}月进销存宽表：{items} 个物料 · {day_count} 天网格 · {flows} 笔进出"),
+            None => format!("像月度进销存宽表，但表名认不出月份（应为「1月」~「12月」）：{items} 个物料，会跳过"),
         };
         return (
             SheetReport {
@@ -479,7 +516,11 @@ fn inspect_single_sheet(
         .filter_map(|h| h.field.clone().map(|f| (h.header.clone(), f)))
         .collect();
     let detail = looks_like_detail(&pairs);
-    let master_kind = if detail { None } else { master_sheet_kind(&name, &headers) };
+    let master_kind = if detail {
+        None
+    } else {
+        master_sheet_kind(&name, &headers)
+    };
     let note = if detail {
         format!("明细表：{} 行数据", non_empty.saturating_sub(1))
     } else if let Some(kind) = master_kind {
@@ -542,7 +583,7 @@ pub(crate) fn inspect_and_collect_cached(
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+            if cache_fresh(cached, path, size_bytes, modified) {
                 return Ok((cached.report.clone(), cached.pivot_sheets.clone()));
             }
         }
@@ -557,10 +598,20 @@ pub(crate) fn inspect_and_collect_cached(
 
     if names.len() >= 4 && size_bytes > 512 * 1024 {
         drop(book);
+        // 每个 worker 都要 open 一次整本工作簿（calamine 解压后整册进内存），
+        // 峰值内存约等于 worker 数 × 文件解压后大小。按 256MB 预算折算上限，
+        // 否则 8 个 worker 解析 100MB 账本会直接吃掉 800MB+。
+        let budget = 256usize * 1024 * 1024;
+        let by_memory = if size_bytes as usize == 0 {
+            8
+        } else {
+            (budget / size_bytes as usize).max(1)
+        };
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
             .min(names.len())
+            .min(by_memory)
             .clamp(1, 8);
         let indexed: Vec<(usize, String)> = names.into_iter().enumerate().collect();
         let chunk_size = indexed.len().div_ceil(workers);
@@ -574,13 +625,11 @@ pub(crate) fn inspect_and_collect_cached(
             let mut handles = Vec::new();
             for chunk in indexed.chunks(chunk_size) {
                 handles.push(s.spawn(move || {
-                    let mut local_book = open_workbook_auto(path)
-                        .map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
+                    let mut local_book = open_workbook_auto(path).map_err(|e| format!("不是可读的 Excel 文件: {e}"))?;
                     let mut out = Vec::with_capacity(chunk.len());
                     for (idx, name) in chunk {
                         let range_res = local_book.worksheet_range(name);
-                        let (rep, piv, m_range, flow_item) =
-                            inspect_single_sheet(name.clone(), range_res);
+                        let (rep, piv, m_range, flow_item) = inspect_single_sheet(name.clone(), range_res);
                         out.push((*idx, rep, piv, m_range, flow_item));
                     }
                     Ok::<_, String>(out)
@@ -638,6 +687,7 @@ pub(crate) fn inspect_and_collect_cached(
             path: path.to_path_buf(),
             size_bytes,
             modified,
+            cached_at: std::time::Instant::now(),
             report: report.clone(),
             pivot_sheets: pivot_parsed.clone(),
             master_sheets,
@@ -648,29 +698,22 @@ pub(crate) fn inspect_and_collect_cached(
     Ok((report, pivot_parsed))
 }
 
-pub(crate) fn get_cached_master_sheets(
-    path: &Path,
-) -> Option<Vec<(String, calamine::Range<Data>)>> {
+pub(crate) fn get_cached_master_sheets(path: &Path) -> Option<Vec<(String, calamine::Range<Data>)>> {
     let meta = std::fs::metadata(path).ok()?;
     let size_bytes = meta.len();
     let modified = meta.modified().ok();
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
-                if !cached.master_sheets.is_empty() {
-                    return Some(cached.master_sheets.clone());
-                }
+            if cache_fresh(cached, path, size_bytes, modified) && !cached.master_sheets.is_empty() {
+                return Some(cached.master_sheets.clone());
             }
         }
     }
     None
 }
 
-pub(crate) fn update_cached_flow_parsed(
-    path: &Path,
-    parsed: Vec<(SheetPlan, ParsedSheet)>,
-) {
+pub(crate) fn update_cached_flow_parsed(path: &Path, parsed: Vec<(SheetPlan, ParsedSheet)>) {
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_mut() {
@@ -681,35 +724,31 @@ pub(crate) fn update_cached_flow_parsed(
     }
 }
 
-pub(crate) fn get_cached_flow_parsed(
-    path: &Path,
-    plans: &[SheetPlan],
-) -> Option<Vec<ParsedSheet>> {
+pub(crate) fn get_cached_flow_parsed(path: &Path, plans: &[SheetPlan]) -> Option<Vec<ParsedSheet>> {
     let meta = std::fs::metadata(path).ok()?;
     let size_bytes = meta.len();
     let modified = meta.modified().ok();
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
-                if cached.flow_parsed.len() == plans.len() && !plans.is_empty() {
-                    let all_match = plans.iter().all(|p| {
-                        cached
-                            .flow_parsed
-                            .iter()
-                            .any(|(cp, _)| cp.name == p.name && cp.mapping == p.mapping)
-                    });
-                    if all_match {
-                        let mut out = Vec::new();
-                        for p in plans {
-                            if let Some((_, parsed)) =
-                                cached.flow_parsed.iter().find(|(cp, _)| cp.name == p.name)
-                            {
-                                out.push(parsed.clone());
-                            }
+            if cache_fresh(cached, path, size_bytes, modified)
+                && cached.flow_parsed.len() == plans.len()
+                && !plans.is_empty()
+            {
+                let all_match = plans.iter().all(|p| {
+                    cached
+                        .flow_parsed
+                        .iter()
+                        .any(|(cp, _)| cp.name == p.name && cp.mapping == p.mapping)
+                });
+                if all_match {
+                    let mut out = Vec::new();
+                    for p in plans {
+                        if let Some((_, parsed)) = cached.flow_parsed.iter().find(|(cp, _)| cp.name == p.name) {
+                            out.push(parsed.clone());
                         }
-                        return Some(out);
                     }
+                    return Some(out);
                 }
             }
         }
@@ -798,17 +837,9 @@ pub fn parse_sheet<RS: std::io::Read + std::io::Seek>(
 }
 
 /// 直接从内存 Range 解析明细表，循环前预先提取列索引，避免每行重复线性搜索
-pub fn parse_sheet_from_range(
-    range: &calamine::Range<Data>,
-    sheet: &str,
-    mapping: &ColumnMap,
-) -> ParsedSheet {
-    let find_col = |f: &str| -> Option<usize> {
-        mapping
-            .iter()
-            .find(|(_, field)| field.as_str() == f)
-            .map(|(c, _)| *c)
-    };
+pub fn parse_sheet_from_range(range: &calamine::Range<Data>, sheet: &str, mapping: &ColumnMap) -> ParsedSheet {
+    let find_col =
+        |f: &str| -> Option<usize> { mapping.iter().find(|(_, field)| field.as_str() == f).map(|(c, _)| *c) };
 
     let col_date = find_col("doc_date");
     let col_code = find_col("item_code");
@@ -1046,7 +1077,9 @@ fn plan_for(report: &WorkbookReport, requested: Option<Vec<SheetPlan>>) -> Resul
         })
         .collect();
     if plans.is_empty() {
-        return Err("这个工作簿里没找到能识别的明细表（需要同时有日期、数量、物料列）。可以手动指定列映射后再试。".to_string());
+        return Err(
+            "这个工作簿里没找到能识别的明细表（需要同时有日期、数量、物料列）。可以手动指定列映射后再试。".to_string(),
+        );
     }
     Ok(plans)
 }
@@ -1188,10 +1221,7 @@ pub fn preview_with_year(
     }
 
     if sheets.is_empty() {
-        return Err(
-            "这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。"
-                .to_string(),
-        );
+        return Err("这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。".to_string());
     }
 
     Ok(PreviewResult {
@@ -1238,6 +1268,22 @@ pub fn write_rows(
     rows: &[DraftRow],
     replace_sheets: &[String],
 ) -> Result<(i64, usize), String> {
+    let (id, replaced, _) = write_rows_with_items(db, header, rows, replace_sheets, &[])?;
+    Ok((id, replaced))
+}
+
+/// 与 [`write_rows`] 相同，但把宽表带来的基础资料一并写进**同一个事务**。
+///
+/// 以前台账写完先 commit，再单独 upsert 物料；中途失败只返回一句提示，于是
+/// 库里留下「台账行数对、但物料没有库位/规格」的半成品，用户重复点导入又会
+/// 追加一遍。现在两者一次提交，失败一起回滚。
+pub fn write_rows_with_items(
+    db: &Db,
+    header: &HeaderRow,
+    rows: &[DraftRow],
+    replace_sheets: &[String],
+    master_items: &[crate::pivot::PivotItemDef],
+) -> Result<(i64, usize, Option<(usize, usize)>), String> {
     db.with(|conn| {
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let mut replaced = 0usize;
@@ -1378,18 +1424,20 @@ pub fn write_rows(
         }
         crate::dict::touch_many(&tx, dict_counts.iter().map(|((k, v), c)| (*k, v.as_str(), *c)));
 
+        // 宽表物料与台账同事务：任一失败一起回滚，不会留下单边数据
+        let item_counts = if master_items.is_empty() {
+            None
+        } else {
+            Some(crate::pivot::upsert_items_tx(&tx, master_items).map_err(DbError::from)?)
+        };
+
         tx.commit().map_err(DbError::from)?;
-        Ok((import_id, replaced))
+        Ok((import_id, replaced, item_counts))
     })
 }
 
 /// 完整导入：读文件 → 解析 → 写库。
-pub fn run(
-    db: &Db,
-    path: &Path,
-    plans: Option<Vec<SheetPlan>>,
-    replace_all: bool,
-) -> Result<ImportOutcome, String> {
+pub fn run(db: &Db, path: &Path, plans: Option<Vec<SheetPlan>>, replace_all: bool) -> Result<ImportOutcome, String> {
     run_with_year(db, path, plans, replace_all, current_year())
 }
 
@@ -1434,9 +1482,10 @@ pub fn run_with_options(
     if !pivot_parsed.is_empty() {
         let built = crate::pivot::build_with_hint(&pivot_parsed, year, Some(&report.file_name));
         if built.rows.is_empty() {
-            return Err(format!(
+            return Err(
                 "月度进销存宽表里没有可导入的流水：表名要写成「1月」~「12月」，源表还要有逐日入库/出库格子。"
-            ));
+                    .to_string(),
+            );
         }
         all_issues.extend(built.issues.iter().take(200).map(|m| Issue {
             sheet: "月度进销存".to_string(),
@@ -1509,10 +1558,7 @@ pub fn run_with_options(
     }
 
     if all_rows.is_empty() {
-        return Err(
-            "这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。"
-                .to_string(),
-        );
+        return Err("这个工作簿里没找到能识别的明细表，也没有月度进销存宽表。可以手动指定列映射后再试。".to_string());
     }
 
     let mut flagged = all_rows.iter().filter(|r| !r.flags.is_empty()).count();
@@ -1539,43 +1585,35 @@ pub fn run_with_options(
         skipped_count: skipped as i64,
         note,
     };
-    let (import_id, replaced) = write_rows(db, &header, &all_rows, &replace_sheets)?;
+    // 宽表物料（含库位/规格/单位/类型）跟台账同事务写：失败一起回滚，
+    // 不会出现「行数对但物料缺库位」，用户也不必重复点导入。
+    let master_items: &[crate::pivot::PivotItemDef] = pivot_master.as_ref().map(|b| b.items.as_slice()).unwrap_or(&[]);
+    let (import_id, replaced, item_counts) =
+        write_rows_with_items(db, &header, &all_rows, &replace_sheets, master_items)?;
 
-    // 宽表顺带把物料（含库位/规格/单位/类型）写进基础资料。
-    // 台账已经写成功，这一步失败只提示，不回滚。
+    // 事务已经提交，走到这里物料一定写成功；统计直接用本次写入的数字。
     let mut master_outcome = None;
-    let mut master_error = None;
+    let master_error = None;
     if let Some(built) = &pivot_master {
-        if !built.items.is_empty() {
-            match db.with(|c| crate::pivot::upsert_items(c, &built.items).map_err(DbError)) {
-                Ok((added, updated)) => {
-                    log::info!("进销存宽表写入基础资料：物料 +{added} 更新 {updated}");
-                    let located = built
-                        .items
-                        .iter()
-                        .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
-                        .count();
-                    master_outcome = Some(crate::master::MasterImportOutcome {
-                        items_added: added,
-                        items_updated: updated,
-                        suppliers_added: 0,
-                        suppliers_skipped: 0,
-                        sheets_found: vec![format!(
-                            "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
-                            built.months.len(),
-                            built.items.len(),
-                            located
-                        )],
-                        message: format!(
-                            "物料 +{added} 更新 {updated}（同步库位 {located} 个）"
-                        ),
-                    });
-                }
-                Err(err) => {
-                    log::warn!("进销存宽表写基础资料失败: {err}");
-                    master_error = Some(err);
-                }
-            }
+        if let (false, Some((added, updated))) = (built.items.is_empty(), item_counts) {
+            let located = built
+                .items
+                .iter()
+                .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                .count();
+            master_outcome = Some(crate::master::MasterImportOutcome {
+                items_added: added,
+                items_updated: updated,
+                suppliers_added: 0,
+                suppliers_skipped: 0,
+                sheets_found: vec![format!(
+                    "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
+                    built.months.len(),
+                    built.items.len(),
+                    located
+                )],
+                message: format!("物料 +{added} 更新 {updated}（同步库位 {located} 个）"),
+            });
         }
     }
 
@@ -1631,13 +1669,7 @@ fn ensure_not_duplicate(
             c.query_row(
                 "SELECT file_name, imported_at, row_count FROM imports WHERE id = ?1",
                 [existing],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                },
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
             )
             .map_err(DbError::from)
         })
@@ -1706,6 +1738,46 @@ pub fn delete_import(db: &Db, id: i64) -> Result<usize, String> {
 mod tests {
     use super::*;
 
+    /// 缓存必须能主动释放：导入完成后不再需要整本工作簿的 Range。
+    #[test]
+    fn workbook_cache_can_be_released() {
+        let lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None;
+        }
+        release_workbook_cache();
+        let empty = lock.lock().map(|g| g.is_none()).unwrap_or(false);
+        assert!(empty, "释放后缓存应为空");
+    }
+
+    /// 超过 TTL 的缓存必须被判成过期，不能一直拿旧解析结果。
+    #[test]
+    fn stale_cache_is_not_fresh() {
+        let path = std::path::PathBuf::from("C:/x/y.xlsx");
+        let cached = CachedWorkbook {
+            path: path.clone(),
+            size_bytes: 10,
+            modified: None,
+            cached_at: std::time::Instant::now(),
+            report: WorkbookReport {
+                path: String::new(),
+                file_name: String::new(),
+                size_bytes: 0,
+                sheets: Vec::new(),
+            },
+            pivot_sheets: Vec::new(),
+            master_sheets: Vec::new(),
+            flow_parsed: Vec::new(),
+        };
+        assert!(cache_fresh(&cached, &path, 10, None));
+        // 文件变大说明被改过
+        assert!(!cache_fresh(&cached, &path, 11, None));
+        // 时间拨到 TTL 之外。注意是往后拨「现在」，不能回拨 cached_at：
+        // 新机器上 Instant 的绝对值可能小于 TTL，减法会溢出 panic。
+        let later = cached.cached_at + std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
+        assert!(!cache_fresh_at(&cached, &path, 10, None, later));
+    }
+
     fn guesses(headers: &[&str]) -> Vec<HeaderGuess> {
         headers
             .iter()
@@ -1736,7 +1808,7 @@ mod tests {
             header.push(format!("{day}日"));
             header.push(String::new());
         }
-        let rows = vec![
+        let rows = [
             vec!["".to_string(), "1 月 库  存  进  销  存  报  表".to_string()],
             header,
             vec!["".to_string(); 70],
@@ -1758,7 +1830,7 @@ mod tests {
                 row
             },
         ];
-        let head: Vec<Vec<String>> = rows.iter().take(6).cloned().collect();
+        let head = rows.clone();
         let layout = crate::pivot::detect(&head).expect("应认出宽表");
         assert_eq!(layout.day_count(), 31);
         assert_eq!(layout.header_row, 1);
@@ -1808,10 +1880,7 @@ mod tests {
             None
         );
         // 表名带「明细 / 库存 / 单据」一律不算主数据
-        assert_eq!(
-            master_sheet_kind("库存明细", &guesses(&["物料名称", "物料编码"])),
-            None
-        );
+        assert_eq!(master_sheet_kind("库存明细", &guesses(&["物料名称", "物料编码"])), None);
     }
 
     #[test]
@@ -1918,6 +1987,65 @@ mod tests {
         .unwrap();
     }
 
+    /// 台账与基础资料同事务：物料写入失败时，台账那批也必须回滚。
+    #[test]
+    fn master_items_roll_back_with_ledger_on_failure() {
+        let db = Db::open_in_memory().unwrap();
+
+        // 正常路径：台账与物料一次调用一起落库
+        let (_id, _replaced, counts) = write_rows_with_items(
+            &db,
+            &header(),
+            &[sample_row()],
+            &[],
+            &[crate::pivot::PivotItemDef {
+                item_code: "WG-NEW-1".into(),
+                item_name: "新物料".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(counts, Some((1, 0)));
+
+        // 失败路径：用触发器让物料写入在事务中途失败，台账那批也要一起回滚
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER t_block_items BEFORE INSERT ON items
+                 BEGIN SELECT RAISE(ABORT, 'simulated item failure'); END;",
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+        let mut second = header();
+        second.file_hash = "h2".into();
+        let err = write_rows_with_items(
+            &db,
+            &second,
+            &[sample_row()],
+            &[],
+            &[crate::pivot::PivotItemDef {
+                item_code: "WG-NEW-2".into(),
+                item_name: "另一个物料".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("simulated item failure"), "{err}");
+        let (rows_after, imports_after): (i64, i64) = db
+            .with(|c| {
+                Ok((
+                    c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                        .map_err(DbError::from)?,
+                    c.query_row("SELECT COUNT(*) FROM imports", [], |r| r.get(0))
+                        .map_err(DbError::from)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(rows_after, 1, "第二次导入的台账行必须回滚掉");
+        assert_eq!(imports_after, 1, "导入批次记录也必须回滚");
+    }
+
     #[test]
     fn replace_mode_clears_sheet_first() {
         let db = Db::open_in_memory().unwrap();
@@ -1925,7 +2053,10 @@ mod tests {
         let (_id, replaced) = write_rows(&db, &header(), &[sample_row()], &["入库明细".to_string()]).unwrap();
         assert_eq!(replaced, 2);
         let count: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -1947,7 +2078,10 @@ mod tests {
         let (_id, replaced) = write_rows(&db, &second, &[sample_row()], &["入库明细".to_string()]).unwrap();
         assert_eq!(replaced, 0, "别的批次没有同名表行可删");
         let count: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(count, 3, "1 月的两行必须还在");
 
@@ -1955,7 +2089,10 @@ mod tests {
         let (_id, replaced) = write_rows(&db, &second, &[sample_row()], &["入库明细".to_string()]).unwrap();
         assert_eq!(replaced, 1);
         let count: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(count, 3);
     }
@@ -2000,7 +2137,10 @@ mod tests {
         delete_import(&db, id).unwrap();
         assert!(history(&db).unwrap().is_empty());
         let count: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }

@@ -102,7 +102,17 @@ function saveDocSearchOpen(open: boolean): void {
 let lineSeq = 0;
 function blankLine(): DraftLine {
   lineSeq += 1;
-  return { key: `l${lineSeq}`, deliveryNo: "", itemCode: "", itemName: "", unit: "", qty: "", price: "", remark: "", spec: "" };
+  return {
+    key: `l${lineSeq}`,
+    deliveryNo: "",
+    itemCode: "",
+    itemName: "",
+    unit: "",
+    qty: "",
+    price: "",
+    remark: "",
+    spec: "",
+  };
 }
 
 function blankHead(kind: Kind): HeadDraft {
@@ -305,13 +315,7 @@ function SpecBadge({
  * 加明细行（物料编码、名称、单位、数量、单价、合计、备注）。
  * 选物料时从历史台账带出单位与最近单价，减少重复录入。
  */
-export function VoucherScreen({
-  active = true,
-  onChanged,
-}: {
-  active?: boolean;
-  onChanged: () => void;
-}) {
+export function VoucherScreen({ active = true, onChanged }: { active?: boolean; onChanged: () => void }) {
   const initialDraft = useRef(loadVoucherDraft());
   const [mode, setMode] = useState<Mode>(() => initialDraft.current?.mode ?? { kind: "in", id: null });
   const [head, setHead] = useState<HeadDraft>(() => initialDraft.current?.head ?? blankHead("in"));
@@ -489,9 +493,13 @@ export function VoucherScreen({
   }, [active]);
 
   // 保存过新采购人后，正在编辑的空白新单跟着换默认值（已填的不动）
-  useEffect(() => onBuyerChange((buyer) => {
-    setHead((prev) => (prev.buyer.trim() === "" ? { ...prev, buyer } : prev));
-  }), []);
+  useEffect(
+    () =>
+      onBuyerChange((buyer) => {
+        setHead((prev) => (prev.buyer.trim() === "" ? { ...prev, buyer } : prev));
+      }),
+    [],
+  );
 
   useEffect(() => {
     if (mode.id === null) {
@@ -515,10 +523,7 @@ export function VoucherScreen({
     });
   }, [history, historyQuery, historyKind]);
 
-  const shownAmount = useMemo(
-    () => shownHistory.reduce((sum, v) => sum + v.amountCents, 0),
-    [shownHistory],
-  );
+  const shownAmount = useMemo(() => shownHistory.reduce((sum, v) => sum + v.amountCents, 0), [shownHistory]);
 
   const totals = useMemo(() => {
     let amount = 0;
@@ -707,9 +712,9 @@ export function VoucherScreen({
         docNo: "",
         docDate: today(),
         // 入库单的供应商 → 出库单只能落到出库部门；反过来出库部门不会当供应商带过去
-        partner: target === "in" ? "" : voucher.partner ?? "",
+        partner: target === "in" ? "" : (voucher.partner ?? ""),
         buyer: head.buyer,
-        owner: target === "in" ? "" : voucher.partner ?? voucher.owner ?? "",
+        owner: target === "in" ? "" : (voucher.partner ?? voucher.owner ?? ""),
         receiver: voucher.receiver ?? "",
         storekeeper: "",
       });
@@ -776,20 +781,20 @@ export function VoucherScreen({
       }
     }
 
-    const payloadLines: VoucherLineInput[] = filled
-      .map(({ line }) => {
-        const p = Number(line.price.replace(/[,，¥￥\s]/g, ""));
-        return {
-          itemCode: line.itemCode.trim() || null,
-          deliveryNo: line.deliveryNo.trim() || null,
-          itemName: line.itemName.trim() || null,
-          unit: line.unit.trim() || null,
-          qty: Number(line.qty.replace(/[,，]/g, "")),
-          priceMicros: mode.kind === "in" && Number.isFinite(p) && line.price.trim() !== "" ? Math.round(p * 10000) : null,
-          remark: line.remark.trim() || null,
-          spec: (line.spec ?? "").trim() || null,
-        };
-      });
+    const payloadLines: VoucherLineInput[] = filled.map(({ line }) => {
+      const p = Number(line.price.replace(/[,，¥￥\s]/g, ""));
+      return {
+        itemCode: line.itemCode.trim() || null,
+        deliveryNo: line.deliveryNo.trim() || null,
+        itemName: line.itemName.trim() || null,
+        unit: line.unit.trim() || null,
+        qty: Number(line.qty.replace(/[,，]/g, "")),
+        priceMicros:
+          mode.kind === "in" && Number.isFinite(p) && line.price.trim() !== "" ? Math.round(p * 10000) : null,
+        remark: line.remark.trim() || null,
+        spec: (line.spec ?? "").trim() || null,
+      };
+    });
 
     const payload = {
       kind: mode.kind,
@@ -848,7 +853,7 @@ export function VoucherScreen({
     }
   };
 
-const runDocSearch = useCallback(async (keyword: string) => {
+  const runDocSearch = useCallback(async (keyword: string) => {
     const trimmed = keyword.trim();
     if (!trimmed) {
       setDocHits(null);
@@ -941,7 +946,8 @@ const runDocSearch = useCallback(async (keyword: string) => {
   }, [suppliers]);
 
   const rankSupplier = useCallback(
-    (option: PickerOption, keyword: string) => matchSupplier(option.value, keyword, supplierHits.get(option.value) ?? 0),
+    (option: PickerOption, keyword: string) =>
+      matchSupplier(option.value, keyword, supplierHits.get(option.value) ?? 0),
     [supplierHits],
   );
 
@@ -991,9 +997,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         <div
           className={
-            showDocSearch
-              ? "grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]"
-              : "grid grid-cols-1 gap-4"
+            showDocSearch ? "grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]" : "grid grid-cols-1 gap-4"
           }
         >
           {/* 单据主体：按纸单布局排 —— 居中标题、表头横带、明细、合计行、签字行 */}
@@ -1013,7 +1017,6 @@ const runDocSearch = useCallback(async (keyword: string) => {
 
             {/* 第 3 行横带：供应商名称 → 输入 → 日期 → 单据编号（出库单换成归属） */}
             <div className="grid grid-cols-1 gap-3 border-b border-separator-border px-5 py-3 md:grid-cols-[auto_1fr_auto_auto]">
-
               {isIn ? (
                 <span className="self-center text-body-2-medium text-text-secondary">供应商名称：</span>
               ) : (
@@ -1023,12 +1026,8 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <ComboPicker
                   ariaLabel={isIn ? "供应商" : "出库部门"}
                   value={isIn ? head.partner : head.owner}
-                  onChange={(v) =>
-                    editHead(isIn ? { partner: v } : { owner: v })
-                  }
-                  options={
-                    isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))
-                  }
+                  onChange={(v) => editHead(isIn ? { partner: v } : { owner: v })}
+                  options={isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))}
                   rank={isIn ? rankSupplier : undefined}
                   autoCommitExact={isIn}
                   allowCustom
@@ -1049,7 +1048,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 ) : null}
               </div>
               <div className="flex items-center gap-2">
-                <span className="shrink-0 text-body-2-medium text-text-secondary">{isIn ? "入库时间：" : "出库时间："}</span>
+                <span className="shrink-0 text-body-2-medium text-text-secondary">
+                  {isIn ? "入库时间：" : "出库时间："}
+                </span>
                 <input
                   aria-label={isIn ? "入库时间" : "出库时间"}
                   value={head.docDate}
@@ -1079,7 +1080,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                     <th className="w-10 px-2 py-2 text-center font-medium">#</th>
                     {isIn ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
                     <th className="w-32 whitespace-nowrap px-2 py-2 text-start font-medium">物料编码</th>
-                    <th className="w-[18rem] min-w-[15rem] whitespace-nowrap px-2 py-2 text-start font-medium">物料名称</th>
+                    <th className="w-[18rem] min-w-[15rem] whitespace-nowrap px-2 py-2 text-start font-medium">
+                      物料名称
+                    </th>
                     <th className="w-20 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
                     <th className="w-16 px-2 py-2 text-end font-medium">数量</th>
                     {isIn ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
@@ -1190,7 +1193,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             aria-label={`删除第 ${index + 1} 行`}
                             onClick={() => {
                               dirty.current = true;
-                              setLines((prev) => (prev.length === 1 ? [blankLine()] : prev.filter((l) => l.key !== line.key)));
+                              setLines((prev) =>
+                                prev.length === 1 ? [blankLine()] : prev.filter((l) => l.key !== line.key),
+                              );
                             }}
                             className="inline-flex size-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-background-secondary-hover hover:text-text-destructive"
                           >
@@ -1202,7 +1207,10 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   })}
                   {/* 合计行：与纸单一致，单独一行 */}
                   <tr className="border-t border-separator-border bg-background-secondary-default">
-                    <td colSpan={isIn ? 4 : 3} className="px-2 py-2 text-end text-caption-1-semibold text-text-secondary">
+                    <td
+                      colSpan={isIn ? 4 : 3}
+                      className="px-2 py-2 text-end text-caption-1-semibold text-text-secondary"
+                    >
                       合计
                       <span className="ms-2 font-normal text-caption-1-regular text-text-tertiary">
                         {count(totals.pieces)} 行有物料
@@ -1345,72 +1353,79 @@ const runDocSearch = useCallback(async (keyword: string) => {
 
           {/* 单据查询：按编号查，跨本机开单与导入两种来源；可从页头收起 */}
           {showDocSearch ? (
-          <section className="flex flex-col gap-2 rounded-2xl border border-border-button-default bg-background-primary-default p-4">
-            <div className="flex items-baseline justify-between gap-2">
-              <h2 className="text-title-4-semibold text-text-primary">单据查询</h2>
-              <span className="text-caption-1-regular text-text-tertiary">编号可只填片段</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                value={docQuery}
-                onChange={(e) => setDocQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void runDocSearch(docQuery);
-                }}
-                placeholder="单据编号，如 20260831206 或 0831"
-                className="h-8 min-w-0 flex-1 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.75rem] tabular-nums text-text-primary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
-              />
-              <Button size="small" leadingIcon={RiSearchLine} onClick={() => runDocSearch(docQuery)} disabled={docSearching || !isTauri}>
-                查询
-              </Button>
-            </div>
-            {docSearching ? (
-              <div className="flex items-center gap-2 py-2 text-caption-1-regular text-text-tertiary">
-                <Spinner size="xs" aria-label="查询中" /> 正在查
+            <section className="flex flex-col gap-2 rounded-2xl border border-border-button-default bg-background-primary-default p-4">
+              <div className="flex items-baseline justify-between gap-2">
+                <h2 className="text-title-4-semibold text-text-primary">单据查询</h2>
+                <span className="text-caption-1-regular text-text-tertiary">编号可只填片段</span>
               </div>
-            ) : docHits === null ? null : docHits.length === 0 ? (
-              <p className="py-2 text-caption-1-regular text-text-tertiary">
-                没找到编号包含「{docQuery.trim()}」的单据
-              </p>
-            ) : (
-              <ul className="flex max-h-64 flex-col gap-0.5 overflow-auto">
-                {docHits.map((hit) => (
-                  <li key={hit.source + hit.docNo + hit.kind}>
-                    <button
-                      type="button"
-                      onClick={() => openHit(hit)}
-                      className="flex w-full flex-col gap-0.5 rounded-lg px-2 py-1.5 text-start transition-colors hover:bg-background-secondary-hover"
-                    >
-                      <span className="flex items-center gap-2">
-                        <span
-                          className={
-                            hit.kind === "in"
-                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
-                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
-                          }
-                        >
-                          {kindLabel(hit.kind)}
-                        </span>
-                        <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{hit.docNo}</span>
-                        {hit.source === "import" ? (
-                          <span className="rounded bg-background-secondary-default px-1 py-0.5 text-[0.625rem] text-text-tertiary">
-                            导入
+              <div className="flex items-center gap-2">
+                <input
+                  value={docQuery}
+                  onChange={(e) => setDocQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void runDocSearch(docQuery);
+                  }}
+                  placeholder="单据编号，如 20260831206 或 0831"
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.75rem] tabular-nums text-text-primary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
+                />
+                <Button
+                  size="small"
+                  leadingIcon={RiSearchLine}
+                  onClick={() => runDocSearch(docQuery)}
+                  disabled={docSearching || !isTauri}
+                >
+                  查询
+                </Button>
+              </div>
+              {docSearching ? (
+                <div className="flex items-center gap-2 py-2 text-caption-1-regular text-text-tertiary">
+                  <Spinner size="xs" aria-label="查询中" /> 正在查
+                </div>
+              ) : docHits === null ? null : docHits.length === 0 ? (
+                <p className="py-2 text-caption-1-regular text-text-tertiary">
+                  没找到编号包含「{docQuery.trim()}」的单据
+                </p>
+              ) : (
+                <ul className="flex max-h-64 flex-col gap-0.5 overflow-auto">
+                  {docHits.map((hit) => (
+                    <li key={hit.source + hit.docNo + hit.kind}>
+                      <button
+                        type="button"
+                        onClick={() => openHit(hit)}
+                        className="flex w-full flex-col gap-0.5 rounded-lg px-2 py-1.5 text-start transition-colors hover:bg-background-secondary-hover"
+                      >
+                        <span className="flex items-center gap-2">
+                          <span
+                            className={
+                              hit.kind === "in"
+                                ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
+                                : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
+                            }
+                          >
+                            {kindLabel(hit.kind)}
                           </span>
-                        ) : null}
-                        <span className="ms-auto text-caption-1-regular text-text-tertiary">{date(hit.docDate)}</span>
-                      </span>
-                      <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
-                        <span className="truncate">{hit.partner ?? hit.owner ?? "—"}</span>
-                        <span className="ms-auto shrink-0 font-mono tabular-nums">
-                          {count(hit.rowCount)} 行 · {money(hit.amountCents)}
+                          <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                            {hit.docNo}
+                          </span>
+                          {hit.source === "import" ? (
+                            <span className="rounded bg-background-secondary-default px-1 py-0.5 text-[0.625rem] text-text-tertiary">
+                              导入
+                            </span>
+                          ) : null}
+                          <span className="ms-auto text-caption-1-regular text-text-tertiary">{date(hit.docDate)}</span>
                         </span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+                        <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
+                          <span className="truncate">{hit.partner ?? hit.owner ?? "—"}</span>
+                          <span className="ms-auto shrink-0 font-mono tabular-nums">
+                            {count(hit.rowCount)} 行 · {money(hit.amountCents)}
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
           ) : null}
 
           {/* 单据列表 */}
@@ -1486,13 +1501,17 @@ const runDocSearch = useCallback(async (keyword: string) => {
                         >
                           {kindLabel(voucher.kind)}
                         </span>
-                        <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{voucher.docNo}</span>
+                        <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                          {voucher.docNo}
+                        </span>
                         {mode.id === voucher.id ? (
                           <span className="rounded bg-accent-500/12 px-1 py-0.5 text-[0.625rem] font-medium text-accent-500">
                             编辑中
                           </span>
                         ) : null}
-                        <span className="ms-auto text-caption-1-regular text-text-tertiary">{date(voucher.docDate)}</span>
+                        <span className="ms-auto text-caption-1-regular text-text-tertiary">
+                          {date(voucher.docDate)}
+                        </span>
                       </span>
                       <span className="flex items-center gap-2 text-caption-1-regular text-text-tertiary">
                         {/* 供应商/归属为空时退回首行物料名，别让整行只剩一个「—」 */}
@@ -1538,7 +1557,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
         </div>
       </div>
 
-{viewingVoucher ? (
+      {viewingVoucher ? (
         <Modal isOpen onOpenChange={(open: boolean) => !open && setViewingVoucher(null)} size="xl">
           {({ close }) => (
             <>
@@ -1592,7 +1611,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             </div>
                           </td>
                           <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
-                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">{qty(line.qty)}</td>
+                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">
+                            {qty(line.qty)}
+                          </td>
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-tertiary">
                             {line.priceMicros === null ? "—" : priceText(line.priceMicros)}
                           </td>
@@ -1612,21 +1633,31 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 </p>
               </ModalBody>
               <ModalFooter>
-                <Button size="small" variant="ghost" leadingIcon={RiDeleteBinLine} onClick={() => {
-                  // 直接用当前打开的单构造待删项，不回查 history
-                  setPendingDelete({
-                    id: viewingVoucher.id,
-                    docNo: viewingVoucher.docNo,
-                    rowCount: viewingVoucher.lines.length,
-                  });
-                  close();
-                }}>
+                <Button
+                  size="small"
+                  variant="ghost"
+                  leadingIcon={RiDeleteBinLine}
+                  onClick={() => {
+                    // 直接用当前打开的单构造待删项，不回查 history
+                    setPendingDelete({
+                      id: viewingVoucher.id,
+                      docNo: viewingVoucher.docNo,
+                      rowCount: viewingVoucher.lines.length,
+                    });
+                    close();
+                  }}
+                >
                   删除
                 </Button>
-                <Button size="small" variant="secondary" leadingIcon={RiPrinterLine} onClick={() => {
-                  setPrintingView(viewingVoucher);
-                  close();
-                }}>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  leadingIcon={RiPrinterLine}
+                  onClick={() => {
+                    setPrintingView(viewingVoucher);
+                    close();
+                  }}
+                >
                   A4 打印
                 </Button>
                 <Button size="small" variant="secondary" onClick={close}>
@@ -1653,9 +1684,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
         </Modal>
       ) : null}
 
-      {printingView ? (
-        <PrintVoucher voucher={printingView} onClose={() => setPrintingView(null)} />
-      ) : null}
+      {printingView ? <PrintVoucher voucher={printingView} onClose={() => setPrintingView(null)} /> : null}
 
       {viewingImport ? (
         <Modal isOpen onOpenChange={(open: boolean) => !open && setViewingImport(null)} size="xl">
@@ -1707,7 +1736,9 @@ const runDocSearch = useCallback(async (keyword: string) => {
                             </div>
                           </td>
                           <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
-                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">{qty(line.qty)}</td>
+                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">
+                            {qty(line.qty)}
+                          </td>
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-tertiary">
                             {line.priceMicros === null ? "—" : priceText(line.priceMicros)}
                           </td>
@@ -1835,4 +1866,3 @@ function matchSupplier(name: string, rawKeyword: string, hits: number): number {
   const hitsBonus = Math.min(hits, 500) / 100; // 最多 5 分，只用来打破同档平局
   return tier + prefixBonus + density * 10 + hitsBonus;
 }
-

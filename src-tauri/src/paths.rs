@@ -16,12 +16,7 @@ pub fn remote_dist(resource_dir: Option<&Path>, dev_fallback: Option<&Path>) -> 
     if let Some(dir) = dev_fallback {
         candidates.push(dir.to_path_buf());
     }
-    for dir in candidates {
-        if dir.join("index.html").is_file() {
-            return Some(dir);
-        }
-    }
-    None
+    candidates.into_iter().find(|dir| dir.join("index.html").is_file())
 }
 
 /// 开发时优先用仓库根目录里的那份示例工作簿。

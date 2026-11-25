@@ -1,0 +1,6 @@
+# 只定「默认值不合本仓库习惯」的几项，其余沿用 rustfmt 默认。
+edition = "2021"
+# 默认 100 列会把中文注释和 match 臂拆得很碎；120 与前端 prettier 一致
+max_width = 120
+# 注释里大量中文，按实际宽度算更接近编辑器显示
+use_small_heuristics = "Default"

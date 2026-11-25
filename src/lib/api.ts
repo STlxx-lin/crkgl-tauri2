@@ -40,7 +40,15 @@ import type {
   WorkbookReport,
 } from "./types";
 
-export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/**
+ * 是否具备桌面端能力（能写库、能弹系统对话框）。
+ *
+ * 除了「有没有 Tauri 桥」，还要排除 `build:remote` 产物：只读站被打进 Tauri
+ * 外壳时桥是存在的，单看 `__TAURI_INTERNALS__` 会把只读站当成桌面端，
+ * 写操作一路调到不该开的命令上。所有 `isTauri` 判断都自动带上这层保护。
+ */
+export const readonly = __REMOTE_MODE__ || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window);
+export const isTauri = !readonly;
 
 function assertTauri(): void {
   if (!isTauri) {
@@ -55,7 +63,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[invoke ${cmd}] ${message}`);
-    throw new Error(message);
+    // 带上 cause：界面上只显示 message，但控制台能展开看到 Tauri 原始错误
+    throw new Error(message, { cause: err });
   }
 }
 

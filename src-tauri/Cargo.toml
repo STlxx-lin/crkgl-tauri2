@@ -34,6 +34,12 @@ if-addrs = "0.13"
 log = "0.4"
 mime_guess = "2"
 
+# 只读站的 handler 测试用：`Router::oneshot` 需要 tower 的 ServiceExt，
+# 读响应体需要 http_body_util。两者都只是测试依赖，不进发布包。
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
 # 只有开机自启要碰注册表；用已在依赖图里的 0.59，不额外拉新版本
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

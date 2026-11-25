@@ -1,7 +1,7 @@
 @echo off
 REM Rust 1.90 + MSVC wrapper script (ASCII only for Windows GBK cmd.exe safety).
-REM Automatically detects vcvars64.bat via vswhere.exe unless VCVARS is set,
-REM prepends the Rust 1.90 toolchain, removes Git usr/bin from PATH to avoid link.exe shadowing,
+REM Detects vcvars64.bat via vswhere.exe unless VCVARS is set, prepends the Rust 1.90
+REM toolchain, strips every Git usr\bin from PATH (its link.exe shadows MSVC link.exe),
 REM and enters src-tauri automatically when invoked from the repository root.
 setlocal EnableDelayedExpansion
 
@@ -13,11 +13,10 @@ if not defined VCVARS (
     )
   )
 )
-if not defined VCVARS if exist "E:\VisualStudio\VC\Auxiliary\Build\vcvars64.bat" (
-  set "VCVARS=E:\VisualStudio\VC\Auxiliary\Build\vcvars64.bat"
-)
 if not defined VCVARS (
-  echo [rust90] vcvars64.bat not found. Install VS C++ Build Tools or set VCVARS.
+  echo [rust90] vcvars64.bat not found.
+  echo [rust90] Install "Visual Studio Build Tools" with the "Desktop development with C++" workload,
+  echo [rust90] or set VCVARS to the full path of your own vcvars64.bat.
   exit /b 1
 )
 
@@ -27,14 +26,28 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Prefer the 1.90 toolchain pinned by rust-toolchain.toml; fall back to whatever
+REM `cargo` is already on PATH so a fresh clone with only stable installed still works.
 set "RUST90=%USERPROFILE%\.rustup\toolchains\1.90.0-x86_64-pc-windows-msvc\bin"
 if not exist "%RUST90%\rustc.exe" (
-  echo [rust90] Rust 1.90.0 toolchain not found at "%RUST90%".
-  exit /b 1
+  where cargo >nul 2>&1
+  if errorlevel 1 (
+    echo [rust90] Neither Rust 1.90.0 nor a cargo on PATH was found.
+    echo [rust90] Install it with: rustup toolchain install 1.90.0
+    exit /b 1
+  )
+  set "RUST90="
 )
 
-set "PATH=%RUST90%;%PATH:C:\Program Files\Git\usr\bin;=%"
-set "PATH=%PATH:D:\Git\usr\bin;=%"
+REM Strip every */Git/usr/bin entry instead of hardcoding one machine's install path:
+REM Git for Windows ships its own link.exe, which MSVC builds would otherwise pick up.
+set "PATH_CLEAN="
+for %%p in ("%PATH:;=" "%") do (
+  set "ONE=%%~p"
+  if /i not "!ONE:~-12!"=="\Git\usr\bin" set "PATH_CLEAN=!PATH_CLEAN!;!ONE!"
+)
+if defined PATH_CLEAN set "PATH=%PATH_CLEAN:~1%"
+if defined RUST90 set "PATH=%RUST90%;%PATH%"
 
 set "POP_NEEDED=0"
 if not exist "Cargo.toml" (
@@ -44,7 +57,11 @@ if not exist "Cargo.toml" (
   )
 )
 
-"%RUST90%\cargo.exe" %*
+if defined RUST90 (
+  "%RUST90%\cargo.exe" %*
+) else (
+  cargo %*
+)
 set "RC=%ERRORLEVEL%"
 if "%POP_NEEDED%"=="1" popd
 exit /b %RC%

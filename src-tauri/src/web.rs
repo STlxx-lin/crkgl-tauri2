@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::Json;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
+use axum::Json;
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
@@ -64,19 +64,16 @@ pub struct WebHandle {
 
 impl WebHandle {
     pub fn snapshot(&self) -> WebStatus {
-        self.status
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_else(|_| WebStatus {
-                enabled: false,
-                listening: false,
-                port: 0,
-                requested_port: 0,
-                error: Some("状态不可用".into()),
-                urls: Vec::new(),
-                static_ready: false,
-                started_at: None,
-            })
+        self.status.lock().map(|s| s.clone()).unwrap_or_else(|_| WebStatus {
+            enabled: false,
+            listening: false,
+            port: 0,
+            requested_port: 0,
+            error: Some("状态不可用".into()),
+            urls: Vec::new(),
+            static_ready: false,
+            started_at: None,
+        })
     }
 
     /// 等待首次端口绑定流程完成（成功或全部候选端口失败），返回最新状态快照。
@@ -183,9 +180,7 @@ fn normalize_host(raw: &str) -> Option<String> {
 
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified(),
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
@@ -219,10 +214,17 @@ impl Bucket {
     /// 令牌桶：容量 RATE_PER_SECOND，按真实经过的时间补充。
     /// 注意不能让“本次补充”影响“本次是否存在令牌”：先补 → 再判 → 再扣。
     fn allow(&mut self, ip: IpAddr) -> bool {
-        let now = Instant::now();
+        self.allow_at(ip, Instant::now())
+    }
+
+    /// 与 allow 相同，只是「当前时刻」由调用方传入，便于测试模拟时间流逝。
+    ///
+    /// 测试不能把 Instant 往回拨：Windows 上它是开机以来的时间，全新的 CI 机器
+    /// 绝对值可能不足 600 秒，相减会溢出 panic。把「现在」往后挪才是安全的。
+    fn allow_at(&mut self, ip: IpAddr, now: Instant) -> bool {
         self.sweep_if_needed(now);
         let entry = self.tokens.entry(ip).or_insert((RATE_PER_SECOND, now));
-        let elapsed = now.duration_since(entry.1).as_secs_f64();
+        let elapsed = now.saturating_duration_since(entry.1).as_secs_f64();
         if elapsed > 0.0 {
             entry.0 = (entry.0 + elapsed * RATE_PER_SECOND).min(RATE_PER_SECOND);
             entry.1 = now;
@@ -238,7 +240,7 @@ impl Bucket {
     /// 超过上限时立刻收紧；「满桶 + 闲置」的回收最多每 60 秒一次，避免每个请求都遍历整表。
     fn sweep_if_needed(&mut self, now: Instant) {
         let due = match self.swept_at {
-            Some(at) => now.duration_since(at).as_secs_f64() >= 60.0,
+            Some(at) => now.saturating_duration_since(at).as_secs_f64() >= 60.0,
             None => true,
         };
         if self.tokens.len() < BUCKET_MAX_IPS {
@@ -250,20 +252,16 @@ impl Bucket {
         // 先按「满桶 + 长时间没动」清，满桶等同于从未出现过
         self.tokens.retain(|_, (tokens, seen)| {
             let full = *tokens >= RATE_PER_SECOND - f64::EPSILON;
-            let idle = now.duration_since(*seen).as_secs_f64() > BUCKET_IDLE_SECS;
+            let idle = now.saturating_duration_since(*seen).as_secs_f64() > BUCKET_IDLE_SECS;
             !(full && idle)
         });
         // 还超就当 LRU：保留最近活跃的一半。硬上限不能等 60 秒窗口，否则
         // 短时间大量换源地址就能把内存吃满。
         if self.tokens.len() >= BUCKET_MAX_IPS {
-            let mut seen: Vec<(IpAddr, Instant)> =
-                self.tokens.iter().map(|(ip, (_, at))| (*ip, *at)).collect();
+            let mut seen: Vec<(IpAddr, Instant)> = self.tokens.iter().map(|(ip, (_, at))| (*ip, *at)).collect();
             seen.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
-            let keep: std::collections::HashSet<IpAddr> = seen
-                .into_iter()
-                .take(BUCKET_MAX_IPS / 2)
-                .map(|(ip, _)| ip)
-                .collect();
+            let keep: std::collections::HashSet<IpAddr> =
+                seen.into_iter().take(BUCKET_MAX_IPS / 2).map(|(ip, _)| ip).collect();
             self.tokens.retain(|ip, _| keep.contains(ip));
         }
         self.swept_at = Some(now);
@@ -284,11 +282,7 @@ fn secure_headers(mut response: Response) -> Response {
 }
 
 fn forbidden() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({ "error": "只允许局域网访问" })),
-    )
-        .into_response()
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "只允许局域网访问" }))).into_response()
 }
 
 fn too_many() -> Response {
@@ -298,7 +292,6 @@ fn too_many() -> Response {
     )
         .into_response()
 }
-
 
 /// 500 响应。**不把内部错误原文回给局域网**：`message` 多数来自
 /// `DbError`，里面带着表名、SQL 片段甚至本机路径，等于给扫描者送情报。
@@ -415,11 +408,7 @@ pub fn router(state: WebState) -> Router {
 
 /// 所有请求先过这一道：私网判定 → 令牌桶 → 记访问日志 → 补安全头。
 #[allow(clippy::type_complexity)]
-async fn guard_request(
-    state: WebState,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+async fn guard_request(state: WebState, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let connect = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -452,12 +441,7 @@ async fn guard_request(
     let status = response.status().as_u16();
     // 静态资源不逐个记账，免得把访问日志刷满
     if path.starts_with("/api/") {
-        db::record_access(
-            &state.db,
-            &ip_text,
-            &format!("{} {}", method.as_str(), path),
-            status,
-        );
+        db::record_access(&state.db, &ip_text, &format!("{} {}", method.as_str(), path), status);
     }
     secure_headers(response)
 }
@@ -528,10 +512,7 @@ fn serve_file(path: &std::path::Path) -> Response {
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    let content_type = mime_guess::from_path(path)
-        .first_or_octet_stream()
-        .as_ref()
-        .to_string();
+    let content_type = mime_guess::from_path(path).first_or_octet_stream().as_ref().to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
@@ -587,10 +568,7 @@ async fn export_csv(State(state): State<WebState>, Query(query): Query<PageQuery
         Ok((csv, _rows)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
-            .header(
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"ledger.csv\"",
-            )
+            .header(header::CONTENT_DISPOSITION, "attachment; filename=\"ledger.csv\"")
             .body(Body::from(csv))
             .unwrap_or_else(|_| server_error("导出失败".into())),
         Err(err) => server_error(err),
@@ -628,12 +606,8 @@ async fn stock_handler(State(state): State<WebState>, Query(query): Query<StockQ
 
 async fn stock_count_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
     match state.db.with(|c| {
-        crate::stock::stock_count(
-            c,
-            query.keyword.as_deref(),
-            query.only_negative.unwrap_or(false),
-        )
-        .map_err(crate::db::DbError::from)
+        crate::stock::stock_count(c, query.keyword.as_deref(), query.only_negative.unwrap_or(false))
+            .map_err(crate::db::DbError::from)
     }) {
         Ok(n) => Json(n).into_response(),
         Err(err) => server_error(err),
@@ -654,14 +628,20 @@ async fn stock_check_handler(State(state): State<WebState>) -> Response {
 async fn summary_handler(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let group_by = query.group_by.clone().unwrap_or_else(|| "month".into());
     let limit = query.limit.unwrap_or(50);
-    match state.db.with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from))
+    {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
 }
 
 async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
-    match state.db.with(|c| summary::monthly(c, &query.filter()).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::monthly(c, &query.filter()).map_err(crate::db::DbError::from))
+    {
         Ok(points) => Json(points).into_response(),
         Err(err) => server_error(err),
     }
@@ -669,14 +649,19 @@ async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery
 
 async fn top_items(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let kind = query.kind_of_top.clone().unwrap_or_else(|| "out".into());
-    match state.db.with(|c| summary::top_items(c, &query.filter(), &kind, query.limit.unwrap_or(10)).map_err(crate::db::DbError::from)) {
+    match state.db.with(|c| {
+        summary::top_items(c, &query.filter(), &kind, query.limit.unwrap_or(10)).map_err(crate::db::DbError::from)
+    }) {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
 }
 
 async fn compare(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
-    match state.db.with(|c| summary::compare_previous(c, &query.filter()).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::compare_previous(c, &query.filter()).map_err(crate::db::DbError::from))
+    {
         Ok(Some(cmp)) => Json(cmp).into_response(),
         Ok(None) => Json(serde_json::Value::Null).into_response(),
         Err(err) => server_error(err),
@@ -739,8 +724,7 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                     // 绑定失败不算错误（有的系统关掉了 IPv6，或端口已被 v6 独占）。
                     let v6_task = match tokio::net::TcpListener::bind(v6).await {
                         Ok(v6_listener) => {
-                            let v6_app = router(state.clone())
-                                .into_make_service_with_connect_info::<SocketAddr>();
+                            let v6_app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
                             let v6_stop = stop.clone();
                             let task = tauri::async_runtime::spawn(async move {
                                 let v6_shutdown = async move {
@@ -910,13 +894,13 @@ mod tests {
     fn bucket_refills_over_time() {
         let mut bucket = Bucket::default();
         let ip: IpAddr = "10.0.0.2".parse().unwrap();
-        // 手动把时间戳往回拨一秒，模拟“过了一秒”
-        assert!(bucket.allow(ip));
+        // 把「现在」往后挪一秒模拟时间流逝；回拨时间戳在新机器上会溢出 panic
+        let t0 = Instant::now();
+        assert!(bucket.allow_at(ip, t0));
         if let Some(entry) = bucket.tokens.get_mut(&ip) {
             entry.0 = 0.0;
-            entry.1 -= std::time::Duration::from_secs(1);
         }
-        assert!(bucket.allow(ip));
+        assert!(bucket.allow_at(ip, t0 + std::time::Duration::from_secs(1)));
     }
 
     #[test]
@@ -947,18 +931,180 @@ mod tests {
     fn bucket_drops_idle_full_entries() {
         let mut bucket = Bucket::default();
         let idle: IpAddr = "10.2.0.1".parse().unwrap();
-        bucket.allow(idle);
-        // 立刻补满桶（allow 之后只剩 <1 个令牌），并把时间戳往回拨到过期
+        let t0 = Instant::now();
+        bucket.allow_at(idle, t0);
+        // 立刻补满桶（allow 之后只剩 <1 个令牌），之后直接跳到闲置阈值之外
         if let Some(entry) = bucket.tokens.get_mut(&idle) {
             entry.0 = RATE_PER_SECOND;
-            entry.1 -= std::time::Duration::from_secs((BUCKET_IDLE_SECS as u64) + 10);
         }
         // 撑满表宽度触发清理
+        let later = t0 + std::time::Duration::from_secs((BUCKET_IDLE_SECS as u64) + 10);
         for i in 0..(BUCKET_MAX_IPS + 10) {
             let ip: IpAddr = format!("10.3.{}.{}", (i / 250) % 250, (i % 250) + 1).parse().unwrap();
-            bucket.allow(ip);
+            bucket.allow_at(ip, later);
         }
         assert!(!bucket.tokens.contains_key(&idle), "闲置的满桶条目应被回收");
+    }
+
+    // ---- handler 级测试：用 oneshot 直接打 Router，不起真实监听 ----
+    //
+    // 这一层以前只有纯函数测试（is_private / Bucket / resolve_static_path），
+    // 中间件与路由的分支（403 / 429 / 405 / 404 / 路径穿越）全靠人肉点。
+    // 重构路由表或改中间件顺序时，那些边界会静默失效。
+
+    fn test_state(dist: Option<std::path::PathBuf>) -> WebState {
+        WebState {
+            db: std::sync::Arc::new(Db::open_in_memory().expect("内存库")),
+            dist,
+            started_at: Instant::now(),
+            rate: std::sync::Arc::new(Mutex::new(Bucket::default())),
+        }
+    }
+
+    /// 一次请求：带上来源地址（中间件据此判私网），返回状态码与响应。
+    async fn send(state: WebState, method: axum::http::Method, uri: &str, peer: &str) -> (StatusCode, Response) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            peer.parse::<std::net::IpAddr>().expect("来源地址"),
+            50000,
+        )));
+        let response = router(state).oneshot(req).await.expect("router 不应 panic");
+        (response.status(), response)
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_public_source_ip() {
+        let (status, _) = send(test_state(None), axum::http::Method::GET, "/api/health", "8.8.8.8").await;
+        // 公网来源直接 403，不能先执行任何查询
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn handler_allows_private_source_and_sets_secure_headers() {
+        let (status, response) = send(test_state(None), axum::http::Method::GET, "/api/health", "192.168.1.20").await;
+        assert_eq!(status, StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert!(headers
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn handler_rate_limits_one_source_without_touching_others() {
+        let state = test_state(None);
+        let mut limited = 0;
+        // 同一来源连打，超出容量后必须是 429
+        for _ in 0..(RATE_PER_SECOND as usize + 10) {
+            let (status, _) = send(state.clone(), axum::http::Method::GET, "/api/health", "192.168.1.30").await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                limited += 1;
+            }
+        }
+        assert!(limited >= 5, "超出令牌桶容量后应持续拒绝，实际 {limited}");
+        // 别的来源不受影响
+        let (status, _) = send(state, axum::http::Method::GET, "/api/health", "192.168.1.31").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handler_has_no_write_routes() {
+        let state = test_state(None);
+        // 只读站没有任何写入口。已知路由上的写方法由 axum 判 405，未注册的
+        // /api 路径落到兜底路由、返回 404——两种都算拒绝，重点是绝不能 2xx
+        // 被当成查询真的执行一次。
+        for method in [axum::http::Method::POST, axum::http::Method::DELETE] {
+            let (status, _) = send(state.clone(), method.clone(), "/api/ledger/page", "10.0.0.5").await;
+            assert!(
+                status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
+                "{method} 应被拒绝，实际 {status}"
+            );
+        }
+        // 连未注册的 /api 路径也不给写
+        let (status, _) = send(state.clone(), axum::http::Method::POST, "/api/whatever", "10.0.0.5").await;
+        assert!(
+            status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
+            "未注册的写路径应被拒绝，实际 {status}"
+        );
+        // 导出接口也不接受写方法（否则就能用 POST 触发一次导出）
+        let (status, _) = send(state, axum::http::Method::POST, "/api/ledger/export.csv", "10.0.0.5").await;
+        assert_ne!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handler_unknown_api_is_404_not_a_page() {
+        let (status, _) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/no-such-endpoint",
+            "10.0.0.6",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handler_blocks_absolute_path_read() {
+        // 只读站曾经能用盘符/绝对路径读到本机任意文件
+        let state = test_state(Some(std::env::temp_dir().join("ledger-web-handler-test")));
+        for uri in ["/C:/Windows/win.ini", "/c:\\\\Windows\\\\win.ini", "/../secret.txt"] {
+            let (status, _) = send(state.clone(), axum::http::Method::GET, uri, "10.0.0.7").await;
+            assert_ne!(status, StatusCode::OK, "{uri} 不应能读到文件");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_bad_page_params_are_400_without_leaking_sql() {
+        let state = test_state(None);
+        for uri in [
+            "/api/ledger/page?page=0",
+            "/api/ledger/page?pageSize=0",
+            "/api/ledger/page?pageSize=99999",
+        ] {
+            let (status, response) = send(state.clone(), axum::http::Method::GET, uri, "10.0.0.8").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let body = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let text = String::from_utf8_lossy(&body);
+            assert!(!text.contains("SELECT"), "不该把 SQL 回给局域网: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_detail_missing_row_is_404() {
+        let (status, _) = send(
+            test_state(None),
+            axum::http::Method::GET,
+            "/api/ledger/detail?id=99999",
+            "10.0.0.9",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handler_server_error_hides_internal_message() {
+        // 直接调 server_error 确认对外文案是固定的，原文只进日志
+        let response = server_error("no such table: secret_sql".into());
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("secret_sql"), "{text}");
+        assert!(text.contains("INTERNAL"), "{text}");
     }
 
     #[test]

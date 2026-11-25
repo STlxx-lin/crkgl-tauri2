@@ -82,13 +82,17 @@ fn trim_opt(value: &Option<String>) -> Option<String> {
 }
 
 /// 某个值在业务表里出现在哪些列。统计引用与改名同步都按这张表处理。
+///
+/// 一张表一列不够：出库部门既写在台账明细上（`ledger.owner`），也写在单据头
+/// 上（`vouchers.owner`）。只改台账的话，台账导出里是新闻名、单据详情与打印
+/// 凭证里还是老名字，汇总按 owner 分组还会多出一个假分组。
 fn usage_targets(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
         "unit" => &[("items", "unit"), ("ledger", "unit")],
         "category" => &[("items", "category")],
         "item_type" => &[("items", "item_type")],
-        "owner" => &[("ledger", "owner")],
-        "buyer" => &[("ledger", "buyer")],
+        "owner" => &[("ledger", "owner"), ("vouchers", "owner"), ("items", "owner")],
+        "buyer" => &[("ledger", "buyer"), ("vouchers", "buyer")],
         _ => &[],
     }
 }
@@ -113,13 +117,13 @@ pub fn list(conn: &Connection, kind: &str, keyword: Option<&str>, only_active: b
     let like = keyword
         .map(str::trim)
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{k}%"));
+        .map(crate::ledger::like_pattern);
     let mut stmt = conn
         .prepare(
             "SELECT id, kind, value, sort_no, hits, remark, active
              FROM dict
              WHERE kind = ?1
-               AND (?2 IS NULL OR value LIKE ?2)
+               AND (?2 IS NULL OR value LIKE ?2 ESCAPE '\\')
                AND (?3 = 0 OR active = 1)
              ORDER BY sort_no, hits DESC, value",
         )
@@ -274,9 +278,7 @@ pub fn delete(conn: &Connection, id: i64) -> DbResult<()> {
         })?;
     let used = usage_count(conn, &kind, &value);
     if used > 0 {
-        return Err(format!(
-            "「{value}」还有 {used} 行在用，先停用或改名，别直接删"
-        ));
+        return Err(format!("「{value}」还有 {used} 行在用，先停用或改名，别直接删"));
     }
     conn.execute("DELETE FROM dict WHERE id = ?1", [id])
         .map_err(DbError::from)?;
@@ -326,13 +328,18 @@ pub fn sync_from_data(conn: &Connection) -> DbResult<usize> {
         .query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0))
         .map_err(DbError::from)?;
 
-    let sources: [(&str, &str, &str); 6] = [
+    let sources: [(&str, &str, &str); 9] = [
         ("unit", "items", "unit"),
         ("unit", "ledger", "unit"),
         ("category", "items", "category"),
         ("item_type", "items", "item_type"),
+        ("owner", "items", "owner"),
         ("owner", "ledger", "owner"),
         ("buyer", "ledger", "buyer"),
+        // 单据头上的部门/采购人也得收进来：手工开的单如果台账行被删光，
+        // 这两个值就只剩单据头上有，同步时漏掉会让下拉里查不到。
+        ("owner", "vouchers", "owner"),
+        ("buyer", "vouchers", "buyer"),
     ];
     for (kind, table, column) in sources {
         tx.execute(
@@ -360,19 +367,11 @@ pub fn sync_from_data(conn: &Connection) -> DbResult<usize> {
 /// 字典导出：按类别导出当前筛选结果，列头用中文类别名。
 ///
 /// 复用 `list`，导出的就是屏幕上那一批（含「只看在用」的取舍）。
-pub fn export_csv(
-    conn: &Connection,
-    kind: &str,
-    keyword: Option<&str>,
-    only_active: bool,
-) -> DbResult<(String, i64)> {
+pub fn export_csv(conn: &Connection, kind: &str, keyword: Option<&str>, only_active: bool) -> DbResult<(String, i64)> {
     let rows = list(conn, kind, keyword, only_active)?;
     let mut out = String::from("\u{feff}");
     // 第一列列名跟着类别走，导进 Excel 一眼能看出这是哪本字典
-    out.push_str(&format!(
-        "{},使用行数,排序,备注,状态\n",
-        kind_label(kind)
-    ));
+    out.push_str(&format!("{},使用行数,排序,备注,状态\n", kind_label(kind)));
     for entry in &rows {
         let fields = [
             entry.value.clone(),
@@ -478,6 +477,66 @@ mod tests {
         let after = list_db(&db, "owner", None, false).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].value, "乾力总装车间");
+    }
+
+    #[test]
+    fn rename_propagates_to_voucher_headers_too() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db);
+        // 手工开的单：单据头与台账明细各存一份部门
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO vouchers (kind, doc_no, doc_date, owner, buyer, row_count, amount_cents)
+                 VALUES ('out','20250101001','2025-01-01','乾力车间','严兰兰',0,0)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+        sync_db(&db).unwrap();
+        let owner = list_db(&db, "owner", Some("乾力"), false).unwrap().remove(0);
+        update_db(
+            &db,
+            owner.id,
+            &DictInput {
+                kind: "owner".into(),
+                value: "乾力总装车间".into(),
+                sort_no: None,
+                remark: None,
+                active: true,
+            },
+        )
+        .unwrap();
+
+        let (ledger_old, ledger_new): (i64, i64) = db
+            .with(|c| {
+                Ok((
+                    c.query_row("SELECT COUNT(*) FROM ledger WHERE owner='乾力车间'", [], |r| {
+                        r.get(0)
+                    })
+                    .map_err(DbError::from)?,
+                    c.query_row(
+                        "SELECT COUNT(*) FROM ledger WHERE owner='乾力总装车间'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(DbError::from)?,
+                ))
+            })
+            .unwrap();
+        let voucher_owner: String = db
+            .with(|c| {
+                c.query_row("SELECT owner FROM vouchers WHERE doc_no='20250101001'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(DbError::from)
+            })
+            .unwrap();
+        // 台账与单据头同一次改名里都跟着走，不能一个新一个旧
+        assert_eq!(ledger_old, 0);
+        assert_eq!(ledger_new, 2);
+        assert_eq!(voucher_owner, "乾力总装车间");
     }
 
     #[test]

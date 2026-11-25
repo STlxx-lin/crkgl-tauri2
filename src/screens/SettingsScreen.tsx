@@ -1,10 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  RiComputerLine,
-  RiDatabase2Line,
-  RiDeleteBinLine,
-  RiPrinterLine,
-} from "@remixicon/react";
+import { RiComputerLine, RiDatabase2Line, RiDeleteBinLine, RiPrinterLine } from "@remixicon/react";
 import { autostartSet, autostartStatus, clearData, isTauri } from "../lib/api";
 import type { BootstrapInfo } from "../lib/types";
 import { count } from "../lib/format";
@@ -25,13 +20,7 @@ import { PageHeader } from "../components/AppShell";
 /**
  * 设置页：打印设置 + 本机数据管理（清空数据）。
  */
-export function SettingsScreen({
-  boot,
-  onChanged,
-}: {
-  boot: BootstrapInfo | null;
-  onChanged: () => void;
-}) {
+export function SettingsScreen({ boot, onChanged }: { boot: BootstrapInfo | null; onChanged: () => void }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [includeMaster, setIncludeMaster] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -46,11 +35,7 @@ export function SettingsScreen({
         `导入记录 ${count(out.imports)} 批`,
       ];
       if (includeMaster) {
-        parts.push(
-          `物料 ${count(out.items)} 条`,
-          `供应商 ${count(out.suppliers)} 家`,
-          `字典 ${count(out.dict)} 项`,
-        );
+        parts.push(`物料 ${count(out.items)} 条`, `供应商 ${count(out.suppliers)} 家`, `字典 ${count(out.dict)} 项`);
       }
       toast("数据已清空", {
         description: parts.join(" · "),
@@ -69,10 +54,7 @@ export function SettingsScreen({
 
   return (
     <>
-      <PageHeader
-        title="设置"
-        description="A4 打印排版偏好与本机数据库维护。"
-      />
+      <PageHeader title="设置" description="A4 打印排版偏好与本机数据库维护。" />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
         <div className="grid max-w-4xl grid-cols-1 gap-4 md:grid-cols-2">
@@ -150,9 +132,7 @@ export function SettingsScreen({
                       className="mt-0.5 size-4 cursor-pointer accent-red-500"
                     />
                     <span className="flex flex-col gap-0.5">
-                      <span className="text-body-2-medium text-text-primary">
-                        同时清空基础资料
-                      </span>
+                      <span className="text-body-2-medium text-text-primary">同时清空基础资料</span>
                       <span className="text-caption-1-regular text-text-tertiary">
                         一并删除所有物料主数据、加工件图号、供应商名录及常用词典（单位/类别/部门/采购人）。
                       </span>

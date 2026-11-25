@@ -96,6 +96,24 @@ fn text(v: &Option<String>) -> Option<&str> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// 把用户输入包装成 `LIKE` 模式，并转义 `%` / `_` / `\`。
+///
+/// 直接 `format!("%{}%")` 时，输入一个 `%` 会匹配全表、`_` 变成单字符通配，
+/// 而且没法搜索字面量 `%`（物料名里确实会出现）。配套 SQL 必须写
+/// `LIKE ? ESCAPE '\'`。
+pub(crate) fn like_pattern(keyword: &str) -> String {
+    let mut out = String::with_capacity(keyword.len() + 2);
+    out.push('%');
+    for ch in keyword.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
+}
+
 /// 把筛选编译成 SQL 片段 + 参数。汇总、导出、计数都走这里。
 pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
     let mut clauses: Vec<&str> = vec!["1 = 1"];
@@ -129,9 +147,11 @@ pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
     }
     if let Some(keyword) = text(&filter.keyword) {
         clauses.push(
-            "(doc_no LIKE ? OR delivery_no LIKE ? OR item_code LIKE ? OR item_name LIKE ? OR partner LIKE ? OR remark LIKE ? OR owner LIKE ?)",
+            "(doc_no LIKE ? ESCAPE '\\' OR delivery_no LIKE ? ESCAPE '\\' OR item_code LIKE ? ESCAPE '\\'
+              OR item_name LIKE ? ESCAPE '\\' OR partner LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\'
+              OR owner LIKE ? ESCAPE '\\')",
         );
-        let like = format!("%{}%", keyword);
+        let like = like_pattern(keyword);
         for _ in 0..7 {
             params.push(Value::Text(like.clone()));
         }
@@ -164,6 +184,10 @@ fn order_by(sort: &Option<String>, desc: bool) -> String {
 }
 
 /// `2025-1-5` / `2025/1/5` → `2025-01-05`，非法值原样返回（SQL 里自然筛不到）。
+///
+/// 除了月份 1..=12、日 1..=31 的粗校验，还要真的存在这一天：
+/// `2025-02-31` / `2025-04-31` 以前能通过，筛选时静默返回空集，
+/// 用户会以为「那天没数据」。这里用 NaiveDate 判闰年与每月天数。
 pub fn normalize_date(raw: &str) -> String {
     let parts: Vec<&str> = raw
         .split(['-', '/', '.'])
@@ -176,8 +200,8 @@ pub fn normalize_date(raw: &str) -> String {
             parts[1].parse::<u32>(),
             parts[2].parse::<u32>(),
         ) {
-            if (1..=12).contains(&m) && (1..=31).contains(&d) {
-                return format!("{y:04}-{m:02}-{d:02}");
+            if let Some(date) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+                return date.format("%Y-%m-%d").to_string();
             }
         }
     }
@@ -219,7 +243,6 @@ fn split_flags(raw: &str) -> Vec<String> {
         .map(ToOwned::to_owned)
         .collect()
 }
-
 
 pub(crate) const SELECT_COLUMNS_PUB: &str = "id, kind, doc_date, doc_no, delivery_no, item_code, item_name, spec, unit,
     qty, price_micros, amount_cents, remark, partner, buyer, owner, receiver, flags, sheet, row_no, import_id, created_at";
@@ -396,34 +419,40 @@ pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
             }
         }
     }
-    tx.execute(
-        "UPDATE ledger SET
-            doc_date = COALESCE(?1, doc_date),
-            doc_no = COALESCE(?2, doc_no),
-            item_code = COALESCE(?3, item_code),
-            item_name = COALESCE(?4, item_name),
-            unit = COALESCE(?5, unit),
-            qty = COALESCE(?6, qty),
-            price_micros = COALESCE(?7, price_micros),
-            amount_cents = COALESCE(?8, amount_cents),
-            remark = COALESCE(?9, remark),
-            owner = COALESCE(?10, owner)
-         WHERE id = ?11",
-        rusqlite::params![
-            patch.doc_date.as_deref().map(normalize_date),
-            patch.doc_no,
-            patch.item_code,
-            patch.item_name,
-            patch.unit,
-            patch.qty,
-            patch.price_micros,
-            patch.amount_cents,
-            patch.remark,
-            patch.owner,
-            id
-        ],
-    )
-    .map_err(DbError::from)?;
+    let changed = tx
+        .execute(
+            "UPDATE ledger SET
+                doc_date = COALESCE(?1, doc_date),
+                doc_no = COALESCE(?2, doc_no),
+                item_code = COALESCE(?3, item_code),
+                item_name = COALESCE(?4, item_name),
+                unit = COALESCE(?5, unit),
+                qty = COALESCE(?6, qty),
+                price_micros = COALESCE(?7, price_micros),
+                amount_cents = COALESCE(?8, amount_cents),
+                remark = COALESCE(?9, remark),
+                owner = COALESCE(?10, owner)
+             WHERE id = ?11",
+            rusqlite::params![
+                patch.doc_date.as_deref().map(normalize_date),
+                patch.doc_no,
+                patch.item_code,
+                patch.item_name,
+                patch.unit,
+                patch.qty,
+                patch.price_micros,
+                patch.amount_cents,
+                patch.remark,
+                patch.owner,
+                id
+            ],
+        )
+        .map_err(DbError::from)?;
+    // 行在别处（批量删除/另一台机器）已经没了：以前这里静默成功，用户点保存
+    // 看不到任何变化也不报错。保存必须能失败，才知道该刷新列表。
+    if changed == 0 {
+        return Err("这一行已经不存在，可能已被删除，请刷新后重试".into());
+    }
     reconcile_vouchers(&tx)?;
     tx.commit().map_err(DbError::from)?;
     Ok(())
@@ -499,9 +528,7 @@ pub fn bulk_delete(conn: &Connection, ids: &[i64]) -> DbResult<usize> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let mut removed = 0usize;
     {
-        let mut stmt = tx
-            .prepare("DELETE FROM ledger WHERE id = ?1")
-            .map_err(DbError::from)?;
+        let mut stmt = tx.prepare("DELETE FROM ledger WHERE id = ?1").map_err(DbError::from)?;
         for id in ids {
             removed += stmt.execute([id]).map_err(DbError::from)?;
         }
@@ -532,7 +559,6 @@ pub fn detail_from(db: &Db, id: i64) -> DbResult<Option<LedgerRow>> {
 pub fn export_csv_from(db: &Db, filter: &LedgerFilter, limit: i64) -> DbResult<(String, i64)> {
     db.with(|c| export_csv(c, filter, limit).map_err(DbError::from))
 }
-
 
 pub fn facets(conn: &Connection) -> DbResult<Facets> {
     let distinct = |column: &str| -> DbResult<Vec<String>> {
@@ -595,7 +621,7 @@ pub fn export_csv(conn: &Connection, filter: &LedgerFilter, limit: i64) -> DbRes
             row.item_name.clone().unwrap_or_default(),
             row.spec.clone().unwrap_or_default(),
             row.unit.clone().unwrap_or_default(),
-            row.qty.map(|v| trim_float(v)).unwrap_or_default(),
+            row.qty.map(trim_float).unwrap_or_default(),
             row.price_micros.map(micros_text).unwrap_or_default(),
             row.amount_cents.map(cents_text).unwrap_or_default(),
             row.partner.clone().unwrap_or_default(),
@@ -649,18 +675,39 @@ pub fn trim_float(v: f64) -> String {
 /// 一行 CSV：字段里有逗号/引号/换行时用引号包起来并把引号翻倍。
 ///
 /// 台账导出与基础资料导出共用，避免两套转义规则写岔。
+///
+/// 另外要防公式注入：备注、物料名称、供应商名都来自别人给的 Excel，
+/// 以 `= + - @` 或制表符/回车开头的字段在 Excel 里会被当成公式解析
+/// （`=cmd|'/c calc'!A1` 这类）。做法是前置一个单引号把它钉成文本。
+/// 纯数字不处理，否则负数金额会多出一个引号。
 pub(crate) fn csv_row(fields: &[String]) -> String {
-    let escaped: Vec<String> = fields
-        .iter()
-        .map(|f| {
-            if f.contains([',', '"', '\n', '\r']) {
-                format!("\"{}\"", f.replace('"', "\"\""))
-            } else {
-                f.clone()
-            }
-        })
-        .collect();
+    let escaped: Vec<String> = fields.iter().map(|f| csv_cell(f)).collect();
     escaped.join(",") + "\n"
+}
+
+/// 单个 CSV 单元格：公式注入防护 + 引号转义。
+fn csv_cell(field: &str) -> String {
+    // `-5` / `-0.25` 这类纯数字是正常的负数，不能被当成公式
+    let numeric = field
+        .strip_prefix('-')
+        .map(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .unwrap_or(false);
+    let dangerous = !numeric
+        && field
+            .chars()
+            .next()
+            .map(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+            .unwrap_or(false);
+    let body = if dangerous {
+        format!("'{field}")
+    } else {
+        field.to_string()
+    };
+    if body.contains([',', '"', '\n', '\r']) || body.starts_with('\'') {
+        format!("\"{}\"", body.replace('"', "\"\""))
+    } else {
+        body
+    }
 }
 
 pub fn count(db: &Db) -> DbResult<i64> {
@@ -713,12 +760,28 @@ mod tests {
         assert_eq!(normalize_date("2025.12.31"), "2025-12-31");
         assert_eq!(normalize_date("2025/13/1"), "2025/13/1");
         assert_eq!(normalize_date("上周"), "上周");
+        // 不存在的日子不能在筛选时静默返回空集
+        assert_eq!(normalize_date("2025-02-31"), "2025-02-31");
+        assert_eq!(normalize_date("2025-04-31"), "2025-04-31");
+        // 闰年 2 月 29 是合法的
+        assert_eq!(normalize_date("2024-2-29"), "2024-02-29");
+        assert_eq!(normalize_date("2023-2-29"), "2023-2-29");
+    }
+
+    #[test]
+    fn keyword_like_escapes_wildcards() {
+        assert_eq!(like_pattern("轴承"), "%轴承%");
+        assert_eq!(like_pattern("100%"), "%100\\%%");
+        assert_eq!(like_pattern("a_b"), "%a\\_b%");
+        assert_eq!(like_pattern("c\\d"), "%c\\\\d%");
     }
 
     #[test]
     fn totals_split_by_kind() {
         let db = seeded();
-        let t = db.with(|c| totals(c, &LedgerFilter::default()).map_err(DbError::from)).unwrap();
+        let t = db
+            .with(|c| totals(c, &LedgerFilter::default()).map_err(DbError::from))
+            .unwrap();
         assert_eq!(t.rows, 4);
         assert_eq!(t.in_rows, 2);
         assert_eq!(t.out_rows, 2);
@@ -775,8 +838,10 @@ mod tests {
         let db = seeded();
         let id = db
             .with(|c| {
-                c.query_row("SELECT id FROM ledger WHERE item_code='WG-B'", [], |r| r.get::<_, i64>(0))
-                    .map_err(DbError::from)
+                c.query_row("SELECT id FROM ledger WHERE item_code='WG-B'", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(DbError::from)
             })
             .unwrap();
         let patch = LedgerPatch {
@@ -799,7 +864,7 @@ mod tests {
         assert!(db.with(|c| detail(c, id).map_err(DbError::from)).unwrap().is_none());
     }
 
-#[test]
+    #[test]
     fn bulk_update_only_touches_given_fields() {
         let db = seeded();
         let ids: Vec<i64> = db
@@ -816,11 +881,15 @@ mod tests {
             owner: Some("批量归属".into()),
             ..Default::default()
         };
-        let changed = db.with(|c| bulk_update(c, &ids[..2], &patch).map_err(DbError::from)).unwrap();
+        let changed = db
+            .with(|c| bulk_update(c, &ids[..2], &patch).map_err(DbError::from))
+            .unwrap();
         assert_eq!(changed, 2);
         let owners: Vec<Option<String>> = db
             .with(|c| {
-                let mut stmt = c.prepare("SELECT owner FROM ledger ORDER BY id").map_err(DbError::from)?;
+                let mut stmt = c
+                    .prepare("SELECT owner FROM ledger ORDER BY id")
+                    .map_err(DbError::from)?;
                 let rows = stmt
                     .query_map([], |r| r.get(0))
                     .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -837,7 +906,15 @@ mod tests {
     fn bulk_operations_reject_empty_and_oversized() {
         let db = seeded();
         db.with(|c| {
-            assert!(bulk_update(c, &[], &BulkPatch { owner: Some("x".into()), ..Default::default() }).is_err());
+            assert!(bulk_update(
+                c,
+                &[],
+                &BulkPatch {
+                    owner: Some("x".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
             assert!(bulk_delete(c, &[]).is_err());
             let too_many = vec![1i64; 5001];
             assert!(bulk_delete(c, &too_many).is_err());
@@ -865,10 +942,9 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            for (code, name, qty, price, amount) in [
-                ("V-A", "螺丝", 2.0, 10_000, 200),
-                ("V-B", "垫片", 3.0, 5_000, 150),
-            ] {
+            for (code, name, qty, price, amount) in
+                [("V-A", "螺丝", 2.0, 10_000, 200), ("V-B", "垫片", 3.0, 5_000, 150)]
+            {
                 c.execute(
                     "INSERT INTO ledger (voucher_id, sheet, row_no, kind, doc_date, doc_no, item_code, item_name,
                         unit, qty, price_micros, amount_cents, partner, buyer, owner, flags)
@@ -948,7 +1024,10 @@ mod tests {
 
         db.with(|c| delete(c, ids[1]).map_err(DbError::from)).unwrap();
         let left: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(left, 0, "没有明细的单据头不该留着");
     }
@@ -963,9 +1042,13 @@ mod tests {
             buyer: Some("采购丙".into()),
             remark: None,
         };
-        db.with(|c| bulk_update(c, &ids, &patch).map_err(DbError::from)).unwrap();
+        db.with(|c| bulk_update(c, &ids, &patch).map_err(DbError::from))
+            .unwrap();
         let buyer: Option<String> = db
-            .with(|c| c.query_row("SELECT buyer FROM vouchers WHERE id = 1", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT buyer FROM vouchers WHERE id = 1", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(buyer.as_deref(), Some("采购丙"));
     }
@@ -996,7 +1079,9 @@ mod tests {
             remark: None,
             owner: None,
         };
-        let err = db.with(|c| update(c, ids[0], &patch).map_err(DbError::from)).unwrap_err();
+        let err = db
+            .with(|c| update(c, ids[0], &patch).map_err(DbError::from))
+            .unwrap_err();
         assert!(err.contains("已经被另一张单据占用"), "实际 {err}");
     }
 
@@ -1008,18 +1093,40 @@ mod tests {
                 "UPDATE ledger SET remark = 'a,b' WHERE id = (SELECT id FROM ledger WHERE kind='out' LIMIT 1)",
                 [],
             )
-                .map_err(DbError::from)
-                .map(|_| ())
+            .map_err(DbError::from)
+            .map(|_| ())
         })
         .unwrap();
-        let (csv, n) = db.with(|c| export_csv(c, &LedgerFilter::default(), 1000).map_err(DbError::from)).unwrap();
+        let (csv, n) = db
+            .with(|c| export_csv(c, &LedgerFilter::default(), 1000).map_err(DbError::from))
+            .unwrap();
         assert_eq!(n, 4);
         assert!(csv.starts_with('\u{feff}'));
         assert!(csv.contains("\"a,b\""));
         assert!(csv.contains("15.00"));
     }
 
-#[test]
+    #[test]
+    fn csv_escapes_formula_injection() {
+        // 导入来的备注可能以公式开头，Excel 打开导出结果时会执行
+        let row = csv_row(&[
+            "=1+1".into(),
+            "@SUM(A1)".into(),
+            "+86".into(),
+            "-5".into(),
+            "-0.25".into(),
+            "普通文本".into(),
+        ]);
+        assert!(row.contains("\"'=1+1\""), "{row}");
+        assert!(row.contains("\"'@SUM(A1)\""), "{row}");
+        assert!(row.contains("\"'+86\""), "{row}");
+        // 纯负数不是公式，保持原样
+        assert!(row.contains(",-5,"), "{row}");
+        assert!(row.contains(",-0.25,"), "{row}");
+        assert!(row.ends_with("普通文本\n"));
+    }
+
+    #[test]
     fn micros_text_keeps_sub_cent_precision() {
         assert_eq!(micros_text(2_020), "0.202");
         assert_eq!(micros_text(2_160), "0.216");

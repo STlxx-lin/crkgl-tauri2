@@ -1,0 +1,13 @@
+# 生成物与第三方源码不参与格式化
+node_modules/
+dist/
+dist-remote/
+src-tauri/target/
+src-tauri/gen/
+# BoardUI 源码组件：跟随上游，改了以后 `npx boardui add` 升级会冲突
+components/
+styles/
+utils/
+public/
+# 包管理器的 lockfile 由 npm 自己维护
+package-lock.json

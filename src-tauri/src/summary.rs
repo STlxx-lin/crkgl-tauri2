@@ -198,6 +198,23 @@ pub fn monthly(conn: &Connection, filter: &LedgerFilter) -> DbResult<Vec<MonthPo
         .collect())
 }
 
+/// 带连接封装的入口，给 Tauri 命令用。
+pub fn grouped_from(db: &crate::db::Db, filter: &LedgerFilter, group_by: &str, limit: i64) -> DbResult<Vec<GroupRow>> {
+    db.with(|c| grouped(c, filter, group_by, limit).map_err(DbError::from))
+}
+
+pub fn top_items_from(db: &crate::db::Db, filter: &LedgerFilter, kind: &str, limit: i64) -> DbResult<Vec<TopItem>> {
+    db.with(|c| top_items(c, filter, kind, limit).map_err(DbError::from))
+}
+
+pub fn monthly_from(db: &crate::db::Db, filter: &LedgerFilter) -> DbResult<Vec<MonthPoint>> {
+    db.with(|c| monthly(c, filter).map_err(DbError::from))
+}
+
+pub fn compare_from(db: &crate::db::Db, filter: &LedgerFilter) -> DbResult<Option<PeriodCompare>> {
+    db.with(|c| compare_previous(c, filter).map_err(DbError::from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,7 +237,9 @@ mod tests {
     #[test]
     fn monthly_series_covers_each_month() {
         let db = seeded();
-        let points = db.with(|c| monthly(c, &LedgerFilter::default()).map_err(DbError::from)).unwrap();
+        let points = db
+            .with(|c| monthly(c, &LedgerFilter::default()).map_err(DbError::from))
+            .unwrap();
         assert_eq!(points.len(), 3);
         assert_eq!(points[0].month, "2025-01");
         assert_eq!(points[2].amount_out_cents, 50000);
@@ -229,7 +248,9 @@ mod tests {
     #[test]
     fn groups_by_owner_with_unlabeled_bucket() {
         let db = seeded();
-        let rows = db.with(|c| grouped(c, &LedgerFilter::default(), "owner", 10).map_err(DbError::from)).unwrap();
+        let rows = db
+            .with(|c| grouped(c, &LedgerFilter::default(), "owner", 10).map_err(DbError::from))
+            .unwrap();
         let keys: Vec<_> = rows.iter().map(|r| r.key.as_str()).collect();
         assert!(keys.contains(&"未标注"));
         assert!(keys.contains(&"乾力车间"));
@@ -238,7 +259,9 @@ mod tests {
     #[test]
     fn top_out_items_ranked_by_amount() {
         let db = seeded();
-        let rows = db.with(|c| top_items(c, &LedgerFilter::default(), "out", 5).map_err(DbError::from)).unwrap();
+        let rows = db
+            .with(|c| top_items(c, &LedgerFilter::default(), "out", 5).map_err(DbError::from))
+            .unwrap();
         assert_eq!(rows[0].item_name.as_deref(), Some("电机"));
         assert_eq!(rows.len(), 2);
     }
@@ -251,7 +274,10 @@ mod tests {
             to: Some("2025-02-28".into()),
             ..Default::default()
         };
-        let cmp = db.with(|c| compare_previous(c, &f).map_err(DbError::from)).unwrap().unwrap();
+        let cmp = db
+            .with(|c| compare_previous(c, &f).map_err(DbError::from))
+            .unwrap()
+            .unwrap();
         assert_eq!(cmp.now.in_rows, 1);
         assert_eq!(cmp.now.out_rows, 1);
         assert_eq!(cmp.previous.in_rows, 1);
@@ -289,21 +315,4 @@ mod tests {
             .unwrap();
         assert_eq!(points.len(), 3);
     }
-}
-
-/// 带连接封装的入口，给 Tauri 命令用。
-pub fn grouped_from(db: &crate::db::Db, filter: &LedgerFilter, group_by: &str, limit: i64) -> DbResult<Vec<GroupRow>> {
-    db.with(|c| grouped(c, filter, group_by, limit).map_err(DbError::from))
-}
-
-pub fn top_items_from(db: &crate::db::Db, filter: &LedgerFilter, kind: &str, limit: i64) -> DbResult<Vec<TopItem>> {
-    db.with(|c| top_items(c, filter, kind, limit).map_err(DbError::from))
-}
-
-pub fn monthly_from(db: &crate::db::Db, filter: &LedgerFilter) -> DbResult<Vec<MonthPoint>> {
-    db.with(|c| monthly(c, filter).map_err(DbError::from))
-}
-
-pub fn compare_from(db: &crate::db::Db, filter: &LedgerFilter) -> DbResult<Option<PeriodCompare>> {
-    db.with(|c| compare_previous(c, filter).map_err(DbError::from))
 }

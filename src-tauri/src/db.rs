@@ -16,7 +16,10 @@ static MIGRATIONS: [(&str, &str); 13] = [
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_voucher", include_str!("../migrations/002_voucher.sql")),
     ("003_master_data", include_str!("../migrations/003_master_data.sql")),
-    ("004_price_precision", include_str!("../migrations/004_price_precision.sql")),
+    (
+        "004_price_precision",
+        include_str!("../migrations/004_price_precision.sql"),
+    ),
     ("005_item_type", include_str!("../migrations/005_item_type.sql")),
     ("006_cleanup", include_str!("../migrations/006_cleanup.sql")),
     ("007_cleanup_junk", include_str!("../migrations/007_cleanup_junk.sql")),
@@ -188,8 +191,9 @@ fn structure_already_applied(conn: &Connection, index: usize) -> rusqlite::Resul
         9 => object_exists(conn, "index", "ix_ledger_stock_perf"),
         10 => object_exists(conn, "index", "ix_ledger_import_id"),
         11 => Ok(has("items", "seq")? && object_exists(conn, "trigger", "trg_items_seq_ai")?),
-        12 => Ok(object_exists(conn, "index", "ix_ledger_date_id")?
-            && object_exists(conn, "index", "ix_ledger_buyer")?),
+        12 => {
+            Ok(object_exists(conn, "index", "ix_ledger_date_id")? && object_exists(conn, "index", "ix_ledger_buyer")?)
+        }
         _ => Ok(false),
     }
 }
@@ -454,11 +458,8 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            c.execute(
-                "INSERT INTO items (item_code, item_name) VALUES ('WG-001', '螺丝')",
-                [],
-            )
-            .map_err(DbError::from)?;
+            c.execute("INSERT INTO items (item_code, item_name) VALUES ('WG-001', '螺丝')", [])
+                .map_err(DbError::from)?;
             Ok(())
         })
         .unwrap();

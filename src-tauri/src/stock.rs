@@ -76,7 +76,7 @@ pub fn stock_report(
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{}%", k));
+        .map(crate::ledger::like_pattern);
     let limit = limit.clamp(1, 2000);
     let offset = offset.max(0);
 
@@ -96,7 +96,8 @@ pub fn stock_report(
             FROM ledger l
             LEFT JOIN items it ON it.item_code = l.item_code
             WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
-              AND (?1 IS NULL OR l.item_code LIKE ?1 OR l.item_name LIKE ?1 OR it.location LIKE ?1 OR l.spec LIKE ?1 OR it.spec LIKE ?1)
+              AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
+                   OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
             GROUP BY l.item_code
             HAVING (?2 = 0 OR stock_qty < 0)
             ORDER BY ABS(stock_qty) DESC, l.item_code
@@ -149,7 +150,7 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
     let like = keyword
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{}%", k));
+        .map(crate::ledger::like_pattern);
     let sql = "
         SELECT COUNT(*) FROM (
           SELECT l.item_code,
@@ -157,7 +158,8 @@ pub fn stock_count(conn: &Connection, keyword: Option<&str>, only_negative: bool
           FROM ledger l
           LEFT JOIN items it ON it.item_code = l.item_code
           WHERE l.item_code IS NOT NULL AND TRIM(l.item_code) <> ''
-            AND (?1 IS NULL OR l.item_code LIKE ?1 OR l.item_name LIKE ?1 OR it.location LIKE ?1 OR l.spec LIKE ?1 OR it.spec LIKE ?1)
+            AND (?1 IS NULL OR l.item_code LIKE ?1 ESCAPE '\\' OR l.item_name LIKE ?1 ESCAPE '\\'
+                   OR it.location LIKE ?1 ESCAPE '\\' OR l.spec LIKE ?1 ESCAPE '\\' OR it.spec LIKE ?1 ESCAPE '\\')
           GROUP BY l.item_code
           HAVING (?2 = 0 OR stock_qty < 0)
         )";
@@ -272,7 +274,7 @@ pub fn check_issues(conn: &Connection, limit: i64) -> DbResult<Vec<IssueRow>> {
                     kind_label: Some(kind_label(&kind)),
                     detail: match qty {
                         None => "数量为空".to_string(),
-                        Some(q) if q == 0.0 => "数量为 0".to_string(),
+                        Some(0.0) => "数量为 0".to_string(),
                         Some(q) => format!("数量为负（{q}）"),
                     },
                 })
@@ -306,11 +308,9 @@ pub fn check_summary(conn: &Connection) -> DbResult<CheckSummary> {
         )
         .map_err(|e| DbError::from(e).0)?;
     let bad_qty_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ledger WHERE qty IS NULL OR qty <= 0",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM ledger WHERE qty IS NULL OR qty <= 0", [], |r| {
+            r.get(0)
+        })
         .map_err(|e| DbError::from(e).0)?;
     Ok(CheckSummary {
         negative_items,
@@ -434,7 +434,9 @@ mod tests {
         assert_eq!(s.bad_qty_rows, 1);
 
         let issues = check_issues(&conn, 100).unwrap();
-        assert!(issues.iter().any(|i| i.kind == "negative_stock" && i.item_code.as_deref() == Some("C")));
+        assert!(issues
+            .iter()
+            .any(|i| i.kind == "negative_stock" && i.item_code.as_deref() == Some("C")));
         assert!(issues.iter().any(|i| i.kind == "missing_code"));
         assert!(issues.iter().any(|i| i.kind == "bad_qty"));
     }

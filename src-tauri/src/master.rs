@@ -189,7 +189,17 @@ pub fn list_items(
     limit: i64,
     offset: i64,
 ) -> DbResult<Vec<Item>> {
-    list_items_ordered(conn, keyword, category, item_type, only_active, with_drawing, limit, offset, false)
+    list_items_ordered(
+        conn,
+        keyword,
+        category,
+        item_type,
+        only_active,
+        with_drawing,
+        limit,
+        offset,
+        false,
+    )
 }
 
 /// `recent` 为真时按建档时间倒序（最新建的排最前），用于「新增物料」时挑刚建的那几条；
@@ -205,20 +215,48 @@ pub fn list_items_ordered(
     offset: i64,
     recent: bool,
 ) -> DbResult<Vec<Item>> {
-    let order = if recent { ItemOrder::NewestFirst } else { ItemOrder::CodeAsc };
-    list_items_sorted(conn, keyword, category, item_type, only_active, with_drawing, limit, offset, order)
+    let order = if recent {
+        ItemOrder::NewestFirst
+    } else {
+        ItemOrder::CodeAsc
+    };
+    list_items_sorted(
+        conn,
+        keyword,
+        category,
+        item_type,
+        only_active,
+        with_drawing,
+        limit,
+        offset,
+        order,
+    )
 }
 
 /// 物料列表的过滤条件（列表、计数、导出三处共用同一套语义）。
 ///
 /// 参数位固定为：?1 关键字、?2 类别、?3 只看在用、?4 分页条数、?5 偏移、
 /// ?6 类型、?7 图号（1 有 / 0 无）。
-const ITEM_FILTER_SQL: &str = "WHERE (?1 IS NULL OR item_code LIKE ?1 OR item_name LIKE ?1
-                OR drawing_no LIKE ?1 OR spec LIKE ?1 OR location LIKE ?1)
+/// 物料行的有效性判据：只有 `-` / `0` 的编码是粘贴残留，不是真物料。
+///
+/// 列表、计数、导出、概览统计必须用同一套——概览卡片写 3,900、列表底部写
+/// 3,856 时，用户会以为丢数据或重复导入，排查成本全落在使用者身上。
+const ITEM_VALID_SQL: &str = "TRIM(item_code) NOT IN ('-', '0')";
+
+/// 物料列表的过滤条件（列表、计数、导出三处共用同一套语义）。
+///
+/// 参数位固定为：?1 关键字、?2 类别、?3 只看在用、?4 分页条数、?5 偏移、
+/// ?6 类型、?7 图号（1 有 / 0 无）。
+///
+/// 关键字用 `LIKE ?1 ESCAPE '\'`：`%` / `_` 由 `ledger::like_pattern` 转义，
+/// 否则输入一个 `%` 会匹配全表。
+const ITEM_FILTER_SQL: &str = "WHERE (?1 IS NULL OR item_code LIKE ?1 ESCAPE '\\' OR item_name LIKE ?1 ESCAPE '\\'
+                OR drawing_no LIKE ?1 ESCAPE '\\' OR spec LIKE ?1 ESCAPE '\\' OR location LIKE ?1 ESCAPE '\\')
            AND (?2 IS NULL OR category = ?2)
            AND (?6 IS NULL OR item_type = ?6)
            AND (?3 = 0 OR active = 1)
-           -- 过滤只有 '-' / '0' 的粘贴残留，它们不是真编码
+           -- 过滤只有 '-' / '0' 的粘贴残留，它们不是真编码（与 ITEM_VALID_SQL 同义，
+           -- 这里写死是因为 const 之间没法互相插值）
            AND TRIM(item_code) NOT IN ('-', '0')
            -- ?7 = 1 只看有图号，0 只看没图号的
            AND (
@@ -242,7 +280,7 @@ fn query_items(
     let like = keyword
         .map(str::trim)
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{k}%"));
+        .map(crate::ledger::like_pattern);
     let category = category.map(str::trim).filter(|c| !c.is_empty());
     let sql = format!(
         "SELECT {ITEM_COLUMNS} FROM items {ITEM_FILTER_SQL} {} LIMIT ?4 OFFSET ?5",
@@ -303,7 +341,7 @@ pub fn count_items(
     let like = keyword
         .map(str::trim)
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{k}%"));
+        .map(crate::ledger::like_pattern);
     let category = category.map(str::trim).filter(|c| !c.is_empty());
     let item_type = item_type.map(str::trim).filter(|t| !t.is_empty());
     conn.query_row(
@@ -458,13 +496,13 @@ pub fn list_suppliers(conn: &Connection, keyword: Option<&str>) -> DbResult<Vec<
     let like = keyword
         .map(str::trim)
         .filter(|k| !k.is_empty())
-        .map(|k| format!("%{k}%"));
+        .map(crate::ledger::like_pattern);
     let mut stmt = conn
         .prepare(
             "SELECT s.id, s.name, s.contact, s.phone, s.remark, s.active,
                     (SELECT COUNT(*) FROM ledger l WHERE l.partner = s.name) AS hits
              FROM suppliers s
-             WHERE (?1 IS NULL OR s.name LIKE ?1)
+             WHERE (?1 IS NULL OR s.name LIKE ?1 ESCAPE '\\')
              ORDER BY CASE s.active WHEN 1 THEN 0 ELSE 1 END, hits DESC, s.name",
         )
         .map_err(DbError::from)?;
@@ -552,20 +590,28 @@ pub fn delete_supplier(conn: &Connection, id: i64) -> DbResult<()> {
 }
 
 pub fn stats(conn: &Connection) -> DbResult<MasterStats> {
+    // 口径与列表/导出一致：先排掉粘贴残留的 '-' / '0' 行，
+    // 否则概览卡片的物料数会比列表底部多几十条，用户以为丢了数据
     let items: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .query_row(&format!("SELECT COUNT(*) FROM items WHERE {ITEM_VALID_SQL}"), [], |r| {
+            r.get(0)
+        })
         .map_err(|e| DbError::from(e).0)?;
     let items_active: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items WHERE active = 1", [], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM items WHERE active = 1 AND {ITEM_VALID_SQL}"),
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| DbError::from(e).0)?;
     let suppliers: i64 = conn
         .query_row("SELECT COUNT(*) FROM suppliers", [], |r| r.get(0))
         .map_err(|e| DbError::from(e).0)?;
     let mut stmt = conn
-        .prepare(
-            "SELECT COALESCE(NULLIF(TRIM(category),''),'未分类') AS c, COUNT(*) 
-             FROM items GROUP BY c ORDER BY 2 DESC",
-        )
+        .prepare(&format!(
+            "SELECT COALESCE(NULLIF(TRIM(category),''),'未分类') AS c, COUNT(*)
+             FROM items WHERE {ITEM_VALID_SQL} GROUP BY c ORDER BY 2 DESC"
+        ))
         .map_err(DbError::from)?;
     let categories = stmt
         .query_map([], |r| {
@@ -577,10 +623,10 @@ pub fn stats(conn: &Connection) -> DbResult<MasterStats> {
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
         .map_err(DbError::from)?;
     let mut type_stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT COALESCE(NULLIF(TRIM(item_type),''),'未分类') AS t, COUNT(*)
-             FROM items GROUP BY t ORDER BY 2 DESC",
-        )
+             FROM items WHERE {ITEM_VALID_SQL} GROUP BY t ORDER BY 2 DESC"
+        ))
         .map_err(DbError::from)?;
     let item_types = type_stmt
         .query_map([], |r| {
@@ -594,15 +640,21 @@ pub fn stats(conn: &Connection) -> DbResult<MasterStats> {
 
     let with_drawing: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM items WHERE TRIM(COALESCE(drawing_no,'')) <> ''",
+            &format!(
+                "SELECT COUNT(*) FROM items
+                 WHERE TRIM(COALESCE(drawing_no,'')) <> '' AND {ITEM_VALID_SQL}"
+            ),
             [],
             |r| r.get(0),
         )
         .map_err(|e| DbError::from(e).0)?;
     let missing_drawing: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM items
-             WHERE item_type = '加工件' AND TRIM(COALESCE(drawing_no,'')) = ''",
+            &format!(
+                "SELECT COUNT(*) FROM items
+                 WHERE item_type = '加工件' AND TRIM(COALESCE(drawing_no,'')) = ''
+                   AND {ITEM_VALID_SQL}"
+            ),
             [],
             |r| r.get(0),
         )
@@ -671,6 +723,36 @@ pub struct MasterImportOutcome {
     pub message: String,
 }
 
+/// 在表头里找一个字段对应的列号。
+///
+/// 两轮匹配：先整列名精确相等，再退化成「包含」。只用包含会踩坑：表头是
+/// 「编码 / 供应商名称 / 物料名称」时，`index_of(["物料名称","名称"])` 会先
+/// 命中「供应商名称」，整列物料名被写成供应商名，而且导入不报错，用户要到
+/// 对账时才发现基础资料被污染。
+///
+/// `used` 是已经被别的字段占掉的列号，第二轮跳过它们，避免同一个「名称」
+/// 列被两个字段各认领一次。
+fn index_of_column(header: &[String], candidates: &[&str], used: &[usize]) -> Option<usize> {
+    let trim = |h: &String| h.trim().to_string();
+    for candidate in candidates {
+        if let Some(i) = header.iter().position(|h| trim(h) == *candidate) {
+            if !used.contains(&i) {
+                return Some(i);
+            }
+        }
+    }
+    for candidate in candidates {
+        if let Some((i, _)) = header
+            .iter()
+            .enumerate()
+            .find(|(i, h)| h.trim().contains(candidate) && !used.contains(i))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// 从工作簿里找「物料编号」「供应商名称」或「月度进销存宽表」并导入。
 /// 表头按列名认，不依赖 sheet 顺序；已有编码则更新价格/单位，不覆盖手填的备注。
 pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResult<MasterImportOutcome> {
@@ -678,11 +760,8 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
     if let Ok((report, pivot_sheets)) = crate::import::inspect_and_collect_cached(path) {
         let has_master_sheet = report.sheets.iter().any(|s| s.master);
         if !has_master_sheet && !pivot_sheets.is_empty() {
-            let built = crate::pivot::build_with_hint(
-                &pivot_sheets,
-                crate::import::current_year(),
-                Some(&report.file_name),
-            );
+            let built =
+                crate::pivot::build_with_hint(&pivot_sheets, crate::import::current_year(), Some(&report.file_name));
             if !built.items.is_empty() {
                 let (added, updated) = crate::pivot::upsert_items(conn, &built.items)?;
                 let located = built
@@ -709,7 +788,10 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
 
     let mut master_entries: Vec<(String, calamine::Range<Data>)> =
         if let Some(cached) = crate::import::get_cached_master_sheets(path) {
-            log::debug!("master_from_workbook: 命中缓存 master_sheets，包含 {} 张表", cached.len());
+            log::debug!(
+                "master_from_workbook: 命中缓存 master_sheets，包含 {} 张表",
+                cached.len()
+            );
             cached
         } else {
             log::debug!("master_from_workbook: 未命中缓存，重新打开文件");
@@ -749,19 +831,15 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         if header.is_empty() {
             continue;
         }
-        let index_of = |candidates: &[&str]| -> Option<usize> {
-            header.iter().position(|h| {
-                let h = h.trim();
-                candidates.iter().any(|c| h == *c || h.contains(c))
-            })
-        };
+        let index_of =
+            |candidates: &[&str], used: &[usize]| -> Option<usize> { index_of_column(&header, candidates, used) };
 
         // 出入库明细表也带「物料名称 / 物料编码」，以前会被当成物料表再导一遍，
         // 把台账流水（5802 + 1265 行）反复写回主数据，且不带类型。
         // 主数据只认台账之外的字典表；判据用「流水专有列」，不能看数量/金额——
         // 物料编号表自己也有「数量 / 单价 / 金额」三列。
         let flow_only = ["送货单号", "入库时间", "出库时间", "领用人", "采购人", "单号"];
-        if flow_only.iter().any(|c| index_of(&[c]).is_some())
+        if flow_only.iter().any(|c| index_of(&[c], &[]).is_some())
             || ["明细", "单据", "库存"].iter().any(|k| name.contains(k))
         {
             continue;
@@ -771,16 +849,20 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         // 这类行的物料在物料编号表里没有，但有类型（外购件/加工件）和单价，
         // 且其中一部分台账里真的在用，所以要补进主数据。
         // 没有编码时用「基础-<序号>」占位，避免和真实编码撞。
-        let name_only = index_of(&["物料名称", "名称"]);
-        let has_code_col = index_of(&["物料编码序号", "物料编码", "编码"]).is_some();
+        let name_only = index_of(&["物料名称", "名称"], &[]);
+        let has_code_col = index_of(&["物料编码序号", "物料编码", "编码"], &[]).is_some();
         // 「供应商名称」表也带「名称」列，不能走这个分支
-        let looks_like_supplier_sheet = name.contains("供应商") || index_of(&["供应商名称"]).is_some();
+        let looks_like_supplier_sheet = name.contains("供应商") || index_of(&["供应商名称"], &[]).is_some();
         if !has_code_col && !looks_like_supplier_sheet {
             if let Some(name_col) = name_only {
-                let type_col = index_of(&["类型1", "类型"]);
-                let unit_col = index_of(&["单位"]);
-                let price_col = index_of(&["单价"]);
-                let drawing_col = index_of(&["图号"]);
+                let mut used = vec![name_col];
+                let type_col = index_of(&["类型1", "类型"], &used);
+                used.extend(type_col);
+                let unit_col = index_of(&["单位"], &used);
+                used.extend(unit_col);
+                let price_col = index_of(&["单价"], &used);
+                used.extend(price_col);
+                let drawing_col = index_of(&["图号"], &used);
                 let mut touched = 0usize;
                 // 占位编码从库里已有的最大编号往后接，不能从 1 重数：
                 // 从 1 重数会和上一轮导入占下的「基础-N」撞号，ON CONFLICT 一忽略，
@@ -813,9 +895,8 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                     if row_index == 0 {
                         continue;
                     }
-                    let get = |c: Option<usize>| -> String {
-                        c.and_then(|i| row.get(i)).map(cell_text).unwrap_or_default()
-                    };
+                    let get =
+                        |c: Option<usize>| -> String { c.and_then(|i| row.get(i)).map(cell_text).unwrap_or_default() };
                     // 这张表的布局是：B 列「图号」装外购件名称，C 列「名称」只填加工件。
                     // 所以名称取 C，C 空则回退 B；图号只在 C 有值时才另存。
                     let name_c = get(Some(name_col));
@@ -830,14 +911,9 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                     }
                     let item_type = get(type_col);
                     let unit = get(unit_col);
-                    let price = price_col
-                        .and_then(|i| row.get(i))
-                        .and_then(cell_f64)
-                        .map(to_micros);
+                    let price = price_col.and_then(|i| row.get(i)).and_then(cell_f64).map(to_micros);
                     // 先按同名找；同名有多条时优先补最缺类型的那条（通常是上一轮占位出来的）
-                    let existing: Option<i64> = stmt_find
-                        .query_row([&item_name], |r| r.get(0))
-                        .ok();
+                    let existing: Option<i64> = stmt_find.query_row([&item_name], |r| r.get(0)).ok();
                     match existing {
                         Some(id) => {
                             stmt_update
@@ -871,20 +947,24 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         }
 
         // ---- 物料表：需要有编码列 + 名称列 ----
-        let code_col = index_of(&["物料编码序号", "物料编码", "编码"]);
-        let name_col = index_of(&["物料名称", "名称"]);
+        let code_col = index_of(&["物料编码序号", "物料编码", "编码"], &[]);
+        let name_col = index_of(&["物料名称", "名称"], &[]);
         if let (Some(code_col), Some(name_col)) = (code_col, name_col) {
-            let category_col = index_of(&["物料类别", "类别"]);
-            let unit_col = index_of(&["单位"]);
-            let price_col = index_of(&["单价"]);
-            let owner_col = index_of(&["归属"]);
-            let supplier_col = index_of(&["供应商名称", "供应商"]);
-            let remark_col = index_of(&["备注"]);
+            let mut used = vec![code_col, name_col];
+            let category_col = index_of(&["物料类别", "类别"], &used);
+            used.extend(category_col);
+            let unit_col = index_of(&["单位"], &used);
+            used.extend(unit_col);
+            let price_col = index_of(&["单价"], &used);
+            used.extend(price_col);
+            let owner_col = index_of(&["归属"], &used);
+            used.extend(owner_col);
+            let supplier_col = index_of(&["供应商名称", "供应商"], &used);
+            used.extend(supplier_col);
+            let remark_col = index_of(&["备注"], &used);
 
             let mut existing_map: std::collections::HashMap<String, i64> = {
-                let mut stmt = tx
-                    .prepare("SELECT item_code, id FROM items")
-                    .map_err(DbError::from)?;
+                let mut stmt = tx.prepare("SELECT item_code, id FROM items").map_err(DbError::from)?;
                 let rows = stmt
                     .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
                     .map_err(DbError::from)?;
@@ -915,16 +995,14 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                 if row_index == 0 {
                     continue;
                 }
-                let get = |c: Option<usize>| -> String { c.and_then(|i| row.get(i)).map(cell_text).unwrap_or_default() };
+                let get =
+                    |c: Option<usize>| -> String { c.and_then(|i| row.get(i)).map(cell_text).unwrap_or_default() };
                 let code = get(Some(code_col));
                 let item_name = get(Some(name_col));
                 if code.is_empty() || item_name.is_empty() {
                     continue;
                 }
-                let price = price_col
-                    .and_then(|i| row.get(i))
-                    .and_then(cell_f64)
-                    .map(to_micros);
+                let price = price_col.and_then(|i| row.get(i)).and_then(cell_f64).map(to_micros);
                 let category = get(category_col);
                 let unit = get(unit_col);
                 let owner = get(owner_col);
@@ -936,14 +1014,7 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                         // 更新「字典」字段；备注保留用户填过的
                         stmt_update
                             .execute(rusqlite::params![
-                                item_name,
-                                category,
-                                unit,
-                                price,
-                                owner,
-                                supplier,
-                                remark,
-                                id
+                                item_name, category, unit, price, owner, supplier, remark, id
                             ])
                             .map_err(DbError::from)?;
                         outcome.items_updated += 1;
@@ -976,15 +1047,11 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         }
 
         // ---- 供应商表：只有一列名称也能认 ----
-        let supplier_col = index_of(&["供应商名称", "供应商"]);
+        let supplier_col = index_of(&["供应商名称", "供应商"], &[]);
         if let Some(supplier_col) = supplier_col {
             let mut existing_suppliers: std::collections::HashSet<String> = {
-                let mut stmt = tx
-                    .prepare("SELECT name FROM suppliers")
-                    .map_err(DbError::from)?;
-                let rows = stmt
-                    .query_map([], |r| r.get::<_, String>(0))
-                    .map_err(DbError::from)?;
+                let mut stmt = tx.prepare("SELECT name FROM suppliers").map_err(DbError::from)?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(DbError::from)?;
                 rows.filter_map(Result::ok).collect()
             };
             let mut stmt_insert_supplier = tx
@@ -1002,9 +1069,7 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
                     continue;
                 }
                 if existing_suppliers.insert(name.clone()) {
-                    stmt_insert_supplier
-                        .execute([&name])
-                        .map_err(DbError::from)?;
+                    stmt_insert_supplier.execute([&name]).map_err(DbError::from)?;
                     outcome.suppliers_added += 1;
                 } else {
                     outcome.suppliers_skipped += 1;
@@ -1017,17 +1082,14 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         }
     }
 
-    tx.commit().map_err(DbError::from)?;
-
+    // 宽表物料与上面的物料/供应商写入同事务提交：
+    // 以前先 commit 主表、再单独 upsert 宽表物料，后者失败会留下
+    // 「物料编号表进来了，库位/规格却缺一半」的中间状态。
     if !pivot_sheets.is_empty() {
         let file_hint = path.file_name().and_then(|n| n.to_str());
-        let built = crate::pivot::build_with_hint(
-            &pivot_sheets,
-            crate::import::current_year(),
-            file_hint,
-        );
+        let built = crate::pivot::build_with_hint(&pivot_sheets, crate::import::current_year(), file_hint);
         if !built.items.is_empty() {
-            let (added, updated) = crate::pivot::upsert_items(conn, &built.items)?;
+            let (added, updated) = crate::pivot::upsert_items_tx(&tx, &built.items)?;
             let located = built
                 .items
                 .iter()
@@ -1070,7 +1132,17 @@ pub fn export_items_csv(
     with_drawing: Option<bool>,
     order: ItemOrder,
 ) -> DbResult<(String, i64)> {
-    let rows = query_items(conn, keyword, category, item_type, only_active, with_drawing, -1, 0, order)?;
+    let rows = query_items(
+        conn,
+        keyword,
+        category,
+        item_type,
+        only_active,
+        with_drawing,
+        -1,
+        0,
+        order,
+    )?;
     let mut out = String::from("\u{feff}");
     out.push_str("物料编码,物料名称,库位,规格型号,单位,类型,类别,图号,参考单价,默认供应商,负责人,备注,状态\n");
     for item in &rows {
@@ -1173,8 +1245,18 @@ pub fn list_items_db(
         } else {
             order
         };
-        list_items_sorted(c, keyword, category, item_type, only_active, with_drawing, limit, offset, pick)
-            .map_err(DbError)
+        list_items_sorted(
+            c,
+            keyword,
+            category,
+            item_type,
+            only_active,
+            with_drawing,
+            limit,
+            offset,
+            pick,
+        )
+        .map_err(DbError)
     })
 }
 
@@ -1247,10 +1329,7 @@ pub fn export_items_db(
     with_drawing: Option<bool>,
     order: ItemOrder,
 ) -> DbResult<(String, i64)> {
-    db.with(|c| {
-        export_items_csv(c, keyword, category, item_type, only_active, with_drawing, order)
-            .map_err(DbError)
-    })
+    db.with(|c| export_items_csv(c, keyword, category, item_type, only_active, with_drawing, order).map_err(DbError))
 }
 
 /// 供应商导出（连接封装版）。
@@ -1303,7 +1382,8 @@ mod tests {
         );
 
         // 再加一条，必须排到最前
-        db.with(|c| create_item(c, &item("WG-B-002", "刚建的")).map_err(DbError)).unwrap();
+        db.with(|c| create_item(c, &item("WG-B-002", "刚建的")).map_err(DbError))
+            .unwrap();
         let recent = db
             .with(|c| list_items_ordered(c, None, None, None, true, None, 50, 0, true).map_err(DbError))
             .unwrap();
@@ -1350,9 +1430,7 @@ mod tests {
         // 回填后同秒的三条按 id 定先后，seq 必须互不相同
         let seqs: Vec<i64> = db
             .with(|c| {
-                let mut stmt = c
-                    .prepare("SELECT seq FROM items ORDER BY id")
-                    .map_err(DbError::from)?;
+                let mut stmt = c.prepare("SELECT seq FROM items ORDER BY id").map_err(DbError::from)?;
                 let rows = stmt
                     .query_map([], |r| r.get::<_, i64>(0))
                     .map_err(DbError::from)?
@@ -1371,13 +1449,11 @@ mod tests {
             db.with(|c| create_item(c, &item(code, name)).map_err(DbError)).unwrap();
         }
         let codes = |order: ItemOrder| -> Vec<String> {
-            db.with(|c| {
-                list_items_sorted(c, None, None, None, true, None, 50, 0, order).map_err(DbError)
-            })
-            .unwrap()
-            .into_iter()
-            .map(|i| i.item_code)
-            .collect()
+            db.with(|c| list_items_sorted(c, None, None, None, true, None, 50, 0, order).map_err(DbError))
+                .unwrap()
+                .into_iter()
+                .map(|i| i.item_code)
+                .collect()
         };
 
         assert_eq!(codes(ItemOrder::CodeAsc), vec!["WG-A", "WG-B", "WG-C"]);
@@ -1406,22 +1482,31 @@ mod tests {
         let id = db
             .with(|c| create_item(c, &item("WG-A", "外卡")).map_err(DbError))
             .unwrap();
-        let found = db.with(|c| find_item_by_code(c, "WG-A").map_err(DbError)).unwrap().unwrap();
+        let found = db
+            .with(|c| find_item_by_code(c, "WG-A").map_err(DbError))
+            .unwrap()
+            .unwrap();
         assert_eq!(found.item_name, "外卡");
         assert_eq!(found.price_micros, Some(1_500_000));
 
         let mut patch = item("WG-A", "外卡（轴）");
         patch.price_micros = Some(1_700_000);
         db.with(|c| update_item(c, id, &patch).map_err(DbError)).unwrap();
-        let found = db.with(|c| find_item_by_code(c, "WG-A").map_err(DbError)).unwrap().unwrap();
+        let found = db
+            .with(|c| find_item_by_code(c, "WG-A").map_err(DbError))
+            .unwrap()
+            .unwrap();
         assert_eq!(found.item_name, "外卡（轴）");
         assert_eq!(found.price_micros, Some(1_700_000));
 
         db.with(|c| delete_item(c, id).map_err(DbError)).unwrap();
-        assert!(db.with(|c| find_item_by_code(c, "WG-A").map_err(DbError)).unwrap().is_none());
+        assert!(db
+            .with(|c| find_item_by_code(c, "WG-A").map_err(DbError))
+            .unwrap()
+            .is_none());
     }
 
-#[test]
+    #[test]
     fn item_type_and_drawing_round_trip() {
         let db = db();
         let mut with_type = item("WG-T-1", "轴承6204");
@@ -1429,14 +1514,20 @@ mod tests {
         with_type.drawing_no = Some("QLKJ480-002.110".into());
         let id = db.with(|c| create_item(c, &with_type).map_err(DbError)).unwrap();
 
-        let found = db.with(|c| find_item_by_code(c, "WG-T-1").map_err(DbError)).unwrap().unwrap();
+        let found = db
+            .with(|c| find_item_by_code(c, "WG-T-1").map_err(DbError))
+            .unwrap()
+            .unwrap();
         assert_eq!(found.item_type.as_deref(), Some("外购件"));
         assert_eq!(found.drawing_no.as_deref(), Some("QLKJ480-002.110"));
 
         let mut changed = with_type.clone();
         changed.item_type = Some("加工件".into());
         db.with(|c| update_item(c, id, &changed).map_err(DbError)).unwrap();
-        let found = db.with(|c| find_item_by_code(c, "WG-T-1").map_err(DbError)).unwrap().unwrap();
+        let found = db
+            .with(|c| find_item_by_code(c, "WG-T-1").map_err(DbError))
+            .unwrap()
+            .unwrap();
         assert_eq!(found.item_type.as_deref(), Some("加工件"));
     }
 
@@ -1444,8 +1535,7 @@ mod tests {
     fn placeholder_seq_continues_after_existing_rows() {
         let db = db();
         for (code, name) in [("基础-1", "甲"), ("基础-7", "乙"), ("WG-A", "丙")] {
-            db.with(|c| create_item(c, &item(code, name)).map_err(DbError))
-                .unwrap();
+            db.with(|c| create_item(c, &item(code, name)).map_err(DbError)).unwrap();
         }
         // 已有 基础-1 / 基础-7，下一个必须是 8：从 1 重数会覆盖掉「基础-1」后面的行
         let next = db
@@ -1460,9 +1550,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_code_rejected() {        let db = db();
-        db.with(|c| create_item(c, &item("WG-A", "x")).map_err(DbError)).unwrap();
-        assert!(db.with(|c| create_item(c, &item("WG-A", "y")).map_err(DbError)).is_err());
+    fn duplicate_code_rejected() {
+        let db = db();
+        db.with(|c| create_item(c, &item("WG-A", "x")).map_err(DbError))
+            .unwrap();
+        assert!(db
+            .with(|c| create_item(c, &item("WG-A", "y")).map_err(DbError))
+            .is_err());
     }
 
     #[test]
@@ -1478,13 +1572,19 @@ mod tests {
         })
         .unwrap();
 
-        let all = db.with(|c| list_items(c, None, None, None, true, None, 50, 0).map_err(DbError)).unwrap();
+        let all = db
+            .with(|c| list_items(c, None, None, None, true, None, 50, 0).map_err(DbError))
+            .unwrap();
         assert_eq!(all.len(), 3);
 
-        let by_name = db.with(|c| list_items(c, Some("轴"), None, None, true, None, 50, 0).map_err(DbError)).unwrap();
+        let by_name = db
+            .with(|c| list_items(c, Some("轴"), None, None, true, None, 50, 0).map_err(DbError))
+            .unwrap();
         assert_eq!(by_name.len(), 1);
 
-        let by_cat = db.with(|c| list_items(c, None, Some("电机类"), None, true, None, 50, 0).map_err(DbError)).unwrap();
+        let by_cat = db
+            .with(|c| list_items(c, None, Some("电机类"), None, true, None, 50, 0).map_err(DbError))
+            .unwrap();
         assert_eq!(by_cat.len(), 1);
         assert_eq!(by_cat[0].item_code, "WG-C-1");
     }
@@ -1500,9 +1600,13 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let active_only = db.with(|c| list_items(c, None, None, None, true, None, 50, 0).map_err(DbError)).unwrap();
+        let active_only = db
+            .with(|c| list_items(c, None, None, None, true, None, 50, 0).map_err(DbError))
+            .unwrap();
         assert_eq!(active_only.len(), 1);
-        let all = db.with(|c| list_items(c, None, None, None, false, None, 50, 0).map_err(DbError)).unwrap();
+        let all = db
+            .with(|c| list_items(c, None, None, None, false, None, 50, 0).map_err(DbError))
+            .unwrap();
         assert_eq!(all.len(), 2);
     }
 
@@ -1558,7 +1662,8 @@ mod tests {
             .map_err(DbError))
             .is_err());
 
-        db.with(|c| create_item(c, &item("WG-A", "x")).map_err(DbError)).unwrap();
+        db.with(|c| create_item(c, &item("WG-A", "x")).map_err(DbError))
+            .unwrap();
         let stats = db.with(|c| stats(c).map_err(DbError)).unwrap();
         assert_eq!(stats.items, 1);
         assert_eq!(stats.suppliers, 1);
@@ -1566,6 +1671,45 @@ mod tests {
         assert_eq!(stats.categories[0].category, "五金类");
         assert_eq!(stats.item_types.len(), 1);
         assert_eq!(stats.item_types[0].category, "未分类");
+    }
+
+    #[test]
+    fn stats_uses_same_filter_as_list() {
+        let db = db();
+        db.with(|c| {
+            create_item(c, &item("WG-A", "真物料")).map_err(DbError)?;
+            // 粘贴残留：只有 '-' / '0' 的编码，列表里不显示，统计也不能算
+            c.execute(
+                "INSERT INTO items (item_code, item_name) VALUES ('-','残留'), ('0','残留')",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+        let stats = db.with(|c| stats(c).map_err(DbError)).unwrap();
+        let listed = db
+            .with(|c| list_items_ordered(c, None, None, None, false, None, 50, 0, false).map_err(DbError))
+            .unwrap();
+        assert_eq!(stats.items, 1, "概览的物料总数必须和列表一致");
+        assert_eq!(stats.items, listed.len() as i64);
+    }
+
+    #[test]
+    fn header_guess_prefers_exact_and_skips_used_columns() {
+        // 表头顺序会让「名称」先命中「供应商名称」
+        let header: Vec<String> = ["编码", "供应商名称", "物料名称", "单位"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let code = index_of_column(&header, &["物料编码序号", "物料编码", "编码"], &[]);
+        let name = index_of_column(&header, &["物料名称", "名称"], &[]);
+        assert_eq!(code, Some(0));
+        assert_eq!(name, Some(2), "必须命中「物料名称」而不是「供应商名称」");
+
+        // 已被占用的列不能再被第二个字段认领
+        let reused = index_of_column(&header, &["名称"], &[2]);
+        assert_eq!(reused, Some(1), "去掉已占用列后应退到「供应商名称」");
     }
 
     #[test]

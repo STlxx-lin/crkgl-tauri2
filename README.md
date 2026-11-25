@@ -20,12 +20,14 @@ Tauri 2 + Rust + React 19 + Vite 7 + Tailwind v4 + BoardUI 的仓库台账程序
 crkgl-tauri2/
 ├─ src/                     前端
 │  ├─ App.tsx               启动状态机（boot → ready），读 bootstrap
-│  ├─ screens/              台账 / 汇总 / 导入 / 基础资料 / 开单 / 只读站
+│  ├─ screens/              台账 / 汇总 / 导入 / 基础资料 / 开单 / 库存 / 只读站
 │  ├─ components/           AppShell、RowDetail、EmptyState、FontScaleToggle
 │  ├─ lib/api.ts            Tauri 命令 + 只读站 HTTP 的统一客户端
 │  ├─ lib/format.ts         金额（分→元）、数量、日期、环比
+│  ├─ lib/pageSize.ts       各页「每页条数」的统一存储（四页共用）
 │  ├─ lib/fontScale.ts      界面字号缩放（四档，改根字号）
 │  ├─ lib/printPrefs.ts     打印偏好（A4 每页行数上限）
+│  ├─ lib/*.test.ts         vitest 单测（纯函数与 localStorage 读写）
 │  └─ styles/app.css        项目级样式（表格、滚动条）
 ├─ components/ styles/ utils/   BoardUI 源码组件（`npx boardui add <name>` 可加）
 ├─ src-tauri/
@@ -38,12 +40,19 @@ crkgl-tauri2/
 │  ├─ src/web.rs            80 端口只读站（axum）
 │  ├─ src/commands.rs       Tauri 命令（唯一能写数据的入口）
 │  └─ migrations/           SQLite 增量迁移（001 ~ 013）
-└─ scripts/                 rust90.cmd / bundle.cmd（MSVC + Rust 1.90 包装）、verify-*.mjs（DB 复核）
+├─ scripts/                 rust90.cmd / bundle.cmd（MSVC + Rust 1.90 包装）、verify-*.mjs（DB 复核）
+└─ .github/workflows/ci.yml  PR 上跑 typecheck / eslint / prettier / vitest / rustfmt / clippy / cargo test
 ```
 
 ## 运行
 
-前置：Node ≥ 20、Rust 1.90 + MSVC（Windows 需安装 Visual Studio C++ 生成工具，或设置 `VCVARS` 指向 `vcvars64.bat`）。
+前置：Node ≥ 20、Rust 1.90（`rust-toolchain.toml` 已钉版本）、MSVC。
+
+Windows 需要「Visual Studio Build Tools」的 **Desktop development with C++** 工作负载：
+`scripts\rust90.cmd` / `scripts\bundle.cmd` 先用 `vswhere.exe` 自动找 `vcvars64.bat`，
+找不到时再读环境变量 `VCVARS`；都没有就打印安装提示并退出，不会去猜某个盘符。
+Git for Windows 自带的 `usr\bin\link.exe` 会盖掉 MSVC 的链接器，两个脚本会在调用
+`cargo` 前把 PATH 里所有 `*/Git/usr/bin` 条目剔掉。
 
 ```bash
 npm install
@@ -251,11 +260,19 @@ Tauri IPC 暴露，浏览器里调用不到。
 
 ```bash
 npm run typecheck                  # tsc --noEmit
+npm run lint                       # eslint（只看 src/，BoardUI 源码不参与）
+npm run format                     # prettier 写回 src/**/*.{ts,tsx}
+npm test                           # vitest 单测（纯函数与 localStorage 读写）
 npm run build                      # 桌面端产物 dist/
 npm run build:remote               # 只读站产物 dist-remote/
 scripts\rust90.cmd test --lib      # Rust 单测（自动切入 src-tauri）
+scripts\rust90.cmd fmt --check     # rustfmt 检查（rustfmt.toml）
+scripts\rust90.cmd clippy --lib --tests -- -D warnings
 scripts\bundle.cmd                 # 打包 NSIS 安装包
 ```
+
+推送或开 PR 时 GitHub Actions 会跑同一套检查（`.github/workflows/ci.yml`），
+前端与后端是两个独立 job，可以并行看结果。
 
 `scripts/verify-*.mjs`（`verify-db-state.mjs` / `verify-voucher-db.mjs`）用于针对本地 SQLite 数据做落库复核，不参与生产构建。
 
