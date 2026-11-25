@@ -9,6 +9,7 @@ import {
 import { countStock, fetchStockCheck, fetchStockReport, isTauri, updateRow } from "../lib/api";
 import type { StockCheckSummary, StockIssue, StockRow } from "../lib/types";
 import { count, date, qty } from "../lib/format";
+import { exportFileName } from "../lib/exportCsv";
 import { Button } from "@/components/base/buttons/button";
 import { ItemPicker } from "../components/ItemPicker";
 import { SearchField } from "@/components/base/search-field/search-field";
@@ -152,10 +153,43 @@ function StockTable() {
     return { inQty, outQty, stock: inQty - outQty };
   }, [rows]);
 
-  const exportCsv = () => {
-    // 直接下 CSV：这条报表是给人对账用的，能丢进 Excel 比什么都实在
+  const [exporting, setExporting] = useState(false);
+
+  /**
+   * 导出 CSV。
+   *
+   * `all=false` 只导当前页（按钮原本就是这个语义）；`all=true` 按当前筛选
+   * 分页把结果全部取回再拼——库存对账通常需要全量，只给当前页容易被误当全量。
+   * 文件名统一走 `exportFileName`，取本地日期而不是 UTC（跨零点导出时才对得上）。
+   */
+  const exportCsv = async (all: boolean) => {
+    let data = rows;
+    if (all) {
+      setExporting(true);
+      try {
+        const collected: StockRow[] = [];
+        const pageSize = 2000;
+        for (let offset = 0; ; offset += pageSize) {
+          const batch = await fetchStockReport({
+            keyword: debouncedKeyword || undefined,
+            onlyNegative,
+            limit: pageSize,
+            offset,
+          });
+          collected.push(...batch);
+          if (batch.length < pageSize) break;
+        }
+        data = collected;
+      } catch (err) {
+        toast("导出失败", { description: String(err), status: "error" });
+        return;
+      } finally {
+        setExporting(false);
+      }
+    }
+    // 这条报表是给人对账用的，能丢进 Excel 比什么都实在
     const header = ["物料编码", "物料名称", "库位", "规格型号", "单位", "入库数量", "出库数量", "结存", "最近日期"];
-    const lines = rows.map((row) =>
+    const lines = data.map((row) =>
       [row.itemCode, row.itemName, row.location ?? "", row.spec ?? "", row.unit ?? "", row.inQty, row.outQty, row.stockQty, row.lastDate ?? ""]
         .map(csvCell)
         .join(","),
@@ -165,10 +199,13 @@ function StockTable() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `库存结存_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = exportFileName("库存结存");
     a.click();
     URL.revokeObjectURL(url);
-    toast("已导出当前页", { description: `${count(rows.length)} 行`, status: "success" });
+    toast(all ? "已导出全部筛选结果" : "已导出当前页", {
+      description: `${count(data.length)} 行`,
+      status: "success",
+    });
   };
 
   return (
@@ -201,8 +238,24 @@ function StockTable() {
           共 {count(total)} 个物料
         </span>
         <div className="ms-auto flex items-center gap-2">
-          <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={exportCsv} disabled={rows.length === 0}>
+          <Button
+            size="small"
+            variant="secondary"
+            leadingIcon={RiDownload2Line}
+            onClick={() => void exportCsv(false)}
+            disabled={rows.length === 0 || exporting}
+          >
             导出本页 CSV
+          </Button>
+          <Button
+            size="small"
+            variant="secondary"
+            leadingIcon={RiDownload2Line}
+            onClick={() => void exportCsv(true)}
+            disabled={total === 0 || exporting}
+            title="按当前筛选（关键字 / 只看负库存）导出全部物料，不只是这一页"
+          >
+            {exporting ? "导出中…" : "导出全部"}
           </Button>
           <Button size="small" variant="ghost" leadingIcon={RiRefreshLine} onClick={load} disabled={loading}>
             刷新
