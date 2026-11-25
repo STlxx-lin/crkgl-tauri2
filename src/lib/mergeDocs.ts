@@ -1,5 +1,9 @@
-// 台账「按单据合并」：把同一张单据的相邻明细行折叠成一行显示。
+// 台账「按单据合并」：把同一张单据的明细行折叠成一行显示。
 // 服务端分页不变，只在当前页内合并；跨页的同号单据各自成行。
+//
+// 合并按「单号分组」而不是「相邻行」：台账支持按金额/数量排序，这时同一张
+// 单的明细会被打散到整页各处，相邻合并会把它拆成好几行，页脚却仍写着
+// 「合并自 N 行」，口径自相矛盾。
 
 import type { LedgerRow } from "./types";
 
@@ -29,27 +33,18 @@ export function mergeRowsByDoc(rows: LedgerRow[], merged: boolean): MergedRow[] 
     }));
   }
 
-  const out: MergedRow[] = [];
-  let group: LedgerRow[] = [];
-
-  const flush = () => {
-    if (group.length > 0) out.push(combine(group));
-    group = [];
-  };
-
-  for (const row of rows) {
-    const key = groupKey(row);
-    // 没有单号的行不参与合并，各占一行
-    if (key === null) {
-      flush();
-      out.push(combine([row]));
-      continue;
-    }
-    if (group.length > 0 && groupKey(group[0]) !== key) flush();
-    group.push(row);
-  }
-  flush();
-  return out;
+  // 先按单号分组，再按「组内第一行在本页的位置」输出，
+  // 这样合并结果与排序方式无关，且行序仍跟着当前排序走。
+  const groups = new Map<string, LedgerRow[]>();
+  rows.forEach((row, index) => {
+    // 没有单号的行不参与合并，用带下标的唯一键让它各占一行
+    const key = groupKey(row) ?? `#row-${index}`;
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  });
+  // Map 保持插入顺序，插入顺序就是「组内第一行出现的位置」
+  return Array.from(groups.values(), combine);
 }
 
 /** 同号 + 同类型才算同一张单；空单号返回 null。 */

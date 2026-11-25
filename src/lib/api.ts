@@ -115,6 +115,14 @@ export function fetchPage(
 
 let cachedFacets: Facets | null = null;
 let facetsPromise: Promise<Facets> | null = null;
+// 谁在用筛选下拉：缓存被清掉时通知它们重新取一次。
+// 只清缓存不通知，页面上的下拉会一直是挂载那一刻的旧值（导入新供应商后看不到）。
+const facetsListeners = new Set<() => void>();
+
+export function onFacetsInvalidated(handler: () => void): () => void {
+  facetsListeners.add(handler);
+  return () => facetsListeners.delete(handler);
+}
 
 export function fetchFacets(forceRefresh = false): Promise<Facets> {
   if (!forceRefresh && cachedFacets) {
@@ -140,6 +148,7 @@ export function fetchFacets(forceRefresh = false): Promise<Facets> {
 export function invalidateFacetsCache(): void {
   cachedFacets = null;
   facetsPromise = null;
+  for (const handler of facetsListeners) handler();
 }
 
 export function fetchDetail(id: number): Promise<LedgerRow | null> {
