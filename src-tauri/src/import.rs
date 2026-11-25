@@ -1274,6 +1274,22 @@ pub fn write_rows(
     rows: &[DraftRow],
     replace_sheets: &[String],
 ) -> Result<(i64, usize), String> {
+    let (id, replaced, _) = write_rows_with_items(db, header, rows, replace_sheets, &[])?;
+    Ok((id, replaced))
+}
+
+/// 与 [`write_rows`] 相同，但把宽表带来的基础资料一并写进**同一个事务**。
+///
+/// 以前台账写完先 commit，再单独 upsert 物料；中途失败只返回一句提示，于是
+/// 库里留下「台账行数对、但物料没有库位/规格」的半成品，用户重复点导入又会
+/// 追加一遍。现在两者一次提交，失败一起回滚。
+pub fn write_rows_with_items(
+    db: &Db,
+    header: &HeaderRow,
+    rows: &[DraftRow],
+    replace_sheets: &[String],
+    master_items: &[crate::pivot::PivotItemDef],
+) -> Result<(i64, usize, Option<(usize, usize)>), String> {
     db.with(|conn| {
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let mut replaced = 0usize;
@@ -1414,8 +1430,15 @@ pub fn write_rows(
         }
         crate::dict::touch_many(&tx, dict_counts.iter().map(|((k, v), c)| (*k, v.as_str(), *c)));
 
+        // 宽表物料与台账同事务：任一失败一起回滚，不会留下单边数据
+        let item_counts = if master_items.is_empty() {
+            None
+        } else {
+            Some(crate::pivot::upsert_items_tx(&tx, master_items).map_err(DbError::from)?)
+        };
+
         tx.commit().map_err(DbError::from)?;
-        Ok((import_id, replaced))
+        Ok((import_id, replaced, item_counts))
     })
 }
 
@@ -1575,43 +1598,38 @@ pub fn run_with_options(
         skipped_count: skipped as i64,
         note,
     };
-    let (import_id, replaced) = write_rows(db, &header, &all_rows, &replace_sheets)?;
+    // 宽表物料（含库位/规格/单位/类型）跟台账同事务写：失败一起回滚，
+    // 不会出现「行数对但物料缺库位」，用户也不必重复点导入。
+    let master_items: &[crate::pivot::PivotItemDef] = pivot_master
+        .as_ref()
+        .map(|b| b.items.as_slice())
+        .unwrap_or(&[]);
+    let (import_id, replaced, item_counts) =
+        write_rows_with_items(db, &header, &all_rows, &replace_sheets, master_items)?;
 
-    // 宽表顺带把物料（含库位/规格/单位/类型）写进基础资料。
-    // 台账已经写成功，这一步失败只提示，不回滚。
+    // 事务已经提交，走到这里物料一定写成功；统计直接用本次写入的数字。
     let mut master_outcome = None;
-    let mut master_error = None;
+    let master_error = None;
     if let Some(built) = &pivot_master {
-        if !built.items.is_empty() {
-            match db.with(|c| crate::pivot::upsert_items(c, &built.items).map_err(DbError)) {
-                Ok((added, updated)) => {
-                    log::info!("进销存宽表写入基础资料：物料 +{added} 更新 {updated}");
-                    let located = built
-                        .items
-                        .iter()
-                        .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
-                        .count();
-                    master_outcome = Some(crate::master::MasterImportOutcome {
-                        items_added: added,
-                        items_updated: updated,
-                        suppliers_added: 0,
-                        suppliers_skipped: 0,
-                        sheets_found: vec![format!(
-                            "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
-                            built.months.len(),
-                            built.items.len(),
-                            located
-                        )],
-                        message: format!(
-                            "物料 +{added} 更新 {updated}（同步库位 {located} 个）"
-                        ),
-                    });
-                }
-                Err(err) => {
-                    log::warn!("进销存宽表写基础资料失败: {err}");
-                    master_error = Some(err);
-                }
-            }
+        if let (false, Some((added, updated))) = (built.items.is_empty(), item_counts) {
+            let located = built
+                .items
+                .iter()
+                .filter(|i| i.location.as_deref().is_some_and(|l| !l.trim().is_empty()))
+                .count();
+            master_outcome = Some(crate::master::MasterImportOutcome {
+                items_added: added,
+                items_updated: updated,
+                suppliers_added: 0,
+                suppliers_skipped: 0,
+                sheets_found: vec![format!(
+                    "月度进销存 {} 个月（物料 {} 个，含库位 {} 个）",
+                    built.months.len(),
+                    built.items.len(),
+                    located
+                )],
+                message: format!("物料 +{added} 更新 {updated}（同步库位 {located} 个）"),
+            });
         }
     }
 
@@ -1991,6 +2009,65 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// 台账与基础资料同事务：物料写入失败时，台账那批也必须回滚。
+    #[test]
+    fn master_items_roll_back_with_ledger_on_failure() {
+        let db = Db::open_in_memory().unwrap();
+
+        // 正常路径：台账与物料一次调用一起落库
+        let (_id, _replaced, counts) = write_rows_with_items(
+            &db,
+            &header(),
+            &[sample_row()],
+            &[],
+            &[crate::pivot::PivotItemDef {
+                item_code: "WG-NEW-1".into(),
+                item_name: "新物料".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(counts, Some((1, 0)));
+
+        // 失败路径：用触发器让物料写入在事务中途失败，台账那批也要一起回滚
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER t_block_items BEFORE INSERT ON items
+                 BEGIN SELECT RAISE(ABORT, 'simulated item failure'); END;",
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+        let mut second = header();
+        second.file_hash = "h2".into();
+        let err = write_rows_with_items(
+            &db,
+            &second,
+            &[sample_row()],
+            &[],
+            &[crate::pivot::PivotItemDef {
+                item_code: "WG-NEW-2".into(),
+                item_name: "另一个物料".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("simulated item failure"), "{err}");
+        let (rows_after, imports_after): (i64, i64) = db
+            .with(|c| {
+                Ok((
+                    c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+                        .map_err(DbError::from)?,
+                    c.query_row("SELECT COUNT(*) FROM imports", [], |r| r.get(0))
+                        .map_err(DbError::from)?,
+                ))
+            })
+        .unwrap();
+        assert_eq!(rows_after, 1, "第二次导入的台账行必须回滚掉");
+        assert_eq!(imports_after, 1, "导入批次记录也必须回滚");
     }
 
     #[test]

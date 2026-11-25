@@ -729,8 +729,32 @@ pub fn build_with_hint(sheets: &[PivotSheet], year: i32, file_hint: Option<&str>
 /// 物料写进基础资料（主数据）。已有编码只补空字段，不覆盖用户填过的。
 ///
 /// 返回 `(新增, 更新)`。
+///
+/// 单独调用时自己开事务；导入流程要把它和台账写入合成一次提交，用
+/// [`upsert_items_tx`] 传已开好的事务进来——否则台账已落库、基础资料失败，
+/// 库里会留下「行数对但物料/库位缺失」的半成品。
 pub fn upsert_items(conn: &Connection, items: &[PivotItemDef]) -> DbResult<(usize, usize)> {
     let tx = conn.unchecked_transaction().map_err(|e| DbError::from(e).0)?;
+    let counts = upsert_items_in(&tx, items)?;
+    tx.commit().map_err(|e| DbError::from(e).0)?;
+    Ok(counts)
+}
+
+/// 在调用方给的事务里写物料，不自己提交。
+///
+/// 台账与基础资料必须同进同退：宽表导入时两者来自同一批行，台账成功而物料
+/// 失败会让库存页出现一堆「无库位/无规格」的物料，用户以为导入没生效。
+pub fn upsert_items_tx(
+    tx: &rusqlite::Transaction<'_>,
+    items: &[PivotItemDef],
+) -> DbResult<(usize, usize)> {
+    upsert_items_in(tx, items)
+}
+
+fn upsert_items_in(
+    tx: &rusqlite::Transaction<'_>,
+    items: &[PivotItemDef],
+) -> DbResult<(usize, usize)> {
     let mut added = 0usize;
     let mut updated = 0usize;
     let mut dict_counts: std::collections::HashMap<(&'static str, String), i64> =
@@ -822,8 +846,7 @@ pub fn upsert_items(conn: &Connection, items: &[PivotItemDef]) -> DbResult<(usiz
         }
     }
 
-    crate::dict::touch_many(&tx, dict_counts.iter().map(|((k, v), c)| (*k, v.as_str(), *c)));
-    tx.commit().map_err(|e| DbError::from(e).0)?;
+    crate::dict::touch_many(tx, dict_counts.iter().map(|((k, v), c)| (*k, v.as_str(), *c)));
     Ok((added, updated))
 }
 

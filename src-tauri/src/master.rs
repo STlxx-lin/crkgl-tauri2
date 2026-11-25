@@ -1085,8 +1085,9 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
         }
     }
 
-    tx.commit().map_err(DbError::from)?;
-
+    // 宽表物料与上面的物料/供应商写入同事务提交：
+    // 以前先 commit 主表、再单独 upsert 宽表物料，后者失败会留下
+    // 「物料编号表进来了，库位/规格却缺一半」的中间状态。
     if !pivot_sheets.is_empty() {
         let file_hint = path.file_name().and_then(|n| n.to_str());
         let built = crate::pivot::build_with_hint(
@@ -1095,7 +1096,7 @@ pub fn import_from_workbook(conn: &Connection, path: &std::path::Path) -> DbResu
             file_hint,
         );
         if !built.items.is_empty() {
-            let (added, updated) = crate::pivot::upsert_items(conn, &built.items)?;
+            let (added, updated) = crate::pivot::upsert_items_tx(&tx, &built.items)?;
             let located = built
                 .items
                 .iter()
