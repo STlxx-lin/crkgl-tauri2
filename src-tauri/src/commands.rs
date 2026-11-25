@@ -18,6 +18,7 @@ use crate::paths;
 use crate::summary;
 use crate::master;
 use crate::voucher;
+use crate::warehouse;
 use crate::web::{self, WebHandle, WebStatus};
 
 pub struct AppState {
@@ -37,6 +38,23 @@ impl AppState {
             web: std::sync::Mutex::new(None),
             last_import: std::sync::Mutex::new(None),
         }
+    }
+
+    /// 当前仓库。
+    ///
+    /// 每次从 `settings.active_warehouse` 现读，不在内存里另存一份：桌面端和只读站
+    /// 同时使用同一条 SQLite 连接，谁改了设置大家都立刻看到，也不会因为两份缓存
+    /// 不一致把数据写进错误的仓库。代价只是每条命令多一次按主键的查询。
+    pub fn wh(&self) -> Result<i64, String> {
+        warehouse::current_id_db(&self.db)
+    }
+}
+
+/// 把当前仓库塞进筛选条件。前端不需要为每个查询单独传仓库。
+fn scoped(filter: &LedgerFilter, warehouse_id: i64) -> LedgerFilter {
+    LedgerFilter {
+        warehouse_id: Some(warehouse_id),
+        ..filter.clone()
     }
 }
 
@@ -85,13 +103,27 @@ pub struct BootstrapInfo {
     pub startup_import: Option<import::ImportOutcome>,
     pub last_error: Option<String>,
     pub sample_workbooks: Vec<String>,
+    /// 仓库列表（含每个仓的体量），侧栏切换器与「管理仓库」弹窗用
+    pub warehouses: Vec<warehouse::Warehouse>,
+    /// 当前仓库 id；仓库表异常时给 0，前端据此提示「先新建仓库」
+    pub active_warehouse_id: i64,
+    /// 当前仓库名，打印/导出时标在纸面上
+    pub active_warehouse_name: Option<String>,
 }
 
 #[tauri::command]
 pub fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<BootstrapInfo, String> {
     let db = &state.db;
-    let facets = ledger::facets_from(db).unwrap_or_else(|_| empty_facets());
-    let import_count = import::history(db).map(|rows| rows.len() as i64).unwrap_or(0);
+    let warehouses = warehouse::list_db(db).unwrap_or_default();
+    let active = warehouse::current_id_db(db).ok();
+    let facets = match active {
+        Some(id) => ledger::facets_from(db, id).unwrap_or_else(|_| empty_facets()),
+        None => empty_facets(),
+    };
+    let import_count = active
+        .and_then(|id| import::history(db, id).ok())
+        .map(|rows| rows.len() as i64)
+        .unwrap_or(0);
     let web_status = state
         .web
         .lock()
@@ -112,7 +144,7 @@ pub fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<BootstrapInfo, Strin
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: db::schema_version(db),
         db_path: db.path.display().to_string(),
-        row_count: ledger::count(db).unwrap_or(0),
+        row_count: active.and_then(|id| ledger::count(db, id).ok()).unwrap_or(0),
         import_count,
         min_date: facets.min_date,
         max_date: facets.max_date,
@@ -125,6 +157,10 @@ pub fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<BootstrapInfo, Strin
             .into_iter()
             .map(|p| p.display().to_string())
             .collect(),
+        active_warehouse_name: active
+            .and_then(|id| warehouses.iter().find(|w| w.id == id).map(|w| w.name.clone())),
+        active_warehouse_id: active.unwrap_or(0),
+        warehouses,
     })
 }
 
@@ -146,17 +182,18 @@ pub fn ledger_page(state: State<'_, Arc<AppState>>, args: QueryArgs) -> Result<l
     let page = args.page.unwrap_or(1);
     let size = args.page_size.unwrap_or(100);
     web::validate_page(page, size)?;
-    ledger::page_from_opt(&state.db, &args.filter, page, size, args.skip_totals.unwrap_or(false))
+    let filter = scoped(&args.filter, state.wh()?);
+    ledger::page_from_opt(&state.db, &filter, page, size, args.skip_totals.unwrap_or(false))
 }
 
 #[tauri::command]
 pub fn ledger_facets(state: State<'_, Arc<AppState>>) -> Result<ledger::Facets, String> {
-    ledger::facets_from(&state.db)
+    ledger::facets_from(&state.db, state.wh()?)
 }
 
 #[tauri::command]
 pub fn ledger_detail(state: State<'_, Arc<AppState>>, id: i64) -> Result<Option<ledger::LedgerRow>, String> {
-    ledger::detail_from(&state.db, id)
+    ledger::detail_from(&state.db, id, Some(state.wh()?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,7 +223,8 @@ pub struct ExportResult {
 
 #[tauri::command]
 pub fn ledger_export(state: State<'_, Arc<AppState>>, args: QueryArgs, path: &str) -> Result<ExportResult, String> {
-    let (csv, rows) = ledger::export_csv_from(&state.db, &args.filter, 500_000)?;
+    let filter = scoped(&args.filter, state.wh()?);
+    let (csv, rows) = ledger::export_csv_from(&state.db, &filter, 500_000)?;
     write_csv(&path, csv, rows)
 }
 
@@ -329,7 +367,8 @@ fn default_true() -> bool {
 pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<import::ImportOutcome, String> {
     let file = require_file(&args.path)?;
     let year = args.year.unwrap_or_else(import::current_year);
-    let mut outcome = import::run_with_year(&state.db, &file, args.plans, args.replace, year)?;
+    let warehouse_id = state.wh()?;
+    let mut outcome = import::run_with_year(&state.db, warehouse_id, &file, args.plans, args.replace, year)?;
     // 宽表在 run_with_year 内部已顺带写好基础资料并填入 outcome.master；
     // 仅当常规明细工作簿尚未写入基础资料且开启了 master 选项时，才单独扫主数据表。
     if args.master && outcome.master.is_none() {
@@ -352,12 +391,12 @@ pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<impo
 
 #[tauri::command]
 pub fn import_history(state: State<'_, Arc<AppState>>) -> Result<Vec<import::ImportRecord>, String> {
-    import::history(&state.db)
+    import::history(&state.db, state.wh()?)
 }
 
 #[tauri::command]
 pub fn import_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<usize, String> {
-    import::delete_import(&state.db, id)
+    import::delete_import(&state.db, state.wh()?, id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,6 +410,9 @@ pub struct SummaryArgs {
     pub kind: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// 「全部仓库」合并视图：只有汇总页会打开，其余入口一律按当前仓库。
+    #[serde(default)]
+    pub merge_all: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -385,10 +427,24 @@ pub struct SummaryBundle {
     pub compare: Option<summary::PeriodCompare>,
 }
 
+impl SummaryArgs {
+    /// 汇总页可选「全部仓库」；其余调用方不传 `merge_all`，始终落在当前仓库。
+    fn resolve_filter(&self, state: &AppState) -> Result<LedgerFilter, String> {
+        if self.merge_all.unwrap_or(false) {
+            Ok(LedgerFilter {
+                warehouse_id: None,
+                ..self.filter.clone()
+            })
+        } else {
+            Ok(scoped(&self.filter, state.wh()?))
+        }
+    }
+}
+
 #[tauri::command]
 pub fn summary_bundle(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Result<SummaryBundle, String> {
     let db = &state.db;
-    let filter = args.filter;
+    let filter = args.resolve_filter(&state)?;
     let totals = state.db.with(|c| ledger::totals(c, &filter).map_err(db::DbError::from))?;
     Ok(SummaryBundle {
         totals,
@@ -403,8 +459,9 @@ pub fn summary_bundle(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Res
 
 #[tauri::command]
 pub fn summary_group(state: State<'_, Arc<AppState>>, args: SummaryArgs) -> Result<Vec<summary::GroupRow>, String> {
-    let group_by = args.group_by.unwrap_or_else(|| "month".into());
-    summary::grouped_from(&state.db, &args.filter, &group_by, args.limit.unwrap_or(50))
+    let group_by = args.group_by.clone().unwrap_or_else(|| "month".into());
+    let filter = args.resolve_filter(&state)?;
+    summary::grouped_from(&state.db, &filter, &group_by, args.limit.unwrap_or(50))
 }
 
 #[tauri::command]
@@ -523,12 +580,13 @@ pub fn auto_import(state: &AppState) -> Option<import::ImportOutcome> {
     if db::get_setting(&state.db, "manual_clear").as_deref() == Some("1") {
         return None;
     }
-    if ledger::count(&state.db).unwrap_or(1) > 0 {
+    let warehouse_id = state.wh().ok()?;
+    if ledger::count(&state.db, warehouse_id).unwrap_or(1) > 0 {
         return None;
     }
     let files = paths::sample_workbooks(state.dev_root.as_deref());
     for file in files {
-        match import::run(&state.db, &file, None, true) {
+        match import::run(&state.db, warehouse_id, &file, None, true) {
             Ok(outcome) => {
                 log::info!("首启自动导入 {} 行：{}", outcome.rows, file.display());
                 return Some(outcome);
@@ -543,7 +601,7 @@ pub fn auto_import(state: &AppState) -> Option<import::ImportOutcome> {
 
 #[tauri::command]
 pub fn voucher_create(state: State<'_, Arc<AppState>>, args: voucher::VoucherInput) -> Result<i64, String> {
-    voucher::create_db(&state.db, &args)
+    voucher::create_db(&state.db, state.wh()?, &args)
 }
 
 #[tauri::command]
@@ -571,7 +629,7 @@ pub fn voucher_list(
     kind: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<voucher::VoucherSummary>, String> {
-    voucher::list_db(&state.db, kind.as_deref(), limit.unwrap_or(50))
+    voucher::list_db(&state.db, state.wh()?, kind.as_deref(), limit.unwrap_or(50))
 }
 
 #[tauri::command]
@@ -580,7 +638,7 @@ pub fn voucher_next_no(
     kind: String,
     date: String,
 ) -> Result<String, String> {
-    voucher::next_doc_no_db(&state.db, &kind, &date)
+    voucher::next_doc_no_db(&state.db, state.wh()?, &kind, &date)
 }
 
 /// 物料快速输入候选。`inbound_only` 为真时只统计已入库的物料，
@@ -595,6 +653,7 @@ pub fn item_master(
 ) -> Result<Vec<voucher::ItemMaster>, String> {
     voucher::item_master_db(
         &state.db,
+        state.wh()?,
         keyword.as_deref(),
         limit.unwrap_or(200),
         inbound_only.unwrap_or(false),
@@ -629,6 +688,7 @@ pub fn stock_report(
 ) -> Result<Vec<stock::StockRow>, String> {
     stock::stock_report_db(
         &state.db,
+        state.wh()?,
         args.keyword.as_deref(),
         args.only_negative,
         args.limit,
@@ -642,17 +702,22 @@ pub fn stock_count(
     keyword: Option<String>,
     only_negative: Option<bool>,
 ) -> Result<i64, String> {
-    stock::stock_count_db(&state.db, keyword.as_deref(), only_negative.unwrap_or(false))
+    stock::stock_count_db(
+        &state.db,
+        state.wh()?,
+        keyword.as_deref(),
+        only_negative.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
 pub fn stock_check(state: State<'_, Arc<AppState>>, limit: Option<i64>) -> Result<Vec<stock::IssueRow>, String> {
-    stock::check_issues_db(&state.db, limit.unwrap_or(300))
+    stock::check_issues_db(&state.db, state.wh()?, limit.unwrap_or(300))
 }
 
 #[tauri::command]
 pub fn stock_check_summary(state: State<'_, Arc<AppState>>) -> Result<stock::CheckSummary, String> {
-    stock::check_summary_db(&state.db)
+    stock::check_summary_db(&state.db, state.wh()?)
 }
 
 // ---------- 批量 ----------
@@ -854,7 +919,7 @@ pub fn data_clear(
     state: State<'_, Arc<AppState>>,
     include_master: Option<bool>,
 ) -> Result<db::ClearOutcome, String> {
-    let outcome = db::clear_data(&state.db, include_master.unwrap_or(false))?;
+    let outcome = db::clear_data(&state.db, include_master.unwrap_or(false), state.wh()?)?;
     if let Ok(mut slot) = state.last_import.lock() {
         *slot = None;
     }
@@ -870,7 +935,13 @@ pub fn doc_search(
     kind: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<voucher::DocHit>, String> {
-    voucher::search_docs_db(&state.db, &keyword, kind.as_deref(), limit.unwrap_or(50))
+    voucher::search_docs_db(
+        &state.db,
+        state.wh()?,
+        &keyword,
+        kind.as_deref(),
+        limit.unwrap_or(50),
+    )
 }
 
 #[tauri::command]
@@ -879,5 +950,44 @@ pub fn doc_lines(
     doc_no: String,
     kind: String,
 ) -> Result<Vec<ledger::LedgerRow>, String> {
-    voucher::import_doc_lines_db(&state.db, &doc_no, &kind)
+    voucher::import_doc_lines_db(&state.db, state.wh()?, &doc_no, &kind)
+}
+
+// ---------- 仓库 ----------
+
+#[tauri::command]
+pub fn warehouse_list(state: State<'_, Arc<AppState>>) -> Result<Vec<warehouse::Warehouse>, String> {
+    warehouse::list_db(&state.db)
+}
+
+#[tauri::command]
+pub fn warehouse_create(
+    state: State<'_, Arc<AppState>>,
+    args: warehouse::WarehouseInput,
+) -> Result<i64, String> {
+    warehouse::create_db(&state.db, &args)
+}
+
+#[tauri::command]
+pub fn warehouse_update(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+    args: warehouse::WarehouseInput,
+) -> Result<(), String> {
+    warehouse::update_db(&state.db, id, &args)
+}
+
+#[tauri::command]
+pub fn warehouse_delete(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+    force: Option<bool>,
+) -> Result<warehouse::DeleteOutcome, String> {
+    warehouse::delete_db(&state.db, id, force.unwrap_or(false))
+}
+
+/// 切换当前仓库。只写设置，不动数据。
+#[tauri::command]
+pub fn warehouse_switch(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
+    warehouse::set_current_db(&state.db, id)
 }

@@ -1231,6 +1231,7 @@ fn null_if_empty(value: &str) -> Option<&str> {
 /// 实际写库：一个事务，要么全进要么一条不进。返回 (导入批次 id, 被覆盖的行数)。
 pub fn write_rows(
     db: &Db,
+    warehouse_id: i64,
     header: &HeaderRow,
     rows: &[DraftRow],
     replace_sheets: &[String],
@@ -1240,13 +1241,17 @@ pub fn write_rows(
         let mut replaced = 0usize;
         for sheet in replace_sheets {
             replaced += tx
-                .execute("DELETE FROM ledger WHERE sheet = ?1", [sheet])
+                .execute(
+                    "DELETE FROM ledger WHERE warehouse_id = ?1 AND sheet = ?2",
+                    rusqlite::params![warehouse_id, sheet],
+                )
                 .map_err(DbError::from)?;
         }
         tx.execute(
-            "INSERT INTO imports (file_name, file_hash, sheets, imported_at, row_count, skipped_count, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO imports (warehouse_id, file_name, file_hash, sheets, imported_at, row_count, skipped_count, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
+                warehouse_id,
                 header.file_name,
                 header.file_hash,
                 header.sheets_json,
@@ -1286,8 +1291,8 @@ pub fn write_rows(
                 .prepare(
                     "INSERT INTO ledger (import_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
                         item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
-                        partner, buyer, owner, receiver, flags)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                        partner, buyer, owner, receiver, flags, warehouse_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 )
                 .map_err(DbError::from)?;
 
@@ -1330,6 +1335,7 @@ pub fn write_rows(
                     null_if_empty(&row.owner),
                     null_if_empty(&row.receiver),
                     row.flags.join(","),
+                    warehouse_id,
                 ])
                 .map_err(DbError::from)?;
             }
@@ -1369,11 +1375,12 @@ pub fn write_rows(
 /// 完整导入：读文件 → 解析 → 写库。
 pub fn run(
     db: &Db,
+    warehouse_id: i64,
     path: &Path,
     plans: Option<Vec<SheetPlan>>,
     replace_all: bool,
 ) -> Result<ImportOutcome, String> {
-    run_with_year(db, path, plans, replace_all, current_year())
+    run_with_year(db, warehouse_id, path, plans, replace_all, current_year())
 }
 
 /// 当前年份：宽表里没有年份，默认按今年算。
@@ -1384,6 +1391,7 @@ pub fn current_year() -> i32 {
 /// 带年份的完整导入。`year` 只对月度进销存宽表有意义。
 pub fn run_with_year(
     db: &Db,
+    warehouse_id: i64,
     path: &Path,
     plans: Option<Vec<SheetPlan>>,
     replace_all: bool,
@@ -1487,7 +1495,7 @@ pub fn run_with_year(
         flagged += built.correction_rows;
     }
     let hash = file_hash(path)?;
-    let duplicate_of = find_import_by_hash(db, &hash)?;
+    let duplicate_of = find_import_by_hash(db, warehouse_id, &hash)?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let sheets_json = serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string());
     let note = if replace_sheets.is_empty() {
@@ -1505,7 +1513,7 @@ pub fn run_with_year(
         skipped_count: skipped as i64,
         note,
     };
-    let (import_id, replaced) = write_rows(db, &header, &all_rows, &replace_sheets)?;
+    let (import_id, replaced) = write_rows(db, warehouse_id, &header, &all_rows, &replace_sheets)?;
 
     // 宽表顺带把物料（含库位/规格/单位/类型）写进基础资料。
     // 台账已经写成功，这一步失败只提示，不回滚。
@@ -1560,12 +1568,12 @@ pub fn run_with_year(
     })
 }
 
-fn find_import_by_hash(db: &Db, hash: &str) -> Result<Option<i64>, String> {
+fn find_import_by_hash(db: &Db, warehouse_id: i64, hash: &str) -> Result<Option<i64>, String> {
     let found = db
         .with(|c| {
             c.query_row(
-                "SELECT id FROM imports WHERE file_hash = ?1 ORDER BY id DESC LIMIT 1",
-                [hash],
+                "SELECT id FROM imports WHERE warehouse_id = ?1 AND file_hash = ?2 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![warehouse_id, hash],
                 |r| r.get(0),
             )
             .map_err(DbError::from)
@@ -1588,17 +1596,17 @@ pub struct ImportRecord {
     pub live_rows: i64,
 }
 
-pub fn history(db: &Db) -> Result<Vec<ImportRecord>, String> {
+pub fn history(db: &Db, warehouse_id: i64) -> Result<Vec<ImportRecord>, String> {
     db.with(|c| {
         let mut stmt = c
             .prepare(
                 "SELECT i.id, i.file_name, i.file_hash, i.imported_at, i.row_count, i.skipped_count, i.note,
                         (SELECT COUNT(*) FROM ledger l WHERE l.import_id = i.id)
-                 FROM imports i ORDER BY i.id DESC LIMIT 50",
+                 FROM imports i WHERE i.warehouse_id = ?1 ORDER BY i.id DESC LIMIT 50",
             )
             .map_err(DbError::from)?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map([warehouse_id], |r| {
                 Ok(ImportRecord {
                     id: r.get(0)?,
                     file_name: r.get(1)?,
@@ -1616,13 +1624,19 @@ pub fn history(db: &Db) -> Result<Vec<ImportRecord>, String> {
     })
 }
 
-/// 删掉一次导入（级联删明细）。
-pub fn delete_import(db: &Db, id: i64) -> Result<usize, String> {
+/// 删掉一次导入（级联删明细）。只允许删当前仓库的批次。
+pub fn delete_import(db: &Db, warehouse_id: i64, id: i64) -> Result<usize, String> {
     db.with(|c| {
-        c.execute("DELETE FROM ledger WHERE import_id = ?1", [id])
-            .map_err(DbError::from)?;
-        c.execute("DELETE FROM imports WHERE id = ?1", [id])
-            .map_err(DbError::from)
+        c.execute(
+            "DELETE FROM ledger WHERE import_id = ?1 AND warehouse_id = ?2",
+            rusqlite::params![id, warehouse_id],
+        )
+        .map_err(DbError::from)?;
+        c.execute(
+            "DELETE FROM imports WHERE id = ?1 AND warehouse_id = ?2",
+            rusqlite::params![id, warehouse_id],
+        )
+        .map_err(DbError::from)
     })
 }
 
@@ -1826,7 +1840,7 @@ mod tests {
     #[test]
     fn write_rows_stores_flags_and_nulls() {
         let db = Db::open_in_memory().unwrap();
-        let (id, replaced) = write_rows(&db, &header(), &[sample_row()], &[]).unwrap();
+        let (id, replaced) = write_rows(&db, 1, &header(), &[sample_row()], &[]).unwrap();
         assert!(id > 0);
         assert_eq!(replaced, 0);
         db.with(|c| {
@@ -1845,8 +1859,9 @@ mod tests {
     #[test]
     fn replace_mode_clears_sheet_first() {
         let db = Db::open_in_memory().unwrap();
-        write_rows(&db, &header(), &[sample_row(), sample_row()], &[]).unwrap();
-        let (_id, replaced) = write_rows(&db, &header(), &[sample_row()], &["入库明细".to_string()]).unwrap();
+        write_rows(&db, 1, &header(), &[sample_row(), sample_row()], &[]).unwrap();
+        let (_id, replaced) =
+            write_rows(&db, 1, &header(), &[sample_row()], &["入库明细".to_string()]).unwrap();
         assert_eq!(replaced, 2);
         let count: i64 = db
             .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
@@ -1854,14 +1869,43 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    /// 同一个 Excel 可以分别导进两个仓库；覆盖同名 sheet 也只清本仓的行。
+    #[test]
+    fn same_sheet_in_two_warehouses_is_isolated() {
+        let db = Db::open_in_memory().unwrap();
+        write_rows(&db, 1, &header(), &[sample_row(), sample_row()], &[]).unwrap();
+        write_rows(&db, 2, &header(), &[sample_row()], &[]).unwrap();
+        let count: i64 = db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(count, 3);
+
+        // 二号仓重导同一页：只清二号仓那 1 行
+        let (_id, replaced) =
+            write_rows(&db, 2, &header(), &[sample_row()], &["入库明细".to_string()]).unwrap();
+        assert_eq!(replaced, 1);
+        let (wh1, wh2): (i64, i64) = db
+            .with(|c| {
+                let a = c
+                    .query_row("SELECT COUNT(*) FROM ledger WHERE warehouse_id = 1", [], |r| r.get(0))
+                    .map_err(DbError::from)?;
+                let b = c
+                    .query_row("SELECT COUNT(*) FROM ledger WHERE warehouse_id = 2", [], |r| r.get(0))
+                    .map_err(DbError::from)?;
+                Ok((a, b))
+            })
+            .unwrap();
+        assert_eq!((wh1, wh2), (2, 1));
+    }
+
     #[test]
     fn delete_import_cascades_rows() {
         let db = Db::open_in_memory().unwrap();
-        let (id, _) = write_rows(&db, &header(), &[sample_row()], &[]).unwrap();
-        let rows = history(&db).unwrap();
+        let (id, _) = write_rows(&db, 1, &header(), &[sample_row()], &[]).unwrap();
+        let rows = history(&db, 1).unwrap();
         assert_eq!(rows[0].live_rows, 1);
-        delete_import(&db, id).unwrap();
-        assert!(history(&db).unwrap().is_empty());
+        delete_import(&db, 1, id).unwrap();
+        assert!(history(&db, 1).unwrap().is_empty());
         let count: i64 = db
             .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
             .unwrap();

@@ -65,7 +65,7 @@ fn voucher_round_trip_appears_in_ledger() {
     let db = Arc::new(db);
 
     // 1) 开一张入库单
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-01", vec![
+    let id = voucher::create_db(&db, 1, &voucher("in", "2026-09-01", vec![
         line("WG-A", "外卡", 10.0, Some(15_000)),
         line("WG-B", "轴承", 2.0, Some(100_000)),
     ]))
@@ -81,7 +81,7 @@ fn voucher_round_trip_appears_in_ledger() {
 
     // 3) 台账里能查到这两行
     let page = db
-        .with(|c| ledger::page(c, &LedgerFilter::default(), 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
+        .with(|c| ledger::page(c, &LedgerFilter { warehouse_id: Some(1), ..Default::default() }, 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
         .expect("page");
     assert_eq!(page.total, 2, "开单产生的行应出现在台账");
     assert!(page.rows.iter().all(|r| r.sheet == "voucher:in"));
@@ -99,7 +99,7 @@ fn voucher_round_trip_appears_in_ledger() {
         .expect("bulk update");
     assert_eq!(changed, 2);
     let page = db
-        .with(|c| ledger::page(c, &LedgerFilter::default(), 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
+        .with(|c| ledger::page(c, &LedgerFilter { warehouse_id: Some(1), ..Default::default() }, 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
         .expect("page2");
     assert!(page.rows.iter().all(|r| r.owner.as_deref() == Some("批量归属")));
 
@@ -121,9 +121,9 @@ fn out_voucher_and_in_voucher_number_independently() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let in_id = voucher::create_db(&db, &voucher("in", "2026-09-02", vec![line("A", "x", 1.0, Some(10_000))]))
+    let in_id = voucher::create_db(&db, 1, &voucher("in", "2026-09-02", vec![line("A", "x", 1.0, Some(10_000))]))
         .expect("in");
-    let out_id = voucher::create_db(&db, &voucher("out", "2026-09-02", vec![line("A", "x", 3.0, None)]))
+    let out_id = voucher::create_db(&db, 1, &voucher("out", "2026-09-02", vec![line("A", "x", 3.0, None)]))
         .expect("out");
 
     let in_v = voucher::get_db(&db, in_id).expect("get in").expect("in exists");
@@ -134,7 +134,7 @@ fn out_voucher_and_in_voucher_number_independently() {
 
     // 台账里两种类型都在
     let facets = db
-        .with(|c| ledger::facets(c).map_err(warehouse_ledger_lib::db::DbError::from))
+        .with(|c| ledger::facets(c, 1).map_err(warehouse_ledger_lib::db::DbError::from))
         .expect("facets");
     assert_eq!(facets.in_rows, 1);
     assert_eq!(facets.out_rows, 1);
@@ -147,7 +147,7 @@ fn deleting_voucher_removes_its_rows() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-03", vec![
+    let id = voucher::create_db(&db, 1, &voucher("in", "2026-09-03", vec![
         line("A", "x", 1.0, Some(10_000)),
         line("B", "y", 2.0, Some(20_000)),
     ]))
@@ -172,13 +172,98 @@ fn item_master_feeds_autofill() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    voucher::create_db(&db, &voucher("in", "2026-09-04", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]))
+    voucher::create_db(&db, 1, &voucher("in", "2026-09-04", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]))
         .expect("create");
 
-    let items = voucher::item_master_db(&db, Some("WG-A"), 10, true, false).expect("master");
+    let items = voucher::item_master_db(&db, 1, Some("WG-A"), 10, true, false).expect("master");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].unit.as_deref(), Some("个"));
     assert_eq!(items[0].last_price_micros, Some(17_000));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 跨仓隔离：同一个库里的两个仓各有各的台账、单据与流水号，
+/// 汇总页的「全部仓库」才看得到两边加起来的数。
+#[test]
+fn warehouses_are_isolated_and_merge_on_demand() {
+    let (db, dir) = temp_db();
+    let db = Arc::new(db);
+
+    // 主仓库（迁移自带）开一张入库单
+    let one = voucher::create_db(&db, 1, &voucher("in", "2026-09-05", vec![
+        line("WG-A", "外卡", 10.0, Some(15_000)),
+    ]))
+    .expect("in wh 1");
+
+    // 新建二号仓，同一张单、同一天，编号也应从 001 重新起
+    let wh2 = warehouse_ledger_lib::warehouse::create_db(
+        &db,
+        &warehouse_ledger_lib::warehouse::WarehouseInput {
+            name: "二号仓".into(),
+            remark: None,
+            active: None,
+            sort_no: None,
+        },
+    )
+    .expect("create wh");
+    let two = voucher::create_db(&db, wh2, &voucher("out", "2026-09-05", vec![
+        line("WG-B", "轴承", 3.0, None),
+    ]))
+    .expect("out wh 2");
+
+    let v1 = voucher::get_db(&db, one).unwrap().unwrap();
+    let v2 = voucher::get_db(&db, two).unwrap().unwrap();
+    assert_eq!(v1.doc_no, "20260905001");
+    assert_eq!(v2.doc_no, "20260905001", "每个仓自己从 001 起号");
+
+    // 单据列表按仓：各自只看得到自己那一张
+    assert_eq!(voucher::list_db(&db, 1, None, 50).unwrap().len(), 1);
+    assert_eq!(voucher::list_db(&db, wh2, None, 50).unwrap().len(), 1);
+
+    // 台账按仓：一进一出，互不可见
+    let page1 = db
+        .with(|c| {
+            ledger::page(c, &LedgerFilter { warehouse_id: Some(1), ..Default::default() }, 1, 50)
+                .map_err(warehouse_ledger_lib::db::DbError::from)
+        })
+        .unwrap();
+    let page2 = db
+        .with(|c| {
+            ledger::page(c, &LedgerFilter { warehouse_id: Some(wh2), ..Default::default() }, 1, 50)
+                .map_err(warehouse_ledger_lib::db::DbError::from)
+        })
+        .unwrap();
+    assert_eq!(page1.total, 1);
+    assert_eq!(page2.total, 1);
+    assert!(page1.rows.iter().all(|r| r.kind == "in"));
+    assert!(page2.rows.iter().all(|r| r.kind == "out"));
+
+    // 汇总页的「全部仓库」：warehouse_id = None 才是跨仓合并
+    let merged = db
+        .with(|c| {
+            ledger::page(c, &LedgerFilter { warehouse_id: None, ..Default::default() }, 1, 50)
+                .map_err(warehouse_ledger_lib::db::DbError::from)
+        })
+        .unwrap();
+    assert_eq!(merged.total, 2, "只有合并视图能看到两个仓");
+
+    // 删掉二号仓的数据，主仓库不受影响
+    let out = warehouse_ledger_lib::warehouse::delete_db(&db, wh2, true).expect("delete wh2");
+    assert_eq!(out.vouchers, 1);
+    assert_eq!(
+        db.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM ledger WHERE warehouse_id = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(warehouse_ledger_lib::db::DbError::from)
+        })
+        .unwrap(),
+        1,
+        "另一个仓的台账应当原样保留"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -223,7 +308,7 @@ fn each_line_keeps_its_own_delivery_no() {
     let (db, dir) = temp_db();
     let db = Arc::new(db);
 
-    let id = voucher::create_db(&db, &voucher("in", "2026-09-02", vec![
+    let id = voucher::create_db(&db, 1, &voucher("in", "2026-09-02", vec![
         line_with_delivery("WG-D1", 3.0, Some("0023378")),
         line_with_delivery("WG-D2", 4.0, Some("  0023401 ")),
         line_with_delivery("WG-D3", 5.0, None),
@@ -244,7 +329,7 @@ fn each_line_keeps_its_own_delivery_no() {
 
     // 台账行也跟着带上，读台账能看到送货单号
     let page = db
-        .with(|c| ledger::page(c, &LedgerFilter::default(), 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
+        .with(|c| ledger::page(c, &LedgerFilter { warehouse_id: Some(1), ..Default::default() }, 1, 50).map_err(warehouse_ledger_lib::db::DbError::from))
         .expect("page");
     let mut seen: Vec<String> = page
         .rows
