@@ -162,7 +162,14 @@ export function SummaryScreen({ boot }: { boot: { minDate: string | null; maxDat
             </section>
 
             <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <TopList items={data?.topIn ?? []} title="入库金额前 10 物料" kindLabel="入库" variant="neutral" />
+              {/* 上面已经按主口径显示了一侧，这里必须是另一侧；
+                  原来固定渲染 topIn，主口径选「入库」时同一张卡片会出现两次 */}
+              <TopList
+                items={primary === "out" ? data?.topIn ?? [] : data?.topOut ?? []}
+                title={primary === "out" ? "入库金额前 10 物料" : "出库金额前 10 物料"}
+                kindLabel={primary === "out" ? "入库" : "出库"}
+                variant="neutral"
+              />
               <MonthTable points={data?.monthly ?? []} />
             </section>
           </div>
@@ -201,7 +208,9 @@ function StatCard({
       <p
         className={
           "mt-1.5 font-mono text-[1.625rem] font-medium leading-8 tabular-nums " +
-          (accent ? "text-text-primary" : "text-text-primary")
+          // 强调位（左二）给真实差异：出库用深一档的字色 + 跟随强调色刻度，
+          // 原来两个分支都写 text-text-primary，accent 等于从未生效
+          (accent ? "text-accent-500" : "text-text-primary")
         }
       >
         {span.isCount ? count(span.value) : money(span.value)}

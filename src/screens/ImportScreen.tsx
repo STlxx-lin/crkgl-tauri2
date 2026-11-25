@@ -25,7 +25,7 @@ import type {
   SheetReport,
   WorkbookReport,
 } from "../lib/types";
-import { count, date, fileSize, kindLabel } from "../lib/format";
+import { amount, count, date, fileSize, flagLabel, kindLabel, qty } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { Select, SelectItem } from "@/components/base/select/select";
 import { Switch } from "@/components/base/switch/switch";
@@ -772,14 +772,16 @@ function PreviewPanel({
                       {row.unit || "—"}
                     </td>
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
-                      {row.qty === null ? "—" : `${row.kind === "out" ? "-" : ""}${row.qty}`}
+                      {/* 与台账共用同一套格式化：预览里的数字必须和落库后看到的一致，
+                          否则用户在核对阶段会以为导入算错了 */}
+                      {row.qty === null ? "—" : `${row.kind === "out" ? "-" : ""}${qty(row.qty)}`}
                     </td>
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
-                      {row.amountCents === null ? "—" : (row.amountCents / 100).toFixed(2)}
+                      {amount(row.amountCents)}
                     </td>
                     <td className="max-w-[220px] truncate px-3 py-1.5 text-[0.6875rem] text-text-tertiary" title={row.remark}>
                       {row.flags.length > 0 ? (
-                        <span className="font-mono text-amber-500">{row.flags.join(" ")} </span>
+                        <span className="text-amber-500">{row.flags.map(flagLabel).join(" · ")} </span>
                       ) : null}
                       {row.remark || (row.flags.length === 0 ? "—" : "")}
                     </td>

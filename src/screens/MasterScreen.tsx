@@ -231,6 +231,9 @@ function ItemsPanel({
   busy: boolean;
 }) {
   const [keyword, setKeyword] = useState("");
+  // 关键字防抖后再查：原来每敲一个字都要发 listItems + countItems 两个请求，
+  // 「轴承」六个字就是 12 个查询，本机只有一把 DB 锁，会跟开单互相抢。
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [category, setCategory] = useState<string>("all");
   const [itemType, setItemType] = useState<string>("all");
   const [onlyActive, setOnlyActive] = useState(true);
@@ -263,19 +266,25 @@ function ItemsPanel({
     [itemTypes],
   );
 
+  // 关键字防抖：250ms 内连续输入只查最后一次
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setOffset(0);
+      setDebouncedKeyword(keyword.trim());
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [keyword, category, itemType, onlyActive, sortOrder, pageSize]);
+  }, [keyword]);
+
+  // 筛选条件（含关键字）变了就回到第一页
+  useEffect(() => {
+    setOffset(0);
+  }, [debouncedKeyword, category, itemType, onlyActive, sortOrder, pageSize]);
 
   const load = useCallback(async () => {
     const ticket = ++seq.current;
     setLoading(true);
     try {
       const opts = {
-        keyword: keyword.trim() || undefined,
+        keyword: debouncedKeyword || undefined,
         category: category === "all" ? null : category,
         itemType: itemType === "all" ? null : itemType,
         onlyActive,
@@ -295,7 +304,7 @@ function ItemsPanel({
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [keyword, category, itemType, onlyActive, offset, sortOrder, pageSize]);
+  }, [debouncedKeyword, category, itemType, onlyActive, offset, sortOrder, pageSize]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -320,7 +329,7 @@ function ItemsPanel({
     saveCsvFile("导出物料资料", exportFileName("物料资料"), (path) =>
       exportItems(
         {
-          keyword: keyword.trim() || undefined,
+          keyword: debouncedKeyword || undefined,
           category: category === "all" ? null : category,
           itemType: itemType === "all" ? null : itemType,
           onlyActive,
@@ -849,6 +858,8 @@ function ItemDialog({
  */
 function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boolean }) {
   const [keyword, setKeyword] = useState("");
+  // 和图号一样防抖，避免每敲一个字就发 listItems + countItems
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [mode, setMode] = useState<"has" | "missing">("has");
   const [rows, setRows] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
@@ -861,16 +872,24 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
   const tableRef = useRef<HTMLDivElement>(null);
 
+  // 关键字防抖；图号页原先连延时都没有，键盘每敲一下就是一整轮查询
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
   useEffect(() => {
     setOffset(0);
-  }, [keyword, mode, pageSize]);
+  }, [debouncedKeyword, mode, pageSize]);
 
   const load = useCallback(async () => {
     const ticket = ++seq.current;
     setLoading(true);
     try {
       const opts = {
-        keyword: keyword.trim() || undefined,
+        keyword: debouncedKeyword || undefined,
         onlyActive: true,
         withDrawing: mode === "has",
         limit: pageSize,
@@ -886,7 +905,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
     } finally {
       if (ticket === seq.current) setLoading(false);
     }
-  }, [keyword, mode, offset, pageSize]);
+  }, [debouncedKeyword, mode, offset, pageSize]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -900,7 +919,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
     saveCsvFile(`导出${filled ? "图号" : "缺图号"}清单`, exportFileName(filled ? "物料图号" : "缺图号物料"), (path) =>
       exportItems(
         {
-          keyword: keyword.trim() || undefined,
+          keyword: debouncedKeyword || undefined,
           onlyActive: true,
           withDrawing: filled,
         },
@@ -1154,6 +1173,9 @@ function DrawingDialog({
 
 function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: boolean }) {
   const [keyword, setKeyword] = useState("");
+  // 供应商是一次取全表再本地分页，但关键字仍要防抖：
+  // 每敲一个字都重取整张表，供应商多时一样卡
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [rows, setRows] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Supplier | "new" | null>(null);
@@ -1169,19 +1191,26 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   );
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
+  useEffect(() => {
     setPage(1);
-  }, [keyword, pageSize]);
+  }, [debouncedKeyword, pageSize]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setRows(await listSuppliers(keyword.trim() || undefined));
+      setRows(await listSuppliers(debouncedKeyword || undefined));
     } catch (err) {
       toast("供应商读取失败", { description: String(err), status: "error" });
     } finally {
       setLoading(false);
     }
-  }, [keyword]);
+  }, [debouncedKeyword]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -1206,7 +1235,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   // 导出当前关键字命中的全部供应商（列表是前端分页，文件里给全量）
   const doExport = () =>
     saveCsvFile("导出供应商", exportFileName("供应商"), (path) =>
-      exportSuppliers(keyword.trim() || undefined, path),
+      exportSuppliers(debouncedKeyword || undefined, path),
     );
 
   return (

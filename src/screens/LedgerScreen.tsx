@@ -18,6 +18,7 @@ import {
   fetchFacets,
   fetchPage,
   isTauri,
+  onFacetsInvalidated,
 } from "../lib/api";
 import type { BootstrapInfo, Facets, Kind, LedgerFilter, LedgerPage, LedgerRow } from "../lib/types";
 import { exportFileName, saveCsvFile } from "../lib/exportCsv";
@@ -115,6 +116,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   // 按单据合并：同一张单据的明细折成一行显示；关闭就是逐行明细
   const [mergeByDoc, setMergeByDoc] = useState(() => storedMergeByDoc());
   const requestId = useRef(0);
+  const detailRequestId = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevQueryRef = useRef<{
     filterKey: string;
@@ -137,11 +139,19 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
     return () => window.clearTimeout(timer);
   }, [keyword]);
 
-  useEffect(() => {
-    fetchFacets()
+  const loadFacets = useCallback(() => {
+    fetchFacets(true)
       .then(setFacets)
       .catch((err: unknown) => toast("筛选项读取失败", { description: String(err), status: "error" }));
   }, []);
+
+  useEffect(() => {
+    loadFacets();
+  }, [loadFacets]);
+
+  // 导入 / 开单 / 批量改 / 删导入都会改台账内容，缓存被清掉时这里跟着重取，
+  // 否则筛选下拉的供应商、日期范围会一直是进页面那一刻的旧值
+  useEffect(() => onFacetsInvalidated(loadFacets), [loadFacets]);
 
   const load = useCallback(async (forceRefreshTotals = false) => {
     const current = ++requestId.current;
@@ -201,13 +211,18 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
 
 
   /**
-   * 按单据合并时，把同一单的相邻明细折成一行；关闭时就是原样的逐行明细。
-   * 合并必须对整页 rows 做（窗口切片会切断相邻行），切片放在合并之后。
+   * 按单据合并：对整页 rows 做（窗口切片会切断同单明细），切片放在合并之后。
+   *
+   * 这里只依赖 `rows` / `mergeByDoc`：之前把 `virtual.start/end` 也放进依赖，
+   * 滚动时每帧都要对最多 500 行重跑一次合并并造一批新对象，滚动由 O(1)
+   * 变成 O(n)。逐行模式的切片下面单独做，不碰合并结果。
    */
-  const displayRows = useMemo(() => {
-    const merged = mergeRowsByDoc(rows, mergeByDoc);
-    return rows.length > 60 && !mergeByDoc ? merged.slice(virtual.start, virtual.end) : merged;
-  }, [rows, mergeByDoc, virtual.start, virtual.end]);
+  const mergedRows = useMemo(() => mergeRowsByDoc(rows, mergeByDoc), [rows, mergeByDoc]);
+  const windowed = rows.length > 60 && !mergeByDoc;
+  const displayRows = useMemo(
+    () => (windowed ? mergedRows.slice(virtual.start, virtual.end) : mergedRows),
+    [mergedRows, windowed, virtual.start, virtual.end],
+  );
 
   useEffect(() => onMergeByDocChange(setMergeByDoc), []);
 
@@ -250,14 +265,24 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   };
 
   const openDetail = async (row: LedgerRow) => {
+    // 详情请求带令牌：连点 A、B 两行时如果 A 的响应比 B 慢，
+    // 无条件 setDetail 会把标题（B）和内容（A）拼成错行，对账时极易照错行改数。
+    const current = ++detailRequestId.current;
     setDetailId(row.id);
     setDetail(row);
     try {
       const fresh = await fetchDetail(row.id);
-      if (fresh) setDetail(fresh);
+      if (current === detailRequestId.current && fresh) setDetail(fresh);
     } catch {
       // 详情读失败就先用列表里的那份
     }
+  };
+
+  const closeDetail = () => {
+    // 关抽屉时也自增一次：之后到达的慢响应不能再把抽屉写回内容
+    detailRequestId.current += 1;
+    setDetailId(null);
+    setDetail(null);
   };
 
   const doExport = async () => {
@@ -314,7 +339,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
       await deleteRow(pendingDelete.id);
       toast("已删除一行", { description: `${pendingDelete.itemName ?? pendingDelete.itemCode ?? ""} · 源表第 ${pendingDelete.rowNo} 行` });
       setPendingDelete(null);
-      setDetailId(null);
+      closeDetail();
       await load(true);
       onChanged();
     } catch (err) {
@@ -479,9 +504,10 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                   <input
                     type="checkbox"
                     aria-label="全选本页"
-                    checked={rows.length > 0 && selectedIds.size === rows.length}
+                    checked={rows.length > 0 && rows.every((r) => selectedIds.has(r.id))}
                     ref={(el) => {
-                      if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < rows.length;
+                      const picked = rows.filter((r) => selectedIds.has(r.id)).length;
+                      if (el) el.indeterminate = picked > 0 && picked < rows.length;
                     }}
                     onChange={(e) => {
                       setSelectedIds(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set());
@@ -546,16 +572,18 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                       <input
                         type="checkbox"
                         aria-label={`选择第 ${row.rowNo} 行`}
-                        // 合并行代表多条明细，按整单批量改/删的语义还没定，先禁用
-                        disabled={mergeByDoc && row.groupCount > 1}
-                        title={mergeByDoc && row.groupCount > 1 ? "合并行不支持勾选，关掉合并后逐行操作" : undefined}
-                        checked={selectedIds.has(row.id)}
+                        // 合并行代表整张单据：勾选它就勾上组内全部明细，
+                        // 这样在合并视图下也能整单批量改归属/删除。
+                        title={mergeByDoc && row.groupCount > 1 ? `勾选整张单据（${row.groupCount} 行明细）` : undefined}
+                        checked={row.memberIds.every((id) => selectedIds.has(id))}
                         onChange={(e) => {
                           const checked = e.target.checked;
                           setSelectedIds((prev) => {
                             const next = new Set(prev);
-                            if (checked) next.add(row.id);
-                            else next.delete(row.id);
+                            for (const id of row.memberIds) {
+                              if (checked) next.add(id);
+                              else next.delete(id);
+                            }
                             return next;
                           });
                         }}
@@ -680,16 +708,15 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
         <RowDetail
           row={detail}
           canEdit={isTauri}
-          onClose={() => {
-            setDetailId(null);
-            setDetail(null);
-          }}
+          onClose={closeDetail}
           onSaved={async () => {
             await load(true);
             onChanged();
             if (detail) {
+              // 保存后重读也用同一个令牌：连点多行时只认最后一次
+              const current = ++detailRequestId.current;
               const fresh = await fetchDetail(detail.id);
-              setDetail(fresh);
+              if (current === detailRequestId.current) setDetail(fresh);
             }
           }}
           onDelete={(row) => setPendingDelete(row)}
