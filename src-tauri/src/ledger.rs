@@ -337,16 +337,35 @@ pub struct LedgerPatch {
     pub owner: Option<String>,
 }
 
+/// 按 `ledger` 现状重算单据头。
+///
+/// 明细是唯一事实来源：改/删台账行之后，单据头的行数、金额、日期、单号与
+/// 往来方都必须跟着变，否则「台账页」和「单据页 / A4 打印」会显示两套数据。
+/// 所有调用点都在事务里，要么一起生效要么一起回滚。
 fn reconcile_vouchers(conn: &Connection) -> DbResult<()> {
     conn.execute(
         "DELETE FROM vouchers WHERE id NOT IN (SELECT DISTINCT voucher_id FROM ledger WHERE voucher_id IS NOT NULL)",
         [],
     )
     .map_err(DbError::from)?;
+    // `MAX(NULLIF(TRIM(x),''))` 的语义：取非空值里字典序最大的一个；全空时得到
+    // NULL，正好把用户清空后的字段也一起清掉（明细才是事实来源）。
     conn.execute(
         "UPDATE vouchers SET
             row_count = (SELECT COUNT(*) FROM ledger l WHERE l.voucher_id = vouchers.id),
-            amount_cents = COALESCE((SELECT SUM(l.amount_cents) FROM ledger l WHERE l.voucher_id = vouchers.id), 0)",
+            amount_cents = COALESCE((SELECT SUM(l.amount_cents) FROM ledger l WHERE l.voucher_id = vouchers.id), 0),
+            doc_date = COALESCE(
+                (SELECT MAX(NULLIF(TRIM(l.doc_date), '')) FROM ledger l WHERE l.voucher_id = vouchers.id),
+                doc_date),
+            doc_no = COALESCE(
+                (SELECT l.doc_no FROM ledger l
+                  WHERE l.voucher_id = vouchers.id AND TRIM(COALESCE(l.doc_no, '')) <> ''
+                  ORDER BY l.row_no, l.id LIMIT 1),
+                doc_no),
+            partner = (SELECT MAX(NULLIF(TRIM(l.partner), '')) FROM ledger l WHERE l.voucher_id = vouchers.id),
+            buyer   = (SELECT MAX(NULLIF(TRIM(l.buyer), ''))   FROM ledger l WHERE l.voucher_id = vouchers.id),
+            owner   = (SELECT MAX(NULLIF(TRIM(l.owner), ''))   FROM ledger l WHERE l.voucher_id = vouchers.id),
+            updated_at = datetime('now', 'localtime')",
         [],
     )
     .map_err(DbError::from)?;
@@ -355,6 +374,28 @@ fn reconcile_vouchers(conn: &Connection) -> DbResult<()> {
 
 pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    // 改单号会同步到单据头（reconcile_vouchers），先按新单号查一次冲突，
+    // 免得用户看到的是一句「UNIQUE constraint failed」。
+    if let Some(raw) = patch.doc_no.as_deref() {
+        let doc_no = raw.trim();
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM ledger WHERE id = ?1", [id], |r| r.get(0))
+            .ok();
+        if let (Some(kind), false) = (kind, doc_no.is_empty()) {
+            let clash: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM vouchers v
+                      WHERE v.kind = ?1 AND v.doc_no = ?2
+                        AND v.id <> COALESCE((SELECT voucher_id FROM ledger WHERE id = ?3), -1)",
+                    rusqlite::params![kind, doc_no, id],
+                    |r| r.get(0),
+                )
+                .map_err(DbError::from)?;
+            if clash > 0 {
+                return Err(format!("单据编号 {doc_no} 已经被另一张单据占用"));
+            }
+        }
+    }
     tx.execute(
         "UPDATE ledger SET
             doc_date = COALESCE(?1, doc_date),
@@ -388,10 +429,14 @@ pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
     Ok(())
 }
 
+/// 删一行。明细删除与单据头重算必须同事务：否则行没了、单据头还是旧值，
+/// 单据页会长期显示一个不存在的行数/金额，且只有再删一次才会被顺带修正。
 pub fn delete(conn: &Connection, id: i64) -> DbResult<()> {
-    conn.execute("DELETE FROM ledger WHERE id = ?1", [id])
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    tx.execute("DELETE FROM ledger WHERE id = ?1", [id])
         .map_err(DbError::from)?;
-    reconcile_vouchers(conn)?;
+    reconcile_vouchers(&tx)?;
+    tx.commit().map_err(DbError::from)?;
     Ok(())
 }
 
@@ -437,6 +482,8 @@ pub fn bulk_update(conn: &Connection, ids: &[i64], patch: &BulkPatch) -> DbResul
                 .map_err(DbError::from)?;
         }
     }
+    // 改的可能是属于单据的明细，单据头的往来方跟着一起改
+    reconcile_vouchers(&tx)?;
     tx.commit().map_err(DbError::from)?;
     Ok(changed)
 }
@@ -807,6 +854,150 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// 造一张带明细的单据头，返回 (voucher_id, ledger ids)。
+    fn seeded_voucher(db: &Db) -> (i64, Vec<i64>) {
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO vouchers (id, kind, doc_no, doc_date, partner, buyer, row_count, amount_cents)
+                 VALUES (1, 'in', 'D2025001', '2025-04-01', '供应商甲', '采购乙', 2, 0)",
+                [],
+            )
+            .map_err(DbError::from)?;
+            for (code, name, qty, price, amount) in [
+                ("V-A", "螺丝", 2.0, 10_000, 200),
+                ("V-B", "垫片", 3.0, 5_000, 150),
+            ] {
+                c.execute(
+                    "INSERT INTO ledger (voucher_id, sheet, row_no, kind, doc_date, doc_no, item_code, item_name,
+                        unit, qty, price_micros, amount_cents, partner, buyer, owner, flags)
+                     VALUES (1, 'voucher:in', (SELECT COUNT(*)+1 FROM ledger WHERE voucher_id = 1), 'in',
+                        '2025-04-01', 'D2025001', ?1, ?2, '个', ?3, ?4, ?5, '供应商甲', '采购乙', '', '')",
+                    rusqlite::params![code, name, qty, price, amount],
+                )
+                .map_err(DbError::from)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let ids: Vec<i64> = db
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT id FROM ledger WHERE voucher_id = 1 ORDER BY id")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |r| r.get(0))
+                    .and_then(|it| it.collect::<Result<Vec<i64>, _>>())
+                    .map_err(DbError::from)?;
+                Ok(rows)
+            })
+            .unwrap();
+        (1, ids)
+    }
+
+    fn head(db: &Db) -> (i64, i64, String, String, Option<String>) {
+        db.with(|c| {
+            c.query_row(
+                "SELECT row_count, amount_cents, doc_no, doc_date, partner FROM vouchers WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(DbError::from)
+        })
+        .unwrap()
+    }
+
+    /// 改明细后单据头必须跟着变：行数、金额、单号、日期、往来方都不能留在旧值。
+    #[test]
+    fn editing_a_line_resyncs_voucher_head() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, ids) = seeded_voucher(&db);
+        let patch = LedgerPatch {
+            doc_date: Some("2025-04-09".into()),
+            doc_no: Some("D2025009".into()),
+            amount_cents: Some(999),
+            qty: None,
+            item_code: None,
+            item_name: None,
+            unit: None,
+            price_micros: None,
+            remark: None,
+            owner: Some("车间".into()),
+        };
+        db.with(|c| update(c, ids[0], &patch).map_err(DbError::from)).unwrap();
+
+        let (rows, amount, doc_no, doc_date, _) = head(&db);
+        assert_eq!(rows, 2);
+        // 第一行改成 999，第二行仍是 150
+        assert_eq!(amount, 1149, "金额必须按明细重算");
+        // 单号取第一条非空明细的单号
+        assert_eq!(doc_no, "D2025009");
+        assert_eq!(doc_date, "2025-04-09", "日期取明细里最大的非空值");
+    }
+
+    /// 删掉某张单的最后一行，单据头要被清掉，不能留下 0 行 0 元的空单。
+    #[test]
+    fn deleting_last_line_removes_voucher_head() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, ids) = seeded_voucher(&db);
+        db.with(|c| delete(c, ids[0]).map_err(DbError::from)).unwrap();
+        let (rows, amount, ..) = head(&db);
+        assert_eq!(rows, 1);
+        assert_eq!(amount, 150);
+
+        db.with(|c| delete(c, ids[1]).map_err(DbError::from)).unwrap();
+        let left: i64 = db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0)).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(left, 0, "没有明细的单据头不该留着");
+    }
+
+    /// 批量改归属后，单据头的往来方同步更新。
+    #[test]
+    fn bulk_update_resyncs_voucher_head() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, ids) = seeded_voucher(&db);
+        let patch = BulkPatch {
+            owner: Some("仓库".into()),
+            buyer: Some("采购丙".into()),
+            remark: None,
+        };
+        db.with(|c| bulk_update(c, &ids, &patch).map_err(DbError::from)).unwrap();
+        let buyer: Option<String> = db
+            .with(|c| c.query_row("SELECT buyer FROM vouchers WHERE id = 1", [], |r| r.get(0)).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(buyer.as_deref(), Some("采购丙"));
+    }
+
+    /// 改单号撞上另一张单的单号时，给业务错误而不是 UNIQUE constraint failed。
+    #[test]
+    fn renaming_doc_no_reports_clash() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, ids) = seeded_voucher(&db);
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO vouchers (id, kind, doc_no, doc_date, row_count, amount_cents)
+                 VALUES (2, 'in', 'D2025002', '2025-04-02', 0, 0)",
+                [],
+            )
+            .map_err(DbError::from)
+        })
+        .unwrap();
+        let patch = LedgerPatch {
+            doc_no: Some("D2025002".into()),
+            doc_date: None,
+            item_code: None,
+            item_name: None,
+            unit: None,
+            qty: None,
+            price_micros: None,
+            amount_cents: None,
+            remark: None,
+            owner: None,
+        };
+        let err = db.with(|c| update(c, ids[0], &patch).map_err(DbError::from)).unwrap_err();
+        assert!(err.contains("已经被另一张单据占用"), "实际 {err}");
     }
 
     #[test]
