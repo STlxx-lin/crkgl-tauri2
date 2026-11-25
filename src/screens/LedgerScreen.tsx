@@ -24,6 +24,7 @@ import type { BootstrapInfo, Facets, Kind, LedgerFilter, LedgerPage, LedgerRow }
 import { exportFileName, saveCsvFile } from "../lib/exportCsv";
 import { amount, count, date, flagLabel, kindLabel, money, priceText, qty } from "../lib/format";
 import { useVirtualRows } from "../lib/useVirtualRows";
+import { useStoredPageSize } from "../lib/pageSize";
 import { mergeRowsByDoc, onMergeByDocChange, saveMergeByDoc, storedMergeByDoc } from "../lib/mergeDocs";
 import { Button } from "@/components/base/buttons/button";
 import { Pagination } from "@/components/base/pagination/pagination";
@@ -42,16 +43,6 @@ import { RowDetail } from "../components/RowDetail";
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "ledger.pageSize";
 
-function storedPageSize(): number {
-  try {
-    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
-    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
-  } catch {
-    // 存不下就用默认
-  }
-  return 100;
-}
-// 行高随字号走：表格行是 h-9（2.25rem），字号调大后行也变高，
 // 虚拟滚动要按真实像素算，否则切片位置会偏。
 const ROW_HEIGHT_REM = 2.25;
 function rowHeightPx(): number {
@@ -103,7 +94,7 @@ export function LedgerScreen({ boot, onChanged }: LedgerScreenProps) {
   const [range, setRange] = useState("all");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<LedgerPage | null>(null);
-  const [pageSize, setPageSize] = useState(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const [facets, setFacets] = useState<Facets | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -669,13 +660,7 @@ const runBulkUpdate = async (patch: { owner?: string; buyer?: string; remark?: s
                 aria-label="每页行数"
                 value={pageSize}
                 onChange={(e) => {
-                  const next = Number(e.target.value);
-                  setPageSize(next);
-                  try {
-                    window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
-                  } catch {
-                    // 存不下不影响本页
-                  }
+                  setPageSize(Number(e.target.value));
                   setPage(1);
                   scrollRef.current?.scrollTo({ top: 0 });
                 }}

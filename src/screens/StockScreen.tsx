@@ -10,6 +10,7 @@ import { countStock, fetchStockCheck, fetchStockReport, isTauri, updateRow } fro
 import type { StockCheckSummary, StockIssue, StockRow } from "../lib/types";
 import { count, date, qty } from "../lib/format";
 import { exportFileName } from "../lib/exportCsv";
+import { useStoredPageSize } from "../lib/pageSize";
 import { Button } from "@/components/base/buttons/button";
 import { ItemPicker } from "../components/ItemPicker";
 import { SearchField } from "@/components/base/search-field/search-field";
@@ -22,16 +23,6 @@ import { PageHeader } from "../components/AppShell";
 
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "stock.pageSize";
-
-function storedPageSize(): number {
-  try {
-    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
-    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
-  } catch {
-    // 忽略
-  }
-  return 100;
-}
 
 type Tab = "stock" | "issues";
 
@@ -98,7 +89,7 @@ function StockTable() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -338,13 +329,7 @@ function StockTable() {
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
-                try {
-                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
-                } catch {
-                  // 忽略
-                }
+                setPageSize(Number(e.target.value));
                 setOffset(0);
                 tableRef.current?.scrollTo({ top: 0 });
               }}

@@ -48,29 +48,11 @@ import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
 import { DictPanel } from "../components/DictPanel";
 import { ItemCatalog } from "../components/ItemCatalog";
+import { useStoredPageSize } from "../lib/pageSize";
 import { PageHeader } from "../components/AppShell";
 
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "master.pageSize";
-
-function storedPageSize(): number {
-  try {
-    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
-    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
-  } catch {
-    // 存不下就用默认
-  }
-  return 100;
-}
-
-/** 记住本机的每页条数；存不下也不影响本次使用。 */
-function savePageSize(size: number): void {
-  try {
-    window.localStorage.setItem(PAGE_SIZE_KEY, String(size));
-  } catch {
-    // 隐私模式或存储被禁：下次退回默认
-  }
-}
 
 /** 基础资料：物料主数据 + 供应商 + 字典（单位/类别/类型/出库部门/采购人）。 */
 export function MasterScreen({ onChanged }: { onChanged: () => void }) {
@@ -245,7 +227,7 @@ function ItemsPanel({
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   // 列表排序：跟输入关键字一样，改了要回到第一页
   const [sortOrder, setSortOrder] = useState<ItemSort>(() => storedItemSort());
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   // 分页信息：总页数至少为 1，避免 0 条时显示「第 1 / 0 页」
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
@@ -537,13 +519,7 @@ function ItemsPanel({
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
-                try {
-                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
-                } catch {
-                  // 忽略
-                }
+                setPageSize(Number(e.target.value));
                 setOffset(0);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
@@ -867,7 +843,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
   const seq = useRef(0);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -1055,10 +1031,8 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
+                setPageSize(Number(e.target.value));
                 setOffset(0);
-                savePageSize(next);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
               className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
@@ -1181,7 +1155,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   const [editing, setEditing] = useState<Supplier | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Supplier | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const tableRef = useRef<HTMLDivElement>(null);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -1339,10 +1313,8 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
+                setPageSize(Number(e.target.value));
                 setPage(1);
-                savePageSize(next);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
               className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
