@@ -37,13 +37,13 @@ crkgl-tauri2/
 │  ├─ src/dict.rs           字典（单位/类别/类型/出库部门/采购人）增删改与同步
 │  ├─ src/web.rs            80 端口只读站（axum）
 │  ├─ src/commands.rs       Tauri 命令（唯一能写数据的入口）
-│  └─ migrations/001_init.sql
-└─ scripts/                 rust90.cmd（MSVC + Rust 1.90 包装）、ui-*.mjs（Playwright 验收截图冒烟）、verify-*.mjs（DB 复核）
+│  └─ migrations/           SQLite 增量迁移（001 ~ 013）
+└─ scripts/                 rust90.cmd / bundle.cmd（MSVC + Rust 1.90 包装）、verify-*.mjs（DB 复核）
 ```
 
 ## 运行
 
-前置：Node ≥ 20、Rust 1.90 + MSVC、`E:\VisualStudio\VC\Auxiliary\Build\vcvars64.bat`。
+前置：Node ≥ 20、Rust 1.90 + MSVC（Windows 需安装 Visual Studio C++ 生成工具，或设置 `VCVARS` 指向 `vcvars64.bat`）。
 
 ```bash
 npm install
@@ -70,7 +70,7 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 侧栏底部有「浅色 / 深色」切换，两套都用 BoardUI 的语义 token，切的是 `<html>` 上的 `.dark`：
 
 - 选择存在 `localStorage` 的 `ledger.theme`，重开程序保持
-- `index.html` 里有首帧内联脚本，先读存储再上色，不会先闪一下深色
+- `public/init.js` 首帧外链脚本先读存储再上色与定字号（兼容 `script-src 'self'` CSP），不会先闪一下深色
 - 桌面端会同步 Tauri 窗口主题，标题栏跟着变
 - 只读站是同一套前端，局域网同事也能各自切自己的
 - 默认深色；从未选过时不读系统主题
@@ -250,19 +250,14 @@ Tauri IPC 暴露，浏览器里调用不到。
 ## 开发命令
 
 ```bash
-npm run typecheck          # tsc --noEmit
-npm run build              # 桌面端产物 dist/
-npm run build:remote       # 只读站产物 dist-remote/
-scripts\rust90.cmd test --lib    # Rust 单测（30 个）
-node scripts/ui-probe.mjs shots  # 用只能读站截图冒烟（需 CHROME_PATH）
+npm run typecheck                  # tsc --noEmit
+npm run build                      # 桌面端产物 dist/
+npm run build:remote               # 只读站产物 dist-remote/
+scripts\rust90.cmd test --lib      # Rust 单测（自动切入 src-tauri）
+scripts\bundle.cmd                 # 打包 NSIS 安装包
 ```
 
-`scripts/` 里的 Playwright 验收脚本（全部走 `CHROME_PATH` + `BASE`）只在验收时用，不参与生产构建：
-
-- `ui-*.mjs`：给 Tauri 前端 stub `__TAURI_INTERNALS__` 后驱动 UI 跑截图冒烟，一个脚本验一个点（开单、入库带单价、出库不带、打印、单据查询、字体缩放、图号页、只读边界……）
-- `verify-*.mjs`：验 DB 复核脚本（`verify-db-state.mjs` / `verify-voucher-db.mjs`），比照落库结果
-- 各脚本都是独立可跑的：`node scripts/ui-save-print.mjs` 验「保存成功才打印、失败不打印」
-- 截图落在 `shots/`（已 gitignore），用来人工对排版
+`scripts/verify-*.mjs`（`verify-db-state.mjs` / `verify-voucher-db.mjs`）用于针对本地 SQLite 数据做落库复核，不参与生产构建。
 
 ## 已知取舍
 
