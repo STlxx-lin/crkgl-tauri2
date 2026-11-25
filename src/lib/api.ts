@@ -63,7 +63,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[invoke ${cmd}] ${message}`);
-    throw new Error(message);
+    // 带上 cause：界面上只显示 message，但控制台能展开看到 Tauri 原始错误
+    throw new Error(message, { cause: err });
   }
 }
 

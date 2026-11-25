@@ -1,0 +1,88 @@
+name: CI
+
+# 每个 PR 与推送到主分支都跑一遍，把「本地记得跑」变成「不跑合不进去」。
+# 只校验，不发布：打包与安装包生成仍然在本地用 scripts\bundle.cmd 做。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推送时取消上一轮，省 runner 时间
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: 前端（typecheck / lint / test / build）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: 格式检查
+        run: npm run format:check
+
+      - name: 单元测试
+        run: npm test
+
+      # tauri.conf.json 把 dist-remote 当资源打包，cargo 构建前必须先有它
+      - name: 只读站产物
+        run: npm run build:remote
+
+      - name: 桌面端产物
+        run: npm run build
+
+  backend:
+    name: 后端（fmt / clippy / test）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # tauri-build 会读 bundle.resources，缺 dist-remote 会直接构建失败
+      - name: 只读站产物
+        run: npm run build:remote
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # 与 src-tauri/rust-toolchain.toml 保持一致
+          toolchain: 1.90.0
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: rustfmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy --lib --tests -- -D warnings
+
+      - name: 单测
+        working-directory: src-tauri
+        run: cargo test --lib
