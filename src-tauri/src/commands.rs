@@ -369,6 +369,9 @@ pub fn import_run(state: State<'_, Arc<AppState>>, args: RunArgs) -> Result<impo
             }
         }
     }
+    // 导入完就不再需要缓存的整本工作簿（含所有 sheet 的解压 Range），
+    // 主动释放，避免托盘常驻时内存只增不减。
+    import::release_workbook_cache();
     if let Ok(mut slot) = state.last_import.lock() {
         *slot = Some(outcome.clone());
     }

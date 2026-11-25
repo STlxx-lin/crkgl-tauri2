@@ -332,15 +332,40 @@ pub(crate) fn cell_is_empty(cell: &Data) -> bool {
     }
 }
 
+/// 解析结果缓存的时间上限。
+///
+/// 100MB+ 的工作簿，缓存里存的是所有 sheet 的 `Range`（解压后的单元格），
+/// 常驻不释放等于把整本账本摊在内存里。托盘常驻的桌面程序在低配办公机上
+/// 会开始换页，所以给它一个明确的过期时间，导入完成后也主动清掉。
+const CACHE_TTL_SECS: u64 = 600;
+
 #[derive(Clone)]
 struct CachedWorkbook {
     path: std::path::PathBuf,
     size_bytes: u64,
     modified: Option<std::time::SystemTime>,
+    /// 写缓存的时间，用于 TTL 判定
+    cached_at: std::time::Instant,
     report: WorkbookReport,
     pivot_sheets: Vec<crate::pivot::PivotSheet>,
     master_sheets: Vec<(String, calamine::Range<Data>)>,
     flow_parsed: Vec<(SheetPlan, ParsedSheet)>,
+}
+
+/// 缓存是否还新鲜。文件被改过（大小/mtime 变化）或超过 TTL 都算过期。
+fn cache_fresh(cached: &CachedWorkbook, path: &Path, size_bytes: u64, modified: Option<std::time::SystemTime>) -> bool {
+    cached.path == path
+        && cached.size_bytes == size_bytes
+        && cached.modified == modified
+        && cached.cached_at.elapsed().as_secs() < CACHE_TTL_SECS
+}
+
+/// 主动清缓存。导入/主数据写入完成后调用：那之后不再需要缓存的整本工作簿。
+pub fn release_workbook_cache() {
+    let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cache_lock.lock() {
+        *guard = None;
+    }
 }
 
 static WORKBOOK_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedWorkbook>>> =
@@ -542,7 +567,7 @@ pub(crate) fn inspect_and_collect_cached(
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+            if cache_fresh(cached, path, size_bytes, modified) {
                 return Ok((cached.report.clone(), cached.pivot_sheets.clone()));
             }
         }
@@ -557,10 +582,20 @@ pub(crate) fn inspect_and_collect_cached(
 
     if names.len() >= 4 && size_bytes > 512 * 1024 {
         drop(book);
+        // 每个 worker 都要 open 一次整本工作簿（calamine 解压后整册进内存），
+        // 峰值内存约等于 worker 数 × 文件解压后大小。按 256MB 预算折算上限，
+        // 否则 8 个 worker 解析 100MB 账本会直接吃掉 800MB+。
+        let budget = 256usize * 1024 * 1024;
+        let by_memory = if size_bytes as usize == 0 {
+            8
+        } else {
+            (budget / size_bytes as usize).max(1)
+        };
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
             .min(names.len())
+            .min(by_memory)
             .clamp(1, 8);
         let indexed: Vec<(usize, String)> = names.into_iter().enumerate().collect();
         let chunk_size = indexed.len().div_ceil(workers);
@@ -638,6 +673,7 @@ pub(crate) fn inspect_and_collect_cached(
             path: path.to_path_buf(),
             size_bytes,
             modified,
+            cached_at: std::time::Instant::now(),
             report: report.clone(),
             pivot_sheets: pivot_parsed.clone(),
             master_sheets,
@@ -657,7 +693,7 @@ pub(crate) fn get_cached_master_sheets(
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+            if cache_fresh(cached, path, size_bytes, modified) {
                 if !cached.master_sheets.is_empty() {
                     return Some(cached.master_sheets.clone());
                 }
@@ -691,7 +727,7 @@ pub(crate) fn get_cached_flow_parsed(
     let cache_lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache_lock.lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path && cached.size_bytes == size_bytes && cached.modified == modified {
+            if cache_fresh(cached, path, size_bytes, modified) {
                 if cached.flow_parsed.len() == plans.len() && !plans.is_empty() {
                     let all_match = plans.iter().all(|p| {
                         cached
@@ -1705,6 +1741,45 @@ pub fn delete_import(db: &Db, id: i64) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缓存必须能主动释放：导入完成后不再需要整本工作簿的 Range。
+    #[test]
+    fn workbook_cache_can_be_released() {
+        let lock = WORKBOOK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None;
+        }
+        release_workbook_cache();
+        let empty = lock.lock().map(|g| g.is_none()).unwrap_or(false);
+        assert!(empty, "释放后缓存应为空");
+    }
+
+    /// 超过 TTL 的缓存必须被判成过期，不能一直拿旧解析结果。
+    #[test]
+    fn stale_cache_is_not_fresh() {
+        let path = std::path::PathBuf::from("C:/x/y.xlsx");
+        let mut cached = CachedWorkbook {
+            path: path.clone(),
+            size_bytes: 10,
+            modified: None,
+            cached_at: std::time::Instant::now(),
+            report: WorkbookReport {
+                path: String::new(),
+                file_name: String::new(),
+                size_bytes: 0,
+                sheets: Vec::new(),
+            },
+            pivot_sheets: Vec::new(),
+            master_sheets: Vec::new(),
+            flow_parsed: Vec::new(),
+        };
+        assert!(cache_fresh(&cached, &path, 10, None));
+        // 文件变大说明被改过
+        assert!(!cache_fresh(&cached, &path, 11, None));
+        // 时间拨到 TTL 之外
+        cached.cached_at -= std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
+        assert!(!cache_fresh(&cached, &path, 10, None));
+    }
 
     fn guesses(headers: &[&str]) -> Vec<HeaderGuess> {
         headers
