@@ -244,7 +244,6 @@ fn split_flags(raw: &str) -> Vec<String> {
         .collect()
 }
 
-
 pub(crate) const SELECT_COLUMNS_PUB: &str = "id, kind, doc_date, doc_no, delivery_no, item_code, item_name, spec, unit,
     qty, price_micros, amount_cents, remark, partner, buyer, owner, receiver, flags, sheet, row_no, import_id, created_at";
 
@@ -529,9 +528,7 @@ pub fn bulk_delete(conn: &Connection, ids: &[i64]) -> DbResult<usize> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let mut removed = 0usize;
     {
-        let mut stmt = tx
-            .prepare("DELETE FROM ledger WHERE id = ?1")
-            .map_err(DbError::from)?;
+        let mut stmt = tx.prepare("DELETE FROM ledger WHERE id = ?1").map_err(DbError::from)?;
         for id in ids {
             removed += stmt.execute([id]).map_err(DbError::from)?;
         }
@@ -562,7 +559,6 @@ pub fn detail_from(db: &Db, id: i64) -> DbResult<Option<LedgerRow>> {
 pub fn export_csv_from(db: &Db, filter: &LedgerFilter, limit: i64) -> DbResult<(String, i64)> {
     db.with(|c| export_csv(c, filter, limit).map_err(DbError::from))
 }
-
 
 pub fn facets(conn: &Connection) -> DbResult<Facets> {
     let distinct = |column: &str| -> DbResult<Vec<String>> {
@@ -625,7 +621,7 @@ pub fn export_csv(conn: &Connection, filter: &LedgerFilter, limit: i64) -> DbRes
             row.item_name.clone().unwrap_or_default(),
             row.spec.clone().unwrap_or_default(),
             row.unit.clone().unwrap_or_default(),
-            row.qty.map(|v| trim_float(v)).unwrap_or_default(),
+            row.qty.map(trim_float).unwrap_or_default(),
             row.price_micros.map(micros_text).unwrap_or_default(),
             row.amount_cents.map(cents_text).unwrap_or_default(),
             row.partner.clone().unwrap_or_default(),
@@ -685,10 +681,7 @@ pub fn trim_float(v: f64) -> String {
 /// （`=cmd|'/c calc'!A1` 这类）。做法是前置一个单引号把它钉成文本。
 /// 纯数字不处理，否则负数金额会多出一个引号。
 pub(crate) fn csv_row(fields: &[String]) -> String {
-    let escaped: Vec<String> = fields
-        .iter()
-        .map(|f| csv_cell(f))
-        .collect();
+    let escaped: Vec<String> = fields.iter().map(|f| csv_cell(f)).collect();
     escaped.join(",") + "\n"
 }
 
@@ -786,7 +779,9 @@ mod tests {
     #[test]
     fn totals_split_by_kind() {
         let db = seeded();
-        let t = db.with(|c| totals(c, &LedgerFilter::default()).map_err(DbError::from)).unwrap();
+        let t = db
+            .with(|c| totals(c, &LedgerFilter::default()).map_err(DbError::from))
+            .unwrap();
         assert_eq!(t.rows, 4);
         assert_eq!(t.in_rows, 2);
         assert_eq!(t.out_rows, 2);
@@ -843,8 +838,10 @@ mod tests {
         let db = seeded();
         let id = db
             .with(|c| {
-                c.query_row("SELECT id FROM ledger WHERE item_code='WG-B'", [], |r| r.get::<_, i64>(0))
-                    .map_err(DbError::from)
+                c.query_row("SELECT id FROM ledger WHERE item_code='WG-B'", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(DbError::from)
             })
             .unwrap();
         let patch = LedgerPatch {
@@ -867,7 +864,7 @@ mod tests {
         assert!(db.with(|c| detail(c, id).map_err(DbError::from)).unwrap().is_none());
     }
 
-#[test]
+    #[test]
     fn bulk_update_only_touches_given_fields() {
         let db = seeded();
         let ids: Vec<i64> = db
@@ -884,11 +881,15 @@ mod tests {
             owner: Some("批量归属".into()),
             ..Default::default()
         };
-        let changed = db.with(|c| bulk_update(c, &ids[..2], &patch).map_err(DbError::from)).unwrap();
+        let changed = db
+            .with(|c| bulk_update(c, &ids[..2], &patch).map_err(DbError::from))
+            .unwrap();
         assert_eq!(changed, 2);
         let owners: Vec<Option<String>> = db
             .with(|c| {
-                let mut stmt = c.prepare("SELECT owner FROM ledger ORDER BY id").map_err(DbError::from)?;
+                let mut stmt = c
+                    .prepare("SELECT owner FROM ledger ORDER BY id")
+                    .map_err(DbError::from)?;
                 let rows = stmt
                     .query_map([], |r| r.get(0))
                     .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -905,7 +906,15 @@ mod tests {
     fn bulk_operations_reject_empty_and_oversized() {
         let db = seeded();
         db.with(|c| {
-            assert!(bulk_update(c, &[], &BulkPatch { owner: Some("x".into()), ..Default::default() }).is_err());
+            assert!(bulk_update(
+                c,
+                &[],
+                &BulkPatch {
+                    owner: Some("x".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
             assert!(bulk_delete(c, &[]).is_err());
             let too_many = vec![1i64; 5001];
             assert!(bulk_delete(c, &too_many).is_err());
@@ -933,10 +942,9 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            for (code, name, qty, price, amount) in [
-                ("V-A", "螺丝", 2.0, 10_000, 200),
-                ("V-B", "垫片", 3.0, 5_000, 150),
-            ] {
+            for (code, name, qty, price, amount) in
+                [("V-A", "螺丝", 2.0, 10_000, 200), ("V-B", "垫片", 3.0, 5_000, 150)]
+            {
                 c.execute(
                     "INSERT INTO ledger (voucher_id, sheet, row_no, kind, doc_date, doc_no, item_code, item_name,
                         unit, qty, price_micros, amount_cents, partner, buyer, owner, flags)
@@ -1016,7 +1024,10 @@ mod tests {
 
         db.with(|c| delete(c, ids[1]).map_err(DbError::from)).unwrap();
         let left: i64 = db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(left, 0, "没有明细的单据头不该留着");
     }
@@ -1031,9 +1042,13 @@ mod tests {
             buyer: Some("采购丙".into()),
             remark: None,
         };
-        db.with(|c| bulk_update(c, &ids, &patch).map_err(DbError::from)).unwrap();
+        db.with(|c| bulk_update(c, &ids, &patch).map_err(DbError::from))
+            .unwrap();
         let buyer: Option<String> = db
-            .with(|c| c.query_row("SELECT buyer FROM vouchers WHERE id = 1", [], |r| r.get(0)).map_err(DbError::from))
+            .with(|c| {
+                c.query_row("SELECT buyer FROM vouchers WHERE id = 1", [], |r| r.get(0))
+                    .map_err(DbError::from)
+            })
             .unwrap();
         assert_eq!(buyer.as_deref(), Some("采购丙"));
     }
@@ -1064,7 +1079,9 @@ mod tests {
             remark: None,
             owner: None,
         };
-        let err = db.with(|c| update(c, ids[0], &patch).map_err(DbError::from)).unwrap_err();
+        let err = db
+            .with(|c| update(c, ids[0], &patch).map_err(DbError::from))
+            .unwrap_err();
         assert!(err.contains("已经被另一张单据占用"), "实际 {err}");
     }
 
@@ -1076,11 +1093,13 @@ mod tests {
                 "UPDATE ledger SET remark = 'a,b' WHERE id = (SELECT id FROM ledger WHERE kind='out' LIMIT 1)",
                 [],
             )
-                .map_err(DbError::from)
-                .map(|_| ())
+            .map_err(DbError::from)
+            .map(|_| ())
         })
         .unwrap();
-        let (csv, n) = db.with(|c| export_csv(c, &LedgerFilter::default(), 1000).map_err(DbError::from)).unwrap();
+        let (csv, n) = db
+            .with(|c| export_csv(c, &LedgerFilter::default(), 1000).map_err(DbError::from))
+            .unwrap();
         assert_eq!(n, 4);
         assert!(csv.starts_with('\u{feff}'));
         assert!(csv.contains("\"a,b\""));
@@ -1107,7 +1126,7 @@ mod tests {
         assert!(row.ends_with("普通文本\n"));
     }
 
-#[test]
+    #[test]
     fn micros_text_keeps_sub_cent_precision() {
         assert_eq!(micros_text(2_020), "0.202");
         assert_eq!(micros_text(2_160), "0.216");

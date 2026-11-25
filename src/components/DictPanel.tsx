@@ -30,28 +30,10 @@ import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/compo
 import { toast } from "@/components/base/toast/toast";
 import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "./EmptyState";
+import { useStoredPageSize } from "../lib/pageSize";
 
 const PAGE_SIZES = [10, 20, 50, 100] as const;
 const DICT_PAGE_SIZE_KEY = "dict.pageSize";
-
-function storedDictPageSize(): number {
-  try {
-    const raw = localStorage.getItem(DICT_PAGE_SIZE_KEY);
-    if (!raw) return 20;
-    const n = Number(raw);
-    return PAGE_SIZES.includes(n as any) ? n : 20;
-  } catch {
-    return 20;
-  }
-}
-
-function saveDictPageSize(size: number) {
-  try {
-    localStorage.setItem(DICT_PAGE_SIZE_KEY, String(size));
-  } catch {
-    // ignore
-  }
-}
 
 /**
  * 字典：单位 / 类别 / 类型 / 出库部门 / 采购人。
@@ -69,7 +51,7 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
   const [editing, setEditing] = useState<DictEntry | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DictEntry | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(() => storedDictPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(DICT_PAGE_SIZE_KEY, PAGE_SIZES, 20);
   const tableRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
 
@@ -304,10 +286,8 @@ export function DictPanel({ onChanged }: { onChanged: () => void }) {
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
+                setPageSize(Number(e.target.value));
                 setPage(1);
-                saveDictPageSize(next);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
               className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"

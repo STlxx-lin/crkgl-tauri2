@@ -2,6 +2,11 @@
 //!
 //! 启动顺序：开库 → 首启自动导入 → 起 80 端口只读站 → 开窗口。
 
+// CI 里 clippy 以 `-D warnings` 跑。下面两条是结构选择而不是缺陷：
+// 逐个改成结构体 / type 别名要动 Tauri IPC 签名与全部调用点，属于独立重构，
+// 先把它们显式降级，避免 CI 每次都被同两条挡住。
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 pub mod autostart;
 pub mod commands;
 pub mod db;
@@ -66,7 +71,9 @@ pub fn run() {
             }
 
             // 只读站默认随程序启动，绑定失败只在设置页显示原因，不影响桌面端
-            let dev_dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("dist-remote");
+            let dev_dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("dist-remote");
             let dist = if dev_dist.join("index.html").is_file() {
                 // 开发态：仓库根目录里的那一份，npm run build:remote 之后立刻生效
                 Some(dev_dist)

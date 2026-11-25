@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::Json;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
+use axum::Json;
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
@@ -64,19 +64,16 @@ pub struct WebHandle {
 
 impl WebHandle {
     pub fn snapshot(&self) -> WebStatus {
-        self.status
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_else(|_| WebStatus {
-                enabled: false,
-                listening: false,
-                port: 0,
-                requested_port: 0,
-                error: Some("状态不可用".into()),
-                urls: Vec::new(),
-                static_ready: false,
-                started_at: None,
-            })
+        self.status.lock().map(|s| s.clone()).unwrap_or_else(|_| WebStatus {
+            enabled: false,
+            listening: false,
+            port: 0,
+            requested_port: 0,
+            error: Some("状态不可用".into()),
+            urls: Vec::new(),
+            static_ready: false,
+            started_at: None,
+        })
     }
 
     /// 等待首次端口绑定流程完成（成功或全部候选端口失败），返回最新状态快照。
@@ -183,9 +180,7 @@ fn normalize_host(raw: &str) -> Option<String> {
 
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified(),
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
@@ -256,14 +251,10 @@ impl Bucket {
         // 还超就当 LRU：保留最近活跃的一半。硬上限不能等 60 秒窗口，否则
         // 短时间大量换源地址就能把内存吃满。
         if self.tokens.len() >= BUCKET_MAX_IPS {
-            let mut seen: Vec<(IpAddr, Instant)> =
-                self.tokens.iter().map(|(ip, (_, at))| (*ip, *at)).collect();
+            let mut seen: Vec<(IpAddr, Instant)> = self.tokens.iter().map(|(ip, (_, at))| (*ip, *at)).collect();
             seen.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
-            let keep: std::collections::HashSet<IpAddr> = seen
-                .into_iter()
-                .take(BUCKET_MAX_IPS / 2)
-                .map(|(ip, _)| ip)
-                .collect();
+            let keep: std::collections::HashSet<IpAddr> =
+                seen.into_iter().take(BUCKET_MAX_IPS / 2).map(|(ip, _)| ip).collect();
             self.tokens.retain(|ip, _| keep.contains(ip));
         }
         self.swept_at = Some(now);
@@ -284,11 +275,7 @@ fn secure_headers(mut response: Response) -> Response {
 }
 
 fn forbidden() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({ "error": "只允许局域网访问" })),
-    )
-        .into_response()
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "只允许局域网访问" }))).into_response()
 }
 
 fn too_many() -> Response {
@@ -298,7 +285,6 @@ fn too_many() -> Response {
     )
         .into_response()
 }
-
 
 /// 500 响应。**不把内部错误原文回给局域网**：`message` 多数来自
 /// `DbError`，里面带着表名、SQL 片段甚至本机路径，等于给扫描者送情报。
@@ -415,11 +401,7 @@ pub fn router(state: WebState) -> Router {
 
 /// 所有请求先过这一道：私网判定 → 令牌桶 → 记访问日志 → 补安全头。
 #[allow(clippy::type_complexity)]
-async fn guard_request(
-    state: WebState,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+async fn guard_request(state: WebState, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let connect = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -452,12 +434,7 @@ async fn guard_request(
     let status = response.status().as_u16();
     // 静态资源不逐个记账，免得把访问日志刷满
     if path.starts_with("/api/") {
-        db::record_access(
-            &state.db,
-            &ip_text,
-            &format!("{} {}", method.as_str(), path),
-            status,
-        );
+        db::record_access(&state.db, &ip_text, &format!("{} {}", method.as_str(), path), status);
     }
     secure_headers(response)
 }
@@ -528,10 +505,7 @@ fn serve_file(path: &std::path::Path) -> Response {
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    let content_type = mime_guess::from_path(path)
-        .first_or_octet_stream()
-        .as_ref()
-        .to_string();
+    let content_type = mime_guess::from_path(path).first_or_octet_stream().as_ref().to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
@@ -587,10 +561,7 @@ async fn export_csv(State(state): State<WebState>, Query(query): Query<PageQuery
         Ok((csv, _rows)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
-            .header(
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"ledger.csv\"",
-            )
+            .header(header::CONTENT_DISPOSITION, "attachment; filename=\"ledger.csv\"")
             .body(Body::from(csv))
             .unwrap_or_else(|_| server_error("导出失败".into())),
         Err(err) => server_error(err),
@@ -628,12 +599,8 @@ async fn stock_handler(State(state): State<WebState>, Query(query): Query<StockQ
 
 async fn stock_count_handler(State(state): State<WebState>, Query(query): Query<StockQuery>) -> Response {
     match state.db.with(|c| {
-        crate::stock::stock_count(
-            c,
-            query.keyword.as_deref(),
-            query.only_negative.unwrap_or(false),
-        )
-        .map_err(crate::db::DbError::from)
+        crate::stock::stock_count(c, query.keyword.as_deref(), query.only_negative.unwrap_or(false))
+            .map_err(crate::db::DbError::from)
     }) {
         Ok(n) => Json(n).into_response(),
         Err(err) => server_error(err),
@@ -654,14 +621,20 @@ async fn stock_check_handler(State(state): State<WebState>) -> Response {
 async fn summary_handler(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let group_by = query.group_by.clone().unwrap_or_else(|| "month".into());
     let limit = query.limit.unwrap_or(50);
-    match state.db.with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::grouped(c, &query.filter(), &group_by, limit).map_err(crate::db::DbError::from))
+    {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
 }
 
 async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
-    match state.db.with(|c| summary::monthly(c, &query.filter()).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::monthly(c, &query.filter()).map_err(crate::db::DbError::from))
+    {
         Ok(points) => Json(points).into_response(),
         Err(err) => server_error(err),
     }
@@ -669,14 +642,19 @@ async fn monthly(State(state): State<WebState>, Query(query): Query<SummaryQuery
 
 async fn top_items(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
     let kind = query.kind_of_top.clone().unwrap_or_else(|| "out".into());
-    match state.db.with(|c| summary::top_items(c, &query.filter(), &kind, query.limit.unwrap_or(10)).map_err(crate::db::DbError::from)) {
+    match state.db.with(|c| {
+        summary::top_items(c, &query.filter(), &kind, query.limit.unwrap_or(10)).map_err(crate::db::DbError::from)
+    }) {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
     }
 }
 
 async fn compare(State(state): State<WebState>, Query(query): Query<SummaryQuery>) -> Response {
-    match state.db.with(|c| summary::compare_previous(c, &query.filter()).map_err(crate::db::DbError::from)) {
+    match state
+        .db
+        .with(|c| summary::compare_previous(c, &query.filter()).map_err(crate::db::DbError::from))
+    {
         Ok(Some(cmp)) => Json(cmp).into_response(),
         Ok(None) => Json(serde_json::Value::Null).into_response(),
         Err(err) => server_error(err),
@@ -739,8 +717,7 @@ pub fn start(db: Arc<Db>, dist: Option<PathBuf>, preferred: u16) -> WebHandle {
                     // 绑定失败不算错误（有的系统关掉了 IPv6，或端口已被 v6 独占）。
                     let v6_task = match tokio::net::TcpListener::bind(v6).await {
                         Ok(v6_listener) => {
-                            let v6_app = router(state.clone())
-                                .into_make_service_with_connect_info::<SocketAddr>();
+                            let v6_app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
                             let v6_stop = stop.clone();
                             let task = tauri::async_runtime::spawn(async move {
                                 let v6_shutdown = async move {
@@ -977,12 +954,7 @@ mod tests {
     }
 
     /// 一次请求：带上来源地址（中间件据此判私网），返回状态码与响应。
-    async fn send(
-        state: WebState,
-        method: axum::http::Method,
-        uri: &str,
-        peer: &str,
-    ) -> (StatusCode, Response) {
+    async fn send(state: WebState, method: axum::http::Method, uri: &str, peer: &str) -> (StatusCode, Response) {
         use tower::ServiceExt;
         let mut req = axum::http::Request::builder()
             .method(method)
@@ -999,26 +971,14 @@ mod tests {
 
     #[tokio::test]
     async fn handler_rejects_public_source_ip() {
-        let (status, _) = send(
-            test_state(None),
-            axum::http::Method::GET,
-            "/api/health",
-            "8.8.8.8",
-        )
-        .await;
+        let (status, _) = send(test_state(None), axum::http::Method::GET, "/api/health", "8.8.8.8").await;
         // 公网来源直接 403，不能先执行任何查询
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn handler_allows_private_source_and_sets_secure_headers() {
-        let (status, response) = send(
-            test_state(None),
-            axum::http::Method::GET,
-            "/api/health",
-            "192.168.1.20",
-        )
-        .await;
+        let (status, response) = send(test_state(None), axum::http::Method::GET, "/api/health", "192.168.1.20").await;
         assert_eq!(status, StatusCode::OK);
         let headers = response.headers();
         assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
@@ -1037,26 +997,14 @@ mod tests {
         let mut limited = 0;
         // 同一来源连打，超出容量后必须是 429
         for _ in 0..(RATE_PER_SECOND as usize + 10) {
-            let (status, _) = send(
-                state.clone(),
-                axum::http::Method::GET,
-                "/api/health",
-                "192.168.1.30",
-            )
-            .await;
+            let (status, _) = send(state.clone(), axum::http::Method::GET, "/api/health", "192.168.1.30").await;
             if status == StatusCode::TOO_MANY_REQUESTS {
                 limited += 1;
             }
         }
         assert!(limited >= 5, "超出令牌桶容量后应持续拒绝，实际 {limited}");
         // 别的来源不受影响
-        let (status, _) = send(
-            state,
-            axum::http::Method::GET,
-            "/api/health",
-            "192.168.1.31",
-        )
-        .await;
+        let (status, _) = send(state, axum::http::Method::GET, "/api/health", "192.168.1.31").await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -1067,33 +1015,20 @@ mod tests {
         // /api 路径落到兜底路由、返回 404——两种都算拒绝，重点是绝不能 2xx
         // 被当成查询真的执行一次。
         for method in [axum::http::Method::POST, axum::http::Method::DELETE] {
-            let (status, _) =
-                send(state.clone(), method.clone(), "/api/ledger/page", "10.0.0.5").await;
+            let (status, _) = send(state.clone(), method.clone(), "/api/ledger/page", "10.0.0.5").await;
             assert!(
                 status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
                 "{method} 应被拒绝，实际 {status}"
             );
         }
         // 连未注册的 /api 路径也不给写
-        let (status, _) = send(
-            state.clone(),
-            axum::http::Method::POST,
-            "/api/whatever",
-            "10.0.0.5",
-        )
-        .await;
+        let (status, _) = send(state.clone(), axum::http::Method::POST, "/api/whatever", "10.0.0.5").await;
         assert!(
             status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
             "未注册的写路径应被拒绝，实际 {status}"
         );
         // 导出接口也不接受写方法（否则就能用 POST 触发一次导出）
-        let (status, _) = send(
-            state,
-            axum::http::Method::POST,
-            "/api/ledger/export.csv",
-            "10.0.0.5",
-        )
-        .await;
+        let (status, _) = send(state, axum::http::Method::POST, "/api/ledger/export.csv", "10.0.0.5").await;
         assert_ne!(status, StatusCode::OK);
     }
 
@@ -1113,11 +1048,7 @@ mod tests {
     async fn handler_blocks_absolute_path_read() {
         // 只读站曾经能用盘符/绝对路径读到本机任意文件
         let state = test_state(Some(std::env::temp_dir().join("ledger-web-handler-test")));
-        for uri in [
-            "/C:/Windows/win.ini",
-            "/c:\\\\Windows\\\\win.ini",
-            "/../secret.txt",
-        ] {
+        for uri in ["/C:/Windows/win.ini", "/c:\\\\Windows\\\\win.ini", "/../secret.txt"] {
             let (status, _) = send(state.clone(), axum::http::Method::GET, uri, "10.0.0.7").await;
             assert_ne!(status, StatusCode::OK, "{uri} 不应能读到文件");
         }
@@ -1131,8 +1062,7 @@ mod tests {
             "/api/ledger/page?pageSize=0",
             "/api/ledger/page?pageSize=99999",
         ] {
-            let (status, response) =
-                send(state.clone(), axum::http::Method::GET, uri, "10.0.0.8").await;
+            let (status, response) = send(state.clone(), axum::http::Method::GET, uri, "10.0.0.8").await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
             let body = http_body_util::BodyExt::collect(response.into_body())
                 .await

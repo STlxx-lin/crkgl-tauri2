@@ -48,29 +48,11 @@ import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
 import { DictPanel } from "../components/DictPanel";
 import { ItemCatalog } from "../components/ItemCatalog";
+import { useStoredPageSize } from "../lib/pageSize";
 import { PageHeader } from "../components/AppShell";
 
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "master.pageSize";
-
-function storedPageSize(): number {
-  try {
-    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
-    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
-  } catch {
-    // 存不下就用默认
-  }
-  return 100;
-}
-
-/** 记住本机的每页条数；存不下也不影响本次使用。 */
-function savePageSize(size: number): void {
-  try {
-    window.localStorage.setItem(PAGE_SIZE_KEY, String(size));
-  } catch {
-    // 隐私模式或存储被禁：下次退回默认
-  }
-}
 
 /** 基础资料：物料主数据 + 供应商 + 字典（单位/类别/类型/出库部门/采购人）。 */
 export function MasterScreen({ onChanged }: { onChanged: () => void }) {
@@ -137,7 +119,13 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
         description="物料与供应商是开单时的字典：选物料带出单位与参考单价，供应商从下拉里挑"
         actions={
           <>
-            <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={doBackfill} disabled={busy || !isTauri}>
+            <Button
+              size="small"
+              variant="secondary"
+              leadingIcon={RiDownload2Line}
+              onClick={doBackfill}
+              disabled={busy || !isTauri}
+            >
               从台账补齐
             </Button>
             <Button size="small" leadingIcon={RiFileExcel2Line} onClick={doImport} disabled={busy || !isTauri}>
@@ -174,19 +162,11 @@ export function MasterScreen({ onChanged }: { onChanged: () => void }) {
           <Stat
             label="物料类型"
             value={stats?.itemTypes.find((t) => t.category !== "未分类")?.category ?? "—"}
-            sub={
-              stats
-                ? stats.itemTypes.map((t) => `${t.category} ${t.count}`).join(" · ")
-                : "—"
-            }
+            sub={stats ? stats.itemTypes.map((t) => `${t.category} ${t.count}`).join(" · ") : "—"}
           />
         </div>
 
-        <Tabs
-          selectedKey={tab}
-          onSelectionChange={(key) => setTab(String(key))}
-          className="min-h-0 flex-1"
-        >
+        <Tabs selectedKey={tab} onSelectionChange={(key) => setTab(String(key))} className="min-h-0 flex-1">
           <TabList aria-label="基础资料分类">
             <Tab id="items">物料（{count(stats?.items ?? 0)}）</Tab>
             <Tab id="drawings">图号（{count(stats?.withDrawing ?? 0)}）</Tab>
@@ -245,7 +225,7 @@ function ItemsPanel({
   const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   // 列表排序：跟输入关键字一样，改了要回到第一页
   const [sortOrder, setSortOrder] = useState<ItemSort>(() => storedItemSort());
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   // 分页信息：总页数至少为 1，避免 0 条时显示「第 1 / 0 页」
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
@@ -291,10 +271,7 @@ function ItemsPanel({
         limit: pageSize,
         offset,
       };
-      const [list, n] = await Promise.all([
-        listItems({ ...opts, order: sortOrder }),
-        countItems(opts),
-      ]);
+      const [list, n] = await Promise.all([listItems({ ...opts, order: sortOrder }), countItems(opts)]);
       if (ticket === seq.current) {
         setRows(list);
         setTotal(n);
@@ -428,7 +405,10 @@ function ItemsPanel({
         </Button>
       </div>
 
-      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div
+        ref={tableRef}
+        className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default"
+      >
         <table className="w-full min-w-[1360px] table-fixed border-collapse text-[0.8125rem]">
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
@@ -440,7 +420,9 @@ function ItemsPanel({
               <th className="w-[100px] px-3 py-2 text-start font-medium whitespace-nowrap">类型</th>
               <th className="w-[110px] px-3 py-2 text-start font-medium whitespace-nowrap">类别</th>
               <th className="w-[144px] px-3 py-2 text-start font-medium whitespace-nowrap">图号</th>
-              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">参考单价</th>
+              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">
+                参考单价
+              </th>
               <th className="w-[168px] px-3 py-2 text-start font-medium whitespace-nowrap">默认供应商</th>
               <th className="w-[76px] px-3 py-2 text-center font-medium whitespace-nowrap">状态</th>
               <th className="w-[84px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
@@ -459,17 +441,29 @@ function ItemsPanel({
               </tr>
             ) : (
               rows.map((item) => (
-                <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap" title={item.itemCode}>
+                <tr
+                  key={item.id}
+                  className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover"
+                >
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap"
+                    title={item.itemCode}
+                  >
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
                     {item.itemName}
                   </td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.location ?? ""}>
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={item.location ?? ""}
+                  >
                     {item.location ?? "—"}
                   </td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.spec ?? ""}>
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={item.spec ?? ""}
+                  >
                     {item.spec ?? "—"}
                   </td>
                   <td className="px-3 py-1.5 text-text-tertiary whitespace-nowrap">{item.unit ?? "—"}</td>
@@ -488,16 +482,29 @@ function ItemsPanel({
                       <span className="text-text-tertiary">—</span>
                     )}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>{item.category ?? "—"}</td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={item.drawingNo ?? ""}>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>
+                    {item.category ?? "—"}
+                  </td>
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={item.drawingNo ?? ""}
+                  >
                     {item.drawingNo ?? "—"}
                   </td>
                   <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary whitespace-nowrap">
                     {item.priceMicros === null ? "—" : priceText(item.priceMicros)}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.supplier ?? ""}>{item.supplier ?? "—"}</td>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.supplier ?? ""}>
+                    {item.supplier ?? "—"}
+                  </td>
                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
-                    <span className={item.active ? "text-caption-1-semibold text-emerald-500" : "text-caption-1-regular text-text-tertiary"}>
+                    <span
+                      className={
+                        item.active
+                          ? "text-caption-1-semibold text-emerald-500"
+                          : "text-caption-1-regular text-text-tertiary"
+                      }
+                    >
                       {item.active ? "在用" : "停用"}
                     </span>
                   </td>
@@ -537,13 +544,7 @@ function ItemsPanel({
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
-                try {
-                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
-                } catch {
-                  // 忽略
-                }
+                setPageSize(Number(e.target.value));
                 setOffset(0);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
@@ -587,7 +588,9 @@ function ItemsPanel({
 
       <AlertDialog
         title="删除物料"
-        description={pendingDelete ? `将删除 ${pendingDelete.itemCode} ${pendingDelete.itemName}。台账里的历史行不受影响。` : ""}
+        description={
+          pendingDelete ? `将删除 ${pendingDelete.itemCode} ${pendingDelete.itemName}。台账里的历史行不受影响。` : ""
+        }
         confirmLabel="删除"
         onConfirm={doDelete}
         isOpen={pendingDelete !== null}
@@ -708,7 +711,8 @@ function ItemDialog({
       ),
     [typeOptions, itemTypes],
   );
-  const set = <K extends keyof ItemInput>(key: K, value: ItemInput[K]) => setForm((prev) => ({ ...prev, [key]: value }));
+  const set = <K extends keyof ItemInput>(key: K, value: ItemInput[K]) =>
+    setForm((prev) => ({ ...prev, [key]: value }));
 
   const save = async () => {
     setBusy(true);
@@ -736,92 +740,94 @@ function ItemDialog({
           <ModalHeader title={item ? "编辑物料" : "新增物料"} description="编码与名称必填" />
           <ModalBody className="grid grid-cols-[minmax(0,1fr)_19rem] items-start gap-4">
             <div className="flex min-w-0 flex-col gap-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Labeled label="物料编码">
-                <Input
-                  size="small"
-                  value={form.itemCode}
-                  onChange={(v) => set("itemCode", v)}
-                  isDisabled={Boolean(item)}
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <Labeled label="物料编码">
+                  <Input
+                    size="small"
+                    value={form.itemCode}
+                    onChange={(v) => set("itemCode", v)}
+                    isDisabled={Boolean(item)}
+                  />
+                </Labeled>
+                <Labeled label="单位">
+                  <CategoryDropdown
+                    label="单位"
+                    placeholder="选或输入新单位"
+                    value={form.unit ?? ""}
+                    options={unitOptions}
+                    onChange={(v) => set("unit", v)}
+                  />
+                </Labeled>
+              </div>
+              <Labeled label="物料名称">
+                <Input size="small" value={form.itemName} onChange={(v) => set("itemName", v)} />
               </Labeled>
-              <Labeled label="单位">
-                <CategoryDropdown
-                  label="单位"
-                  placeholder="选或输入新单位"
-                  value={form.unit ?? ""}
-                  options={unitOptions}
-                  onChange={(v) => set("unit", v)}
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <Labeled label="库位">
+                  <Input
+                    size="small"
+                    placeholder="如 D-01-02-4F"
+                    value={form.location ?? ""}
+                    onChange={(v) => set("location", v)}
+                  />
+                </Labeled>
+                <Labeled label="规格型号">
+                  <Input
+                    size="small"
+                    placeholder="如 5*5、M8X50"
+                    value={form.spec ?? ""}
+                    onChange={(v) => set("spec", v)}
+                  />
+                </Labeled>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Labeled label="图号">
+                  <Input
+                    size="small"
+                    placeholder="加工件的图纸号，如 QLKJ480-002.065"
+                    value={form.drawingNo ?? ""}
+                    onChange={(v) => set("drawingNo", v)}
+                  />
+                </Labeled>
+                <Labeled label="类型">
+                  <CategoryDropdown
+                    label="类型"
+                    placeholder="选或输入新类型"
+                    value={form.itemType ?? ""}
+                    options={mergedTypeOptions}
+                    onChange={(v) => set("itemType", v)}
+                  />
+                </Labeled>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Labeled label="类别">
+                  <CategoryDropdown
+                    label="类别"
+                    placeholder="选或输入新类别"
+                    value={form.category ?? ""}
+                    options={categoryOptions}
+                    onChange={(v) => set("category", v)}
+                  />
+                </Labeled>
+                <Labeled label="参考单价（元）">
+                  <PriceInput value={form.priceMicros ?? null} onChange={(micros) => set("priceMicros", micros)} />
+                </Labeled>
+              </div>
+              <Labeled label="默认供应商">
+                <Input size="small" value={form.supplier ?? ""} onChange={(v) => set("supplier", v)} />
               </Labeled>
-            </div>
-            <Labeled label="物料名称">
-              <Input size="small" value={form.itemName} onChange={(v) => set("itemName", v)} />
-            </Labeled>
-            <div className="grid grid-cols-2 gap-3">
-              <Labeled label="库位">
-                <Input
-                  size="small"
-                  placeholder="如 D-01-02-4F"
-                  value={form.location ?? ""}
-                  onChange={(v) => set("location", v)}
-                />
+              <Labeled label="备注">
+                <Input size="small" value={form.remark ?? ""} onChange={(v) => set("remark", v)} />
               </Labeled>
-              <Labeled label="规格型号">
-                <Input
-                  size="small"
-                  placeholder="如 5*5、M8X50"
-                  value={form.spec ?? ""}
-                  onChange={(v) => set("spec", v)}
+              <label className="flex items-center gap-2 text-body-2-regular text-text-secondary">
+                <Switch
+                  size="sm"
+                  isSelected={form.active ?? true}
+                  onChange={(v) => set("active", v)}
+                  aria-label="在用"
                 />
-              </Labeled>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Labeled label="图号">
-                <Input
-                  size="small"
-                  placeholder="加工件的图纸号，如 QLKJ480-002.065"
-                  value={form.drawingNo ?? ""}
-                  onChange={(v) => set("drawingNo", v)}
-                />
-              </Labeled>
-              <Labeled label="类型">
-                <CategoryDropdown
-                  label="类型"
-                  placeholder="选或输入新类型"
-                  value={form.itemType ?? ""}
-                  options={mergedTypeOptions}
-                  onChange={(v) => set("itemType", v)}
-                />
-              </Labeled>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Labeled label="类别">
-                <CategoryDropdown
-                  label="类别"
-                  placeholder="选或输入新类别"
-                  value={form.category ?? ""}
-                  options={categoryOptions}
-                  onChange={(v) => set("category", v)}
-                />
-              </Labeled>
-              <Labeled label="参考单价（元）">
-                <PriceInput
-                  value={form.priceMicros ?? null}
-                  onChange={(micros) => set("priceMicros", micros)}
-                />
-              </Labeled>
-            </div>
-            <Labeled label="默认供应商">
-              <Input size="small" value={form.supplier ?? ""} onChange={(v) => set("supplier", v)} />
-            </Labeled>
-            <Labeled label="备注">
-              <Input size="small" value={form.remark ?? ""} onChange={(v) => set("remark", v)} />
-            </Labeled>
-            <label className="flex items-center gap-2 text-body-2-regular text-text-secondary">
-              <Switch size="sm" isSelected={form.active ?? true} onChange={(v) => set("active", v)} aria-label="在用" />
-              在用（停用后不出现在开单下拉里）
-            </label>
+                在用（停用后不出现在开单下拉里）
+              </label>
             </div>
 
             {/* 右栏：现有物料只读对照，照着已有写法录入，也避免建重 */}
@@ -867,7 +873,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Item | null>(null);
   const seq = useRef(0);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -952,10 +958,16 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         </SegmentedControl>
         {loading ? <Spinner size="xs" aria-label="加载中" /> : null}
         <span className="text-body-2-regular text-text-tertiary">
-          共 {count(total)} 条
-          {filled ? "（按图号或物料搜）" : "（加工件应有图号，这里列出待补的）"}
+          共 {count(total)} 条{filled ? "（按图号或物料搜）" : "（加工件应有图号，这里列出待补的）"}
         </span>
-        <Button size="small" variant="ghost" leadingIcon={RiRefreshLine} onClick={load} className="ms-auto" disabled={loading}>
+        <Button
+          size="small"
+          variant="ghost"
+          leadingIcon={RiRefreshLine}
+          onClick={load}
+          className="ms-auto"
+          disabled={loading}
+        >
           刷新
         </Button>
         <Button
@@ -970,7 +982,10 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
         </Button>
       </div>
 
-      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div
+        ref={tableRef}
+        className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default"
+      >
         <table className="w-full min-w-[960px] table-fixed border-collapse text-[0.8125rem]">
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
@@ -991,20 +1006,27 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
                     icon={RiSearchLine}
                     title={filled ? "没有带图号的物料" : "没有缺图号的加工件"}
                     description={
-                      filled
-                        ? "图号来自工作簿「基础信息」表的加工件，或在这里手工补录。"
-                        : "所有加工件都已有图号。"
+                      filled ? "图号来自工作簿「基础信息」表的加工件，或在这里手工补录。" : "所有加工件都已有图号。"
                     }
                   />
                 </td>
               </tr>
             ) : (
               rows.map((item) => (
-                <tr key={item.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap" title={item.drawingNo ?? ""}>
+                <tr
+                  key={item.id}
+                  className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover"
+                >
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary whitespace-nowrap"
+                    title={item.drawingNo ?? ""}
+                  >
                     {item.drawingNo ?? <span className="text-text-tertiary">（未填）</span>}
                   </td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary whitespace-nowrap" title={item.itemCode}>
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary whitespace-nowrap"
+                    title={item.itemCode}
+                  >
                     {item.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={item.itemName}>
@@ -1025,7 +1047,9 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
                       <span className="text-text-tertiary">—</span>
                     )}
                   </td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>{item.category ?? "—"}</td>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={item.category ?? ""}>
+                    {item.category ?? "—"}
+                  </td>
                   <td className="px-3 py-1.5 text-text-tertiary whitespace-nowrap">{item.unit ?? "—"}</td>
                   <td className="px-3 py-1.5 text-end whitespace-nowrap">
                     <button
@@ -1055,10 +1079,8 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
+                setPageSize(Number(e.target.value));
                 setOffset(0);
-                savePageSize(next);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
               className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
@@ -1102,15 +1124,7 @@ function DrawingsPanel({ onChanged, busy }: { onChanged: () => void; busy: boole
 }
 
 /** 只改图号的小弹窗：不把整条物料的表单再搬一遍。 */
-function DrawingDialog({
-  item,
-  onClose,
-  onSaved,
-}: {
-  item: Item;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
+function DrawingDialog({ item, onClose, onSaved }: { item: Item; onClose: () => void; onSaved: () => Promise<void> }) {
   const [drawingNo, setDrawingNo] = useState(item.drawingNo ?? "");
   const [saving, setSaving] = useState(false);
 
@@ -1181,14 +1195,11 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
   const [editing, setEditing] = useState<Supplier | "new" | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Supplier | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const tableRef = useRef<HTMLDivElement>(null);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
-  const displayRows = useMemo(
-    () => rows.slice((page - 1) * pageSize, page * pageSize),
-    [rows, page, pageSize],
-  );
+  const displayRows = useMemo(() => rows.slice((page - 1) * pageSize, page * pageSize), [rows, page, pageSize]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1234,9 +1245,7 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
 
   // 导出当前关键字命中的全部供应商（列表是前端分页，文件里给全量）
   const doExport = () =>
-    saveCsvFile("导出供应商", exportFileName("供应商"), (path) =>
-      exportSuppliers(debouncedKeyword || undefined, path),
-    );
+    saveCsvFile("导出供应商", exportFileName("供应商"), (path) => exportSuppliers(debouncedKeyword || undefined, path));
 
   return (
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
@@ -1270,14 +1279,19 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
         </Button>
       </div>
 
-      <div ref={tableRef} className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div
+        ref={tableRef}
+        className="min-h-0 flex-1 overflow-auto rounded-xl border border-border-button-default bg-background-primary-default"
+      >
         <table className="w-full min-w-[800px] table-fixed border-collapse text-[0.8125rem]">
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
               <th className="px-3 py-2 text-start font-medium whitespace-nowrap">供应商名称</th>
               <th className="w-[130px] px-3 py-2 text-start font-medium whitespace-nowrap">联系人</th>
               <th className="w-[150px] px-3 py-2 text-start font-medium whitespace-nowrap">电话</th>
-              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">台账行数</th>
+              <th className="w-[108px] px-3 py-2 text-end font-medium whitespace-nowrap font-mono tabular-nums">
+                台账行数
+              </th>
               <th className="w-[76px] px-3 py-2 text-center font-medium whitespace-nowrap">状态</th>
               <th className="w-[88px] px-3 py-2 text-end font-medium whitespace-nowrap">操作</th>
             </tr>
@@ -1286,18 +1300,42 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-12">
-                  <EmptyState icon={RiSearchLine} title="没有供应商" description="点「导入工作簿」从供应商名称表读，或手工新增。" />
+                  <EmptyState
+                    icon={RiSearchLine}
+                    title="没有供应商"
+                    description="点「导入工作簿」从供应商名称表读，或手工新增。"
+                  />
                 </td>
               </tr>
             ) : (
               displayRows.map((supplier) => (
-                <tr key={supplier.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate px-3 py-1.5 text-text-primary" title={supplier.name}>{supplier.name}</td>
-                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={supplier.contact ?? ""}>{supplier.contact ?? "—"}</td>
-                  <td className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={supplier.phone ?? ""}>{supplier.phone ?? "—"}</td>
-                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary whitespace-nowrap">{count(supplier.hits)}</td>
+                <tr
+                  key={supplier.id}
+                  className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover"
+                >
+                  <td className="truncate px-3 py-1.5 text-text-primary" title={supplier.name}>
+                    {supplier.name}
+                  </td>
+                  <td className="truncate px-3 py-1.5 text-text-tertiary" title={supplier.contact ?? ""}>
+                    {supplier.contact ?? "—"}
+                  </td>
+                  <td
+                    className="truncate px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={supplier.phone ?? ""}
+                  >
+                    {supplier.phone ?? "—"}
+                  </td>
+                  <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary whitespace-nowrap">
+                    {count(supplier.hits)}
+                  </td>
                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
-                    <span className={supplier.active ? "text-caption-1-semibold text-emerald-500" : "text-caption-1-regular text-text-tertiary"}>
+                    <span
+                      className={
+                        supplier.active
+                          ? "text-caption-1-semibold text-emerald-500"
+                          : "text-caption-1-regular text-text-tertiary"
+                      }
+                    >
                       {supplier.active ? "在用" : "停用"}
                     </span>
                   </td>
@@ -1328,8 +1366,8 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
 
       <div className="flex shrink-0 items-center justify-between gap-3 pt-1">
         <p className="text-body-2-regular text-text-tertiary">
-          第 {count((page - 1) * pageSize + 1)}–{count(Math.min(page * pageSize, rows.length))} 家，共 {count(rows.length)} 家
-          <span className="mx-2 text-text-tertiary/40">·</span>
+          第 {count((page - 1) * pageSize + 1)}–{count(Math.min(page * pageSize, rows.length))} 家，共{" "}
+          {count(rows.length)} 家<span className="mx-2 text-text-tertiary/40">·</span>
           其中 {count(used)} 家已被台账引用
         </p>
         <div className="flex items-center gap-3">
@@ -1339,10 +1377,8 @@ function SuppliersPanel({ onChanged, busy }: { onChanged: () => void; busy: bool
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
+                setPageSize(Number(e.target.value));
                 setPage(1);
-                savePageSize(next);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
               className="h-7 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 font-mono text-caption-1-regular tabular-nums text-text-secondary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
@@ -1560,7 +1596,6 @@ function sanitizePriceDraft(text: string): string {
   return kept.slice(0, dot + 1) + kept.slice(dot + 1).replace(/\./g, "");
 }
 
-
 /**
  * 可输入下拉（弹窗内用于单位、类型、类别）。
  *
@@ -1694,7 +1729,9 @@ function CategoryDropdown({
     : null;
   const rect = el ? el.getBoundingClientRect() : null;
   const hostRect = host ? host.getBoundingClientRect() : null;
-  const dropUp = rect ? window.innerHeight - rect.bottom - 16 < 180 && rect.top > window.innerHeight - rect.bottom : false;
+  const dropUp = rect
+    ? window.innerHeight - rect.bottom - 16 < 180 && rect.top > window.innerHeight - rect.bottom
+    : false;
 
   const listbox = open ? (
     <ul
@@ -1714,9 +1751,7 @@ function CategoryDropdown({
               position: "absolute",
               left: rect.left - hostRect.left,
               width: rect.width,
-              ...(dropUp
-                ? { bottom: hostRect.bottom - rect.top + 4 }
-                : { top: rect.bottom - hostRect.top + 4 }),
+              ...(dropUp ? { bottom: hostRect.bottom - rect.top + 4 } : { top: rect.bottom - hostRect.top + 4 }),
             }
           : undefined
       }

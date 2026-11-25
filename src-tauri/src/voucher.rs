@@ -245,21 +245,22 @@ pub fn item_master(
                 if in_stock_only { 1i64 } else { 0i64 },
             ],
             |r| {
-            let name: String = r.get(1)?;
-            let code: String = r.get(0)?;
-            // 有台账单价就用台账的，没有才用基础资料的参考单价
-            let last_price: Option<i64> = r.get(5)?;
-            let master_price: Option<i64> = r.get(7)?;
-            Ok(ItemMaster {
-                item_name: if name.is_empty() { code.clone() } else { name },
-                item_code: code,
-                unit: r.get(2)?,
-                spec: r.get(3)?,
-                hits: r.get(4)?,
-                last_price_micros: last_price.or(master_price),
-                stock_qty: r.get::<_, f64>(6).unwrap_or(0.0),
-            })
-        })
+                let name: String = r.get(1)?;
+                let code: String = r.get(0)?;
+                // 有台账单价就用台账的，没有才用基础资料的参考单价
+                let last_price: Option<i64> = r.get(5)?;
+                let master_price: Option<i64> = r.get(7)?;
+                Ok(ItemMaster {
+                    item_name: if name.is_empty() { code.clone() } else { name },
+                    item_code: code,
+                    unit: r.get(2)?,
+                    spec: r.get(3)?,
+                    hits: r.get(4)?,
+                    last_price_micros: last_price.or(master_price),
+                    stock_qty: r.get::<_, f64>(6).unwrap_or(0.0),
+                })
+            },
+        )
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
         .map_err(DbError::from)?;
     Ok(rows)
@@ -483,11 +484,7 @@ pub fn search_docs(conn: &Connection, keyword: &str, kind: Option<&str>, limit: 
 }
 
 /// 取一张导入单据的全部明细（只读查看用）。
-pub fn import_doc_lines(
-    conn: &Connection,
-    doc_no: &str,
-    kind: &str,
-) -> DbResult<Vec<crate::ledger::LedgerRow>> {
+pub fn import_doc_lines(conn: &Connection, doc_no: &str, kind: &str) -> DbResult<Vec<crate::ledger::LedgerRow>> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT {} FROM ledger
@@ -541,12 +538,7 @@ fn validate(input: &VoucherInput) -> Result<(String, String), String> {
 /// 只查 `vouchers` 会漏掉导入数据：导入行不建单据头，`doc_search` 又按
 /// `doc_no + kind` 把它们聚成一张单，于是手工开一张同号单就会在台账里出现
 /// 两张同号单、查询时金额与行数被拆成两截。
-fn ensure_doc_no_free(
-    conn: &Connection,
-    kind: &str,
-    doc_no: &str,
-    exclude_voucher: Option<i64>,
-) -> DbResult<()> {
+fn ensure_doc_no_free(conn: &Connection, kind: &str, doc_no: &str, exclude_voucher: Option<i64>) -> DbResult<()> {
     let head: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM vouchers WHERE kind = ?1 AND doc_no = ?2 AND id <> ?3",
@@ -575,7 +567,7 @@ fn ensure_doc_no_free(
 
 /// 新建单据。整张单一个事务：表头、明细、编号占用一起成功或一起失败。
 pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
-    let (kind, date) = validate(input).map_err(|e| e)?;
+    let (kind, date) = validate(input)?;
     let doc_no = match trimmed(&input.doc_no) {
         Some(no) => no.to_string(),
         None => next_doc_no(conn, &kind, &date)?,
@@ -619,10 +611,7 @@ pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
             .map_err(DbError::from)?;
         for (index, line) in input.lines.iter().enumerate() {
             let qty = line.qty.unwrap_or(0.0);
-            let amount = match line.price_micros {
-                Some(price) => Some(line_amount_cents(qty, price)),
-                None => None,
-            };
+            let amount = line.price_micros.map(|price| line_amount_cents(qty, price));
             total_cents += amount.unwrap_or(0);
             row_count += 1;
             stmt.execute(rusqlite::params![
@@ -819,8 +808,6 @@ pub fn next_doc_no_db(db: &Db, kind: &str, date: &str) -> DbResult<String> {
 }
 
 #[cfg(test)]
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Db;
@@ -875,8 +862,13 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let first = db.with_loose(|c| next_doc_no(c, "in", "2026-08-31")).unwrap();
         assert_eq!(first, "20260831001");
-        db.with_loose(|c| create(c, &input("in", "2026-08-31", vec![line("A", "螺丝", 1.0, Some(10_000))])))
-            .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-31", vec![line("A", "螺丝", 1.0, Some(10_000))]),
+            )
+        })
+        .unwrap();
         let second = db.with_loose(|c| next_doc_no(c, "in", "2026-08-31")).unwrap();
         assert_eq!(second, "20260831002");
     }
@@ -884,8 +876,13 @@ mod tests {
     #[test]
     fn kinds_number_independently() {
         let db = Db::open_in_memory().unwrap();
-        db.with_loose(|c| create(c, &input("in", "2026-08-31", vec![line("A", "螺丝", 1.0, Some(10_000))])))
-            .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-31", vec![line("A", "螺丝", 1.0, Some(10_000))]),
+            )
+        })
+        .unwrap();
         let out_no = db.with_loose(|c| next_doc_no(c, "out", "2026-08-31")).unwrap();
         assert_eq!(out_no, "20260831001", "出库与入库的流水应各自独立");
     }
@@ -900,7 +897,10 @@ mod tests {
                     &input(
                         "in",
                         "2026-08-31",
-                        vec![line("A", "螺丝", 2.5, Some(60_000)), line("B", "轴承", 2.0, Some(100_000))],
+                        vec![
+                            line("A", "螺丝", 2.5, Some(60_000)),
+                            line("B", "轴承", 2.0, Some(100_000)),
+                        ],
                     ),
                 )
             })
@@ -939,7 +939,9 @@ mod tests {
             .with_loose(|c| create(c, &input("in", "2026/13/45", vec![line("A", "x", 1.0, None)])))
             .is_err());
         // 没有明细
-        assert!(db.with_loose(|c| create(c, &input("in", "2026-08-31", vec![]))).is_err());
+        assert!(db
+            .with_loose(|c| create(c, &input("in", "2026-08-31", vec![])))
+            .is_err());
         // 数量为 0
         let mut zero = line("A", "x", 1.0, None);
         zero.qty = Some(0.0);
@@ -1011,7 +1013,11 @@ mod tests {
             update(
                 c,
                 id,
-                &input("in", "2026-09-01", vec![line("B", "y", 3.0, Some(20_000)), line("C", "z", 1.0, Some(5_000))]),
+                &input(
+                    "in",
+                    "2026-09-01",
+                    vec![line("B", "y", 3.0, Some(20_000)), line("C", "z", 1.0, Some(5_000))],
+                ),
             )
         })
         .unwrap();
@@ -1026,7 +1032,7 @@ mod tests {
         assert!(db.with_loose(|c| get(c, id)).unwrap().is_none());
     }
 
-#[test]
+    #[test]
     fn search_finds_exact_and_partial_doc_numbers() {
         let db = Db::open_in_memory().unwrap();
         // 本机开两张单
@@ -1074,9 +1080,22 @@ mod tests {
             .unwrap();
         db.with_loose(|c| create(c, &input("out", "2026-09-02", vec![line("A", "x", 2.0, None)])))
             .unwrap();
-        assert_eq!(db.with_loose(|c| search_docs(c, "20260902", None, 20)).unwrap().len(), 2);
-        assert_eq!(db.with_loose(|c| search_docs(c, "20260902", Some("in"), 20)).unwrap().len(), 1);
-        assert_eq!(db.with_loose(|c| search_docs(c, "20260902", Some("out"), 20)).unwrap().len(), 1);
+        assert_eq!(
+            db.with_loose(|c| search_docs(c, "20260902", None, 20)).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            db.with_loose(|c| search_docs(c, "20260902", Some("in"), 20))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.with_loose(|c| search_docs(c, "20260902", Some("out"), 20))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1109,15 +1128,25 @@ mod tests {
                 &input(
                     "in",
                     "2026-08-30",
-                    vec![line("WG-A", "外卡", 10.0, Some(15_000)), line("WG-B", "轴承", 2.0, Some(100_000))],
+                    vec![
+                        line("WG-A", "外卡", 10.0, Some(15_000)),
+                        line("WG-B", "轴承", 2.0, Some(100_000)),
+                    ],
                 ),
             )
         })
         .unwrap();
-        db.with_loose(|c| create(c, &input("in", "2026-08-31", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))])))
-            .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-31", vec![line("WG-A", "外卡（轴）", 5.0, Some(17_000))]),
+            )
+        })
+        .unwrap();
 
-        let items = db.with_loose(|c| item_master(c, Some("WG-A"), 10, false, false)).unwrap();
+        let items = db
+            .with_loose(|c| item_master(c, Some("WG-A"), 10, false, false))
+            .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].item_code, "WG-A");
         assert_eq!(items[0].hits, 2);
@@ -1139,7 +1168,10 @@ mod tests {
         .unwrap();
         // 只在出库单出现过的物料，不该进开单候选
         db.with_loose(|c| {
-            create(c, &input("out", "2026-08-31", vec![line("WG-OUT", "只出库过", 3.0, None)]))
+            create(
+                c,
+                &input("out", "2026-08-31", vec![line("WG-OUT", "只出库过", 3.0, None)]),
+            )
         })
         .unwrap();
 
@@ -1157,7 +1189,10 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         // 台账里只有一条入库记录
         db.with_loose(|c| {
-            create(c, &input("in", "2026-08-30", vec![line("WG-LED", "台账里的", 5.0, Some(15_000))]))
+            create(
+                c,
+                &input("in", "2026-08-30", vec![line("WG-LED", "台账里的", 5.0, Some(15_000))]),
+            )
         })
         .unwrap();
         // 基础资料里四条：一条与台账同码，三条台账没有
@@ -1196,7 +1231,9 @@ mod tests {
         assert_eq!(new.hits, 0);
 
         // 关键字也能搜到基础资料里的物料（按名称）
-        let by_name = db.with_loose(|c| item_master(c, Some("新料"), 50, true, false)).unwrap();
+        let by_name = db
+            .with_loose(|c| item_master(c, Some("新料"), 50, true, false))
+            .unwrap();
         assert_eq!(by_name.len(), 1);
         assert_eq!(by_name[0].item_code, "WG-NEW2");
     }
@@ -1215,7 +1252,10 @@ mod tests {
         })
         .unwrap();
         db.with_loose(|c| {
-            create(c, &input("in", "2026-08-30", vec![line("WG-HAS", "有结存", 8.0, Some(2_000))]))
+            create(
+                c,
+                &input("in", "2026-08-30", vec![line("WG-HAS", "有结存", 8.0, Some(2_000))]),
+            )
         })
         .unwrap();
 
@@ -1229,13 +1269,23 @@ mod tests {
     fn stock_qty_is_inbound_minus_outbound() {
         let db = Db::open_in_memory().unwrap();
         // 入库 10，出库 4 -> 结存 6
-        db.with_loose(|c| create(c, &input("in", "2026-08-30", vec![line("WG-S", "有剩余", 10.0, Some(1_000))])))
-            .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-30", vec![line("WG-S", "有剩余", 10.0, Some(1_000))]),
+            )
+        })
+        .unwrap();
         db.with_loose(|c| create(c, &input("out", "2026-08-31", vec![line("WG-S", "有剩余", 4.0, None)])))
             .unwrap();
         // 入库 2，出库 2 -> 结存 0，出库时不该再出现
-        db.with_loose(|c| create(c, &input("in", "2026-08-30", vec![line("WG-Z", "用光了", 2.0, Some(1_000))])))
-            .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                &input("in", "2026-08-30", vec![line("WG-Z", "用光了", 2.0, Some(1_000))]),
+            )
+        })
+        .unwrap();
         db.with_loose(|c| create(c, &input("out", "2026-08-31", vec![line("WG-Z", "用光了", 2.0, None)])))
             .unwrap();
 

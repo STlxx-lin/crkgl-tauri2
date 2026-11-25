@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  RiAlertLine,
-  RiCheckboxCircleLine,
-  RiDownload2Line,
-  RiRefreshLine,
-  RiSearchLine,
-} from "@remixicon/react";
+import { RiAlertLine, RiCheckboxCircleLine, RiDownload2Line, RiRefreshLine, RiSearchLine } from "@remixicon/react";
 import { countStock, fetchStockCheck, fetchStockReport, isTauri, updateRow } from "../lib/api";
 import type { StockCheckSummary, StockIssue, StockRow } from "../lib/types";
 import { count, date, qty } from "../lib/format";
+import { exportFileName } from "../lib/exportCsv";
+import { useStoredPageSize } from "../lib/pageSize";
 import { Button } from "@/components/base/buttons/button";
 import { ItemPicker } from "../components/ItemPicker";
 import { SearchField } from "@/components/base/search-field/search-field";
@@ -21,16 +17,6 @@ import { PageHeader } from "../components/AppShell";
 
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const PAGE_SIZE_KEY = "stock.pageSize";
-
-function storedPageSize(): number {
-  try {
-    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
-    if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
-  } catch {
-    // 忽略
-  }
-  return 100;
-}
 
 type Tab = "stock" | "issues";
 
@@ -64,13 +50,27 @@ export function StockScreen({ onChanged }: { onChanged?: () => void }) {
               ["stock", "库存结存"],
               ["issues", "数据核对"],
             ] as const
-          ).map(([id, label]) => (
+          ).map(([id, label], index, all) => (
             <button
               key={id}
               role="tab"
               type="button"
+              id={`stock-tab-${id}`}
               aria-selected={tab === id}
+              aria-controls={`stock-panel-${id}`}
+              // roving tabindex：Tab 键进入这一组时只停在当前选中的那个 tab 上，
+              // 组内切换交给左右方向键（WAI-ARIA tabs 模式）。
+              tabIndex={tab === id ? 0 : -1}
               onClick={() => setTab(id)}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                e.preventDefault();
+                const step = e.key === "ArrowRight" ? 1 : -1;
+                const next = all[(index + step + all.length) % all.length][0];
+                setTab(next);
+                // 焦点跟着选中项走，键盘用户可以继续用方向键连续切换
+                document.getElementById(`stock-tab-${next}`)?.focus();
+              }}
               className={
                 "h-8 rounded-lg px-3 text-body-2-medium transition-colors " +
                 (tab === id
@@ -83,7 +83,15 @@ export function StockScreen({ onChanged }: { onChanged?: () => void }) {
           ))}
         </div>
 
-        {tab === "stock" ? <StockTable /> : <IssueList />}
+        {tab === "stock" ? (
+          <div role="tabpanel" id="stock-panel-stock" aria-labelledby="stock-tab-stock" tabIndex={-1}>
+            <StockTable />
+          </div>
+        ) : (
+          <div role="tabpanel" id="stock-panel-issues" aria-labelledby="stock-tab-issues" tabIndex={-1}>
+            <IssueList />
+          </div>
+        )}
       </div>
     </>
   );
@@ -97,7 +105,7 @@ function StockTable() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [pageSize, setPageSize] = useState<number>(() => storedPageSize());
+  const [pageSize, setPageSize] = useStoredPageSize(PAGE_SIZE_KEY, PAGE_SIZES, 100);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageIndex = Math.min(pageCount, Math.floor(offset / pageSize) + 1);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -152,11 +160,54 @@ function StockTable() {
     return { inQty, outQty, stock: inQty - outQty };
   }, [rows]);
 
-  const exportCsv = () => {
-    // 直接下 CSV：这条报表是给人对账用的，能丢进 Excel 比什么都实在
+  const [exporting, setExporting] = useState(false);
+
+  /**
+   * 导出 CSV。
+   *
+   * `all=false` 只导当前页（按钮原本就是这个语义）；`all=true` 按当前筛选
+   * 分页把结果全部取回再拼——库存对账通常需要全量，只给当前页容易被误当全量。
+   * 文件名统一走 `exportFileName`，取本地日期而不是 UTC（跨零点导出时才对得上）。
+   */
+  const exportCsv = async (all: boolean) => {
+    let data = rows;
+    if (all) {
+      setExporting(true);
+      try {
+        const collected: StockRow[] = [];
+        const pageSize = 2000;
+        for (let offset = 0; ; offset += pageSize) {
+          const batch = await fetchStockReport({
+            keyword: debouncedKeyword || undefined,
+            onlyNegative,
+            limit: pageSize,
+            offset,
+          });
+          collected.push(...batch);
+          if (batch.length < pageSize) break;
+        }
+        data = collected;
+      } catch (err) {
+        toast("导出失败", { description: String(err), status: "error" });
+        return;
+      } finally {
+        setExporting(false);
+      }
+    }
+    // 这条报表是给人对账用的，能丢进 Excel 比什么都实在
     const header = ["物料编码", "物料名称", "库位", "规格型号", "单位", "入库数量", "出库数量", "结存", "最近日期"];
-    const lines = rows.map((row) =>
-      [row.itemCode, row.itemName, row.location ?? "", row.spec ?? "", row.unit ?? "", row.inQty, row.outQty, row.stockQty, row.lastDate ?? ""]
+    const lines = data.map((row) =>
+      [
+        row.itemCode,
+        row.itemName,
+        row.location ?? "",
+        row.spec ?? "",
+        row.unit ?? "",
+        row.inQty,
+        row.outQty,
+        row.stockQty,
+        row.lastDate ?? "",
+      ]
         .map(csvCell)
         .join(","),
     );
@@ -165,10 +216,13 @@ function StockTable() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `库存结存_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = exportFileName("库存结存");
     a.click();
     URL.revokeObjectURL(url);
-    toast("已导出当前页", { description: `${count(rows.length)} 行`, status: "success" });
+    toast(all ? "已导出全部筛选结果" : "已导出当前页", {
+      description: `${count(data.length)} 行`,
+      status: "success",
+    });
   };
 
   return (
@@ -197,12 +251,26 @@ function StockTable() {
           只看负库存
         </button>
         {loading ? <Spinner size="xs" aria-label="加载中" /> : null}
-        <span className="text-body-2-regular text-text-tertiary">
-          共 {count(total)} 个物料
-        </span>
+        <span className="text-body-2-regular text-text-tertiary">共 {count(total)} 个物料</span>
         <div className="ms-auto flex items-center gap-2">
-          <Button size="small" variant="secondary" leadingIcon={RiDownload2Line} onClick={exportCsv} disabled={rows.length === 0}>
+          <Button
+            size="small"
+            variant="secondary"
+            leadingIcon={RiDownload2Line}
+            onClick={() => void exportCsv(false)}
+            disabled={rows.length === 0 || exporting}
+          >
             导出本页 CSV
+          </Button>
+          <Button
+            size="small"
+            variant="secondary"
+            leadingIcon={RiDownload2Line}
+            onClick={() => void exportCsv(true)}
+            disabled={total === 0 || exporting}
+            title="按当前筛选（关键字 / 只看负库存）导出全部物料，不只是这一页"
+          >
+            {exporting ? "导出中…" : "导出全部"}
           </Button>
           <Button size="small" variant="ghost" leadingIcon={RiRefreshLine} onClick={load} disabled={loading}>
             刷新
@@ -210,7 +278,10 @@ function StockTable() {
         </div>
       </div>
 
-      <div ref={tableRef} className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default">
+      <div
+        ref={tableRef}
+        className="overflow-x-auto rounded-xl border border-border-button-default bg-background-primary-default"
+      >
         <table className="w-full min-w-[1170px] table-fixed border-collapse text-[0.8125rem]">
           <thead>
             <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
@@ -238,22 +309,38 @@ function StockTable() {
               </tr>
             ) : (
               rows.map((row) => (
-                <tr key={row.itemCode} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover">
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary" title={row.itemCode}>
+                <tr
+                  key={row.itemCode}
+                  className="border-b border-separator-border last:border-0 hover:bg-background-secondary-hover"
+                >
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-secondary"
+                    title={row.itemCode}
+                  >
                     {row.itemCode}
                   </td>
                   <td className="truncate px-3 py-1.5 text-text-primary" title={row.itemName}>
                     {row.itemName}
                   </td>
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={row.location ?? ""}>
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={row.location ?? ""}
+                  >
                     {row.location ?? "—"}
                   </td>
-                  <td className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary" title={row.spec ?? ""}>
+                  <td
+                    className="truncate whitespace-nowrap px-3 py-1.5 font-mono text-[0.75rem] text-text-tertiary"
+                    title={row.spec ?? ""}
+                  >
                     {row.spec ?? "—"}
                   </td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-text-tertiary">{row.unit ?? "—"}</td>
-                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{qty(row.inQty)}</td>
-                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">{qty(row.outQty)}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
+                    {qty(row.inQty)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
+                    {qty(row.outQty)}
+                  </td>
                   <td
                     className={
                       "whitespace-nowrap px-3 py-1.5 text-end font-mono tabular-nums font-medium " +
@@ -285,13 +372,7 @@ function StockTable() {
               aria-label="每页条数"
               value={pageSize}
               onChange={(e) => {
-                const next = Number(e.target.value);
-                setPageSize(next);
-                try {
-                  window.localStorage.setItem(PAGE_SIZE_KEY, String(next));
-                } catch {
-                  // 忽略
-                }
+                setPageSize(Number(e.target.value));
                 setOffset(0);
                 tableRef.current?.scrollTo({ top: 0 });
               }}
@@ -353,10 +434,7 @@ function IssueList() {
     load();
   }, [load]);
 
-  const shown = useMemo(
-    () => (filter === "all" ? issues : issues.filter((i) => i.kind === filter)),
-    [issues, filter],
-  );
+  const shown = useMemo(() => (filter === "all" ? issues : issues.filter((i) => i.kind === filter)), [issues, filter]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -531,7 +609,11 @@ function IssueStat({
     <div className="bg-background-primary-default px-5 py-4">
       <p className="text-caption-1-semibold text-text-tertiary">{label}</p>
       <p className="mt-1 flex items-baseline gap-1">
-        <span className={"font-mono text-title-3-semibold tabular-nums " + (tone === "warn" ? "text-amber-500" : "text-text-primary")}>
+        <span
+          className={
+            "font-mono text-title-3-semibold tabular-nums " + (tone === "warn" ? "text-amber-500" : "text-text-primary")
+          }
+        >
           {value}
         </span>
         <span className="text-caption-1-regular text-text-tertiary">{unit}</span>
@@ -645,9 +727,7 @@ function FillCodeDialog({
               </label>
             </div>
 
-            <p className="text-caption-1-regular text-text-tertiary">
-              只改编码、名称、单位；数量和金额保持原样。
-            </p>
+            <p className="text-caption-1-regular text-text-tertiary">只改编码、名称、单位；数量和金额保持原样。</p>
           </ModalBody>
           <ModalFooter>
             <Button size="small" variant="secondary" onClick={close} disabled={saving}>

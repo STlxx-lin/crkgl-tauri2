@@ -278,9 +278,7 @@ pub fn delete(conn: &Connection, id: i64) -> DbResult<()> {
         })?;
     let used = usage_count(conn, &kind, &value);
     if used > 0 {
-        return Err(format!(
-            "「{value}」还有 {used} 行在用，先停用或改名，别直接删"
-        ));
+        return Err(format!("「{value}」还有 {used} 行在用，先停用或改名，别直接删"));
     }
     conn.execute("DELETE FROM dict WHERE id = ?1", [id])
         .map_err(DbError::from)?;
@@ -369,19 +367,11 @@ pub fn sync_from_data(conn: &Connection) -> DbResult<usize> {
 /// 字典导出：按类别导出当前筛选结果，列头用中文类别名。
 ///
 /// 复用 `list`，导出的就是屏幕上那一批（含「只看在用」的取舍）。
-pub fn export_csv(
-    conn: &Connection,
-    kind: &str,
-    keyword: Option<&str>,
-    only_active: bool,
-) -> DbResult<(String, i64)> {
+pub fn export_csv(conn: &Connection, kind: &str, keyword: Option<&str>, only_active: bool) -> DbResult<(String, i64)> {
     let rows = list(conn, kind, keyword, only_active)?;
     let mut out = String::from("\u{feff}");
     // 第一列列名跟着类别走，导进 Excel 一眼能看出这是哪本字典
-    out.push_str(&format!(
-        "{},使用行数,排序,备注,状态\n",
-        kind_label(kind)
-    ));
+    out.push_str(&format!("{},使用行数,排序,备注,状态\n", kind_label(kind)));
     for entry in &rows {
         let fields = [
             entry.value.clone(),
@@ -522,17 +512,25 @@ mod tests {
         let (ledger_old, ledger_new): (i64, i64) = db
             .with(|c| {
                 Ok((
-                    c.query_row("SELECT COUNT(*) FROM ledger WHERE owner='乾力车间'", [], |r| r.get(0))
-                        .map_err(DbError::from)?,
-                    c.query_row("SELECT COUNT(*) FROM ledger WHERE owner='乾力总装车间'", [], |r| r.get(0))
-                        .map_err(DbError::from)?,
+                    c.query_row("SELECT COUNT(*) FROM ledger WHERE owner='乾力车间'", [], |r| {
+                        r.get(0)
+                    })
+                    .map_err(DbError::from)?,
+                    c.query_row(
+                        "SELECT COUNT(*) FROM ledger WHERE owner='乾力总装车间'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(DbError::from)?,
                 ))
             })
             .unwrap();
         let voucher_owner: String = db
             .with(|c| {
-                c.query_row("SELECT owner FROM vouchers WHERE doc_no='20250101001'", [], |r| r.get(0))
-                    .map_err(DbError::from)
+                c.query_row("SELECT owner FROM vouchers WHERE doc_no='20250101001'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(DbError::from)
             })
             .unwrap();
         // 台账与单据头同一次改名里都跟着走，不能一个新一个旧

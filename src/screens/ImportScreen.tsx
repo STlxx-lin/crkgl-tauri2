@@ -9,22 +9,8 @@ import {
   RiRefreshLine,
   RiUploadCloud2Line,
 } from "@remixicon/react";
-import {
-  deleteImport,
-  importHistory,
-  inspectWorkbook,
-  isTauri,
-  previewImport,
-  runImport,
-} from "../lib/api";
-import type {
-  ImportOutcome,
-  ImportRecord,
-  PreviewResult,
-  SheetPlan,
-  SheetReport,
-  WorkbookReport,
-} from "../lib/types";
+import { deleteImport, importHistory, inspectWorkbook, isTauri, previewImport, runImport } from "../lib/api";
+import type { ImportOutcome, ImportRecord, PreviewResult, SheetPlan, SheetReport, WorkbookReport } from "../lib/types";
 import { amount, count, date, fileSize, flagLabel, kindLabel, qty } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { Select, SelectItem } from "@/components/base/select/select";
@@ -77,9 +63,7 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
   // 月度进销存宽表：一行一物料 + 逐日网格，由后端拆成流水，也不参与列映射
   const pivotSheets = report?.sheets.filter((sheet) => sheet.pivot) ?? [];
   const pivotMonths = new Set(
-    pivotSheets
-      .map((sheet) => sheet.pivotInfo?.month)
-      .filter((month): month is number => typeof month === "number"),
+    pivotSheets.map((sheet) => sheet.pivotInfo?.month).filter((month): month is number => typeof month === "number"),
   );
   // 单据模板、空表、库存结存这类，既不进台账也不进基础资料，只列名字说明为什么跳过
   const skippedSheets = report?.sheets.filter((sheet) => !sheet.master && !sheet.detail && !sheet.pivot) ?? [];
@@ -105,7 +89,10 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
 
   const openFile = async () => {
     if (!isTauri) {
-      toast("只读站不能导入", { description: "请在桌面端导入 Excel，局域网其他人看到的是同一份数据。", status: "error" });
+      toast("只读站不能导入", {
+        description: "请在桌面端导入 Excel，局域网其他人看到的是同一份数据。",
+        status: "error",
+      });
       return;
     }
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -310,7 +297,9 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
                 <RiFileExcel2Line className="size-4 text-text-secondary" aria-hidden />
                 {report.fileName}
               </span>
-              <span className="font-mono text-caption-1-regular tabular-nums text-text-tertiary">{fileSize(report.sizeBytes)}</span>
+              <span className="font-mono text-caption-1-regular tabular-nums text-text-tertiary">
+                {fileSize(report.sizeBytes)}
+              </span>
               <span className="font-mono text-caption-1-regular tabular-nums text-text-tertiary">
                 {report.sheets.length} 张表 · 认出 {report.sheets.filter((sheet) => sheet.detail).length} 张明细表
                 {masterSheets.length > 0 ? ` · ${masterSheets.length} 张基础资料表` : ""}
@@ -393,9 +382,7 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
               </span>
             </div>
 
-            {preview ? (
-              <PreviewPanel preview={preview} onImport={doImport} busy={busy} />
-            ) : null}
+            {preview ? <PreviewPanel preview={preview} onImport={doImport} busy={busy} /> : null}
           </div>
         ) : null}
 
@@ -430,13 +417,22 @@ export function ImportScreen({ onImported }: { onImported: () => void }) {
                 <tbody>
                   {history.map((record) => (
                     <tr key={record.id} className="border-b border-separator-border last:border-0">
-                      <td className="max-w-[320px] truncate px-5 py-2.5 text-text-primary" title={`${record.fileName} · ${record.note ?? ""}`}>
+                      <td
+                        className="max-w-[320px] truncate px-5 py-2.5 text-text-primary"
+                        title={`${record.fileName} · ${record.note ?? ""}`}
+                      >
                         {record.fileName}
                       </td>
                       <td className="px-3 py-2.5 font-mono tabular-nums text-text-tertiary">{record.importedAt}</td>
-                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-secondary">{count(record.rowCount)}</td>
-                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-tertiary">{count(record.skippedCount)}</td>
-                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-primary">{count(record.liveRows)}</td>
+                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-secondary">
+                        {count(record.rowCount)}
+                      </td>
+                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-tertiary">
+                        {count(record.skippedCount)}
+                      </td>
+                      <td className="px-3 py-2.5 text-end font-mono tabular-nums text-text-primary">
+                        {count(record.liveRows)}
+                      </td>
                       <td className="px-5 py-2.5 text-end">
                         <Button
                           size="small"
@@ -531,11 +527,15 @@ function SheetCard({
         />
         <span className="text-body-medium text-text-primary">{sheet.name}</span>
         {isIn ? (
-          <span className="rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500">入库</span>
+          <span className="rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500">
+            入库
+          </span>
         ) : isOut ? (
           <span className="rounded-md bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400">出库</span>
         ) : (
-          <span className="rounded-md bg-background-secondary-default px-1.5 py-0.5 text-caption-1-semibold text-text-tertiary">未定方向</span>
+          <span className="rounded-md bg-background-secondary-default px-1.5 py-0.5 text-caption-1-semibold text-text-tertiary">
+            未定方向
+          </span>
         )}
         <span className="font-mono text-caption-1-regular tabular-nums text-text-tertiary">
           {count(sheet.nonEmptyRows)} 行 · {sheet.note}
@@ -562,7 +562,10 @@ function SheetCard({
                 key={header.column}
                 className="flex flex-col gap-1 rounded-lg border border-separator-border bg-background-secondary-default px-2 py-1.5"
               >
-                <span className="max-w-[140px] truncate text-caption-1-regular text-text-tertiary" title={header.header}>
+                <span
+                  className="max-w-[140px] truncate text-caption-1-regular text-text-tertiary"
+                  title={header.header}
+                >
                   {header.header}
                 </span>
                 <Select
@@ -586,7 +589,9 @@ function SheetCard({
               </label>
             ))}
           </div>
-          {!mapped.includes("doc_date") || !mapped.includes("qty") || !(mapped.includes("item_name") || mapped.includes("item_code")) ? (
+          {!mapped.includes("doc_date") ||
+          !mapped.includes("qty") ||
+          !(mapped.includes("item_name") || mapped.includes("item_code")) ? (
             <p className="text-caption-1-regular text-amber-500">
               至少要指定：日期、数量，以及物料编码或物料名称，否则这张表不能用。
             </p>
@@ -618,7 +623,9 @@ function PivotPanel({
   const totalFlows = sheets.reduce((sum, sheet) => sum + (sheet.pivotInfo?.flowCells ?? 0), 0);
   const totalFiller = sheets.reduce((sum, sheet) => sum + (sheet.pivotInfo?.fillerRows ?? 0), 0);
   const unnamed = sheets.filter((sheet) => sheet.pivotInfo && sheet.pivotInfo.month === null);
-  const years = [year - 1, year, year + 1].filter((value, index, all) => all.indexOf(value) === index).sort((a, b) => b - a);
+  const years = [year - 1, year, year + 1]
+    .filter((value, index, all) => all.indexOf(value) === index)
+    .sort((a, b) => b - a);
 
   return (
     <div className="rounded-2xl border border-border-button-default bg-background-primary-default">
@@ -695,9 +702,15 @@ function PreviewPanel({
     <div className="flex flex-col gap-3 rounded-2xl border border-border-button-default bg-background-primary-default p-4">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <h2 className="text-title-4-semibold text-text-primary">核对结果</h2>
-        <span className="font-mono text-body-2-medium tabular-nums text-text-secondary">{count(preview.totalRows)} 行可导入</span>
-        <span className="font-mono text-body-2-regular tabular-nums text-text-tertiary">{count(preview.flaggedRows)} 行带提醒</span>
-        <span className="font-mono text-body-2-regular tabular-nums text-text-tertiary">{count(preview.totalIssues)} 条问题</span>
+        <span className="font-mono text-body-2-medium tabular-nums text-text-secondary">
+          {count(preview.totalRows)} 行可导入
+        </span>
+        <span className="font-mono text-body-2-regular tabular-nums text-text-tertiary">
+          {count(preview.flaggedRows)} 行带提醒
+        </span>
+        <span className="font-mono text-body-2-regular tabular-nums text-text-tertiary">
+          {count(preview.totalIssues)} 条问题
+        </span>
       </div>
 
       {preview.sheets.map((sheet) => (
@@ -724,7 +737,8 @@ function PreviewPanel({
                   <span className="text-amber-500">结存校正(JZ) {count(sheet.pivotSummary.correctionRows)} 笔</span>
                 ) : null}
                 <span className="text-text-tertiary">
-                  基础资料 {count(sheet.pivotSummary.totalItems)} 个物料（带库位 {count(sheet.pivotSummary.locatedItems)} 个）
+                  基础资料 {count(sheet.pivotSummary.totalItems)} 个物料（带库位{" "}
+                  {count(sheet.pivotSummary.locatedItems)} 个）
                 </span>
               </div>
               {sheet.pivotSummary.corrections.length > 0 ? (
@@ -753,7 +767,10 @@ function PreviewPanel({
               </thead>
               <tbody>
                 {sheet.sample.map((row, index) => (
-                  <tr key={`${row.sheet}-${row.docNo}-${row.rowNo}-${index}`} className="border-t border-separator-border">
+                  <tr
+                    key={`${row.sheet}-${row.docNo}-${row.rowNo}-${index}`}
+                    className="border-t border-separator-border"
+                  >
                     <td className="px-3 py-1.5 font-mono tabular-nums text-text-secondary">{date(row.docDate)}</td>
                     <td className="px-3 py-1.5 font-mono tabular-nums text-text-tertiary">{row.docNo || "—"}</td>
                     <td className="px-3 py-1.5 font-mono text-text-secondary" title={row.itemCode}>
@@ -762,15 +779,16 @@ function PreviewPanel({
                     <td className="max-w-[220px] truncate px-3 py-1.5 text-text-primary" title={row.itemName}>
                       {row.itemName || "—"}
                     </td>
-                    <td className="max-w-[120px] truncate px-3 py-1.5 font-mono text-text-tertiary" title={row.location}>
+                    <td
+                      className="max-w-[120px] truncate px-3 py-1.5 font-mono text-text-tertiary"
+                      title={row.location}
+                    >
                       {row.location || "—"}
                     </td>
                     <td className="max-w-[140px] truncate px-3 py-1.5 font-mono text-text-tertiary" title={row.spec}>
                       {row.spec || "—"}
                     </td>
-                    <td className="px-3 py-1.5 text-text-tertiary">
-                      {row.unit || "—"}
-                    </td>
+                    <td className="px-3 py-1.5 text-text-tertiary">{row.unit || "—"}</td>
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
                       {/* 与台账共用同一套格式化：预览里的数字必须和落库后看到的一致，
                           否则用户在核对阶段会以为导入算错了 */}
@@ -779,7 +797,10 @@ function PreviewPanel({
                     <td className="px-3 py-1.5 text-end font-mono tabular-nums text-text-secondary">
                       {amount(row.amountCents)}
                     </td>
-                    <td className="max-w-[220px] truncate px-3 py-1.5 text-[0.6875rem] text-text-tertiary" title={row.remark}>
+                    <td
+                      className="max-w-[220px] truncate px-3 py-1.5 text-[0.6875rem] text-text-tertiary"
+                      title={row.remark}
+                    >
                       {row.flags.length > 0 ? (
                         <span className="text-amber-500">{row.flags.map(flagLabel).join(" · ")} </span>
                       ) : null}
@@ -866,7 +887,8 @@ function OutcomePanel({
       </div>
       {outcome.duplicateOf ? (
         <p className="text-caption-1-regular text-amber-500">
-          这个文件之前导入过（批次 #{outcome.duplicateOf}），本次是显式允许的重复导入。台账行、库存结存与汇总金额可能已经翻倍，请核对后再决定是否删掉其中一批。
+          这个文件之前导入过（批次 #{outcome.duplicateOf}
+          ），本次是显式允许的重复导入。台账行、库存结存与汇总金额可能已经翻倍，请核对后再决定是否删掉其中一批。
         </p>
       ) : null}
       <ul className="flex flex-wrap gap-x-4 gap-y-1 text-body-2-regular text-text-secondary">

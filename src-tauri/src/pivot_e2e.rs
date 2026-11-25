@@ -59,8 +59,14 @@ fn e2e_real_workbook() {
         if let Some(info) = &sheet.pivot_info {
             println!(
                 "  {} → 月 {:?} 天{} 物料{} 填充行{} 进出{} 期初{} 结存{}",
-                sheet.name, info.month, info.days, info.items, info.filler_rows,
-                info.flow_cells, info.opening_items, info.closing_items
+                sheet.name,
+                info.month,
+                info.days,
+                info.items,
+                info.filler_rows,
+                info.flow_cells,
+                info.opening_items,
+                info.closing_items
             );
         }
     }
@@ -77,9 +83,7 @@ fn e2e_real_workbook() {
     let by_doc: Vec<(String, i64)> = db
         .with(|c| {
             let mut stmt = c
-                .prepare(
-                    "SELECT COALESCE(doc_no,''), COUNT(*) FROM ledger GROUP BY doc_no ORDER BY 1",
-                )
+                .prepare("SELECT COALESCE(doc_no,''), COUNT(*) FROM ledger GROUP BY doc_no ORDER BY 1")
                 .map_err(crate::db::DbError::from)?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
@@ -116,10 +120,7 @@ fn e2e_real_workbook() {
 
     // 源表 12 月现结存，从缓存宽表读回来
     let (_, pivot_sheets) = crate::import::inspect_and_collect_cached(path).expect("cached");
-    let parsed = pivot_sheets
-        .iter()
-        .find(|s| s.month == Some(12))
-        .expect("parse 12月");
+    let parsed = pivot_sheets.iter().find(|s| s.month == Some(12)).expect("parse 12月");
     let expected: std::collections::BTreeMap<String, f64> = parsed
         .items
         .iter()
@@ -166,18 +167,14 @@ fn e2e_real_workbook() {
                 )
                 .map_err(crate::db::DbError::from)?;
             let typed: i64 = c
-                .query_row(
-                    "SELECT COUNT(*) FROM items WHERE item_type = '外购件'",
-                    [],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM items WHERE item_type = '外购件'", [], |r| {
+                    r.get(0)
+                })
                 .map_err(crate::db::DbError::from)?;
             let wg00002: (Option<String>, Option<String>) = c
-                .query_row(
-                    "SELECT unit, spec FROM items WHERE item_code = 'WG00002'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
+                .query_row("SELECT unit, spec FROM items WHERE item_code = 'WG00002'", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .map_err(crate::db::DbError::from)?;
             Ok((items, located, typed, wg00002))
         })
@@ -211,7 +208,10 @@ fn benchmark_all_imports() {
         let t_inspect = t0.elapsed();
         println!("inspect 耗时: {:?}", t_inspect);
         for s in &rep.sheets {
-            println!("  sheet: {} detail={} master={} pivot={}", s.name, s.detail, s.master, s.pivot);
+            println!(
+                "  sheet: {} detail={} master={} pivot={}",
+                s.name, s.detail, s.master, s.pivot
+            );
         }
 
         let t1 = Instant::now();
@@ -226,9 +226,14 @@ fn benchmark_all_imports() {
         println!("run 写入台账耗时: {:?} (导入 {} 行)", t_run, out.rows);
 
         let t3 = Instant::now();
-        let ms = db.with(|c| crate::master::import_from_workbook(c, path_flow).map_err(crate::db::DbError)).expect("master");
+        let ms = db
+            .with(|c| crate::master::import_from_workbook(c, path_flow).map_err(crate::db::DbError))
+            .expect("master");
         let t_master = t3.elapsed();
-        println!("master 导入主数据耗时: {:?} (物料 +{} 更新{})", t_master, ms.items_added, ms.items_updated);
+        println!(
+            "master 导入主数据耗时: {:?} (物料 +{} 更新{})",
+            t_master, ms.items_added, ms.items_updated
+        );
     }
 
     if flow.is_none() {

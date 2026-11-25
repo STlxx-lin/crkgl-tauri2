@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RiArrowDownSFill, RiArrowUpSFill, RiDatabase2Line, RiRefreshLine, RiServerLine } from "@remixicon/react";
 import { cx } from "@/utils/cx";
-import { bootstrap, fetchFacets, isTauri } from "./lib/api";
+import { bootstrap, fetchFacets, isTauri, readonly } from "./lib/api";
 import type { BootstrapInfo } from "./lib/types";
 import { count } from "./lib/format";
 import { Button } from "@/components/base/buttons/button";
@@ -78,7 +78,7 @@ export default function App() {
   }, [load]);
 
   const nav = useMemo(() => {
-    if (!isTauri) {
+    if (readonly) {
       // 只读站只给能看的页：开单、导入、只读站设置都需要桌面端
       return [
         { key: "ledger" as PageKey, label: "台账" },
@@ -124,7 +124,7 @@ export default function App() {
         page={page}
         onPage={setPage}
         nav={nav}
-        remote={!isTauri}
+        remote={readonly}
         footer={
           isTauri ? (
             <div className="flex flex-col gap-3">
@@ -149,7 +149,9 @@ export default function App() {
               </div>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-caption-1-semibold text-text-tertiary">台账</span>
-                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">{count(rows || ledgerRows)} 行</span>
+                <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                  {count(rows || ledgerRows)} 行
+                </span>
               </div>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-caption-1-semibold text-text-tertiary">日期</span>

@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  RiExternalLinkLine,
-  RiPlayCircleLine,
-  RiRefreshLine,
-  RiServerLine,
-} from "@remixicon/react";
+import { RiExternalLinkLine, RiPlayCircleLine, RiRefreshLine, RiServerLine } from "@remixicon/react";
 import { accessLog, startWeb, stopWeb, webStatus } from "../lib/api";
 import type { AccessEntry, BootstrapInfo, WebStatus } from "../lib/types";
 import { count, shortTs } from "../lib/format";
@@ -98,9 +93,15 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
             </div>
 
             <dl className="flex flex-col gap-2 text-body-2-regular">
-              <Row label="状态" value={listening ? `正在监听 ${status?.port} 端口` : status?.error ? "未监听（端口占用）" : "未开启"} />
+              <Row
+                label="状态"
+                value={listening ? `正在监听 ${status?.port} 端口` : status?.error ? "未监听（端口占用）" : "未开启"}
+              />
               <Row label="端口" value={`${status?.port ?? 80}（请求 ${status?.requestedPort ?? 80}）`} />
-              <Row label="只读页面" value={status?.staticReady ? "已随程序打包" : "缺少 dist-remote（开发时先 npm run build:remote）"} />
+              <Row
+                label="只读页面"
+                value={status?.staticReady ? "已随程序打包" : "缺少 dist-remote（开发时先 npm run build:remote）"}
+              />
               <Row label="启动时间" value={status?.startedAt ?? "—"} />
             </dl>
 
@@ -126,7 +127,9 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
                       key={url}
                       className="flex items-center gap-2 rounded-lg border border-separator-border bg-background-secondary-default px-3 py-2"
                     >
-                      <code className="min-w-0 flex-1 truncate font-mono text-body-2-medium text-text-primary">{url}</code>
+                      <code className="min-w-0 flex-1 truncate font-mono text-body-2-medium text-text-primary">
+                        {url}
+                      </code>
                       {isHostName ? (
                         <span
                           className="shrink-0 rounded bg-accent-500/12 px-1.5 py-0.5 text-caption-1-semibold text-accent-500"
@@ -154,7 +157,8 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
               <div className="flex items-start gap-2 rounded-lg border border-separator-border bg-background-secondary-default px-3 py-2">
                 <RiPlayCircleLine className="mt-0.5 size-4 text-text-tertiary" aria-hidden />
                 <p className="text-caption-1-regular text-text-tertiary">
-                  打开开关后，同一局域网的人用浏览器就能查台账、筛条件、导 CSV。他们看不到导入与删除按钮，接口层也没有写入口。
+                  打开开关后，同一局域网的人用浏览器就能查台账、筛条件、导
+                  CSV。他们看不到导入与删除按钮，接口层也没有写入口。
                 </p>
               </div>
             )}
@@ -173,7 +177,9 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
             <div className="flex items-baseline justify-between gap-2 px-5 pb-3 pt-4">
               <h2 className="text-title-4-semibold text-text-primary">访问记录</h2>
-              <span className="text-caption-1-regular text-text-tertiary">最近 {count(entries.length)} 条 · 每 5 秒刷新</span>
+              <span className="text-caption-1-regular text-text-tertiary">
+                最近 {count(entries.length)} 条 · 每 5 秒刷新
+              </span>
             </div>
             {entries.length === 0 ? (
               <div className="px-5 pb-10 pt-2">
@@ -193,8 +199,12 @@ export function RemoteScreen({ boot, onChanged }: { boot: BootstrapInfo | null; 
                   <tbody>
                     {entries.map((entry, index) => (
                       <tr key={`${entry.at}-${entry.ip}-${index}`} className="border-b border-separator-border">
-                        <td className="whitespace-nowrap px-5 py-1.5 font-mono tabular-nums text-text-tertiary">{shortTs(entry.at)}</td>
-                        <td className="whitespace-nowrap px-3 py-1.5 font-mono tabular-nums text-text-secondary">{entry.ip}</td>
+                        <td className="whitespace-nowrap px-5 py-1.5 font-mono tabular-nums text-text-tertiary">
+                          {shortTs(entry.at)}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-1.5 font-mono tabular-nums text-text-secondary">
+                          {entry.ip}
+                        </td>
                         <td className="truncate px-3 py-1.5 font-mono text-text-secondary">{entry.path}</td>
                         <td
                           className={

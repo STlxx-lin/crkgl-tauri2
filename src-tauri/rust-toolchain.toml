@@ -1,2 +1,5 @@
 [toolchain]
 channel = "1.90.0"
+# CI 与本地都要跑 fmt / clippy，把组件写进这里，rustup 装工具链时一并装上，
+# 不用再单独 `rustup component add`。
+components = ["rustfmt", "clippy"]

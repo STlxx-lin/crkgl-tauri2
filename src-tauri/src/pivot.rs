@@ -77,17 +77,15 @@ fn norm(value: &str) -> String {
 }
 
 fn find_col(header: &[String], exact: &[&str]) -> Option<usize> {
-    header
-        .iter()
-        .position(|cell| exact.iter().any(|want| *cell == *want))
+    header.iter().position(|cell| exact.iter().any(|want| *cell == *want))
 }
 
 /// 「盘点差异数调整」这一列：表头写法不统一（有的中间还夹个「数」字），
 /// 不能整词匹配，只能同时要求「调整」和「盘点/差异」。
 fn find_adjust_col(header: &[String]) -> Option<usize> {
-    header.iter().position(|cell| {
-        cell.contains("调整") && (cell.contains("盘点") || cell.contains("差异"))
-    })
+    header
+        .iter()
+        .position(|cell| cell.contains("调整") && (cell.contains("盘点") || cell.contains("差异")))
 }
 
 /// 从头部若干行猜版式。认不出返回 `None`。
@@ -125,8 +123,8 @@ pub fn detect(rows: &[Vec<String>]) -> Option<PivotLayout> {
         }
 
         // 11 月那页的「物料编码」表头被删过，用「名称」左边一格兜底。
-        let code_col = find_col(&header, &["物料编码", "编码", "物料编号", "物料号"])
-            .or_else(|| name_col.checked_sub(1));
+        let code_col =
+            find_col(&header, &["物料编码", "编码", "物料编号", "物料号"]).or_else(|| name_col.checked_sub(1));
         let adj_in_col = find_adjust_col(&header);
 
         let layout = PivotLayout {
@@ -202,7 +200,10 @@ pub struct PivotSheet {
 
 /// 「1月」「12 月」「1 月 库  存  进  销  存  报  表」→ Some(1)。
 pub fn month_from_text(text: &str) -> Option<u32> {
-    let compact: String = text.chars().filter(|c| !c.is_whitespace() && *c != '\u{3000}').collect();
+    let compact: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\u{3000}')
+        .collect();
     let head = compact.split('库').next().unwrap_or(&compact);
     if !head.contains('月') {
         return None;
@@ -212,10 +213,7 @@ pub fn month_from_text(text: &str) -> Option<u32> {
 }
 
 fn cell_at(row: &[Data], index: Option<usize>) -> String {
-    index
-        .and_then(|i| row.get(i))
-        .map(cell_text)
-        .unwrap_or_default()
+    index.and_then(|i| row.get(i)).map(cell_text).unwrap_or_default()
 }
 
 fn num_at(row: &[Data], index: Option<usize>) -> Option<f64> {
@@ -261,7 +259,9 @@ pub fn read_sheet(sheet_name: &str, rows: &[&[Data]]) -> Option<PivotSheet> {
         ..Default::default()
     };
     if sheet.month.is_none() {
-        sheet.issues.push("表名认不出月份（应为「1月」~「12月」），这张表跳过".into());
+        sheet
+            .issues
+            .push("表名认不出月份（应为「1月」~「12月」），这张表跳过".into());
         return Some(sheet);
     }
 
@@ -290,9 +290,9 @@ pub fn read_sheet(sheet_name: &str, rows: &[&[Data]]) -> Option<PivotSheet> {
                 continue;
             }
             // 名称是真的但没有编码：不能当流水，提醒一句
-            sheet.issues.push(format!(
-                "第 {row_no} 行「{name}」没有物料编码，跳过（不计入结存）"
-            ));
+            sheet
+                .issues
+                .push(format!("第 {row_no} 行「{name}」没有物料编码，跳过（不计入结存）"));
             continue;
         }
 
@@ -334,10 +334,26 @@ pub fn read_sheet(sheet_name: &str, rows: &[&[Data]]) -> Option<PivotSheet> {
         sheet.items.push(PivotItem {
             row_no,
             code: code.trim().to_string(),
-            name: if is_filler(&name) { String::new() } else { name.trim().to_string() },
-            location: if is_filler(&location) { String::new() } else { location.trim().to_string() },
-            spec: if is_filler(&spec) { String::new() } else { spec.trim().to_string() },
-            unit: if is_filler(&unit) { String::new() } else { unit.trim().to_string() },
+            name: if is_filler(&name) {
+                String::new()
+            } else {
+                name.trim().to_string()
+            },
+            location: if is_filler(&location) {
+                String::new()
+            } else {
+                location.trim().to_string()
+            },
+            spec: if is_filler(&spec) {
+                String::new()
+            } else {
+                spec.trim().to_string()
+            },
+            unit: if is_filler(&unit) {
+                String::new()
+            } else {
+                unit.trim().to_string()
+            },
             opening: num_at(row, layout.open_col),
             in_total: num_at(row, layout.in_col),
             out_total: num_at(row, layout.out_col),
@@ -744,21 +760,14 @@ pub fn upsert_items(conn: &Connection, items: &[PivotItemDef]) -> DbResult<(usiz
 ///
 /// 台账与基础资料必须同进同退：宽表导入时两者来自同一批行，台账成功而物料
 /// 失败会让库存页出现一堆「无库位/无规格」的物料，用户以为导入没生效。
-pub fn upsert_items_tx(
-    tx: &rusqlite::Transaction<'_>,
-    items: &[PivotItemDef],
-) -> DbResult<(usize, usize)> {
+pub fn upsert_items_tx(tx: &rusqlite::Transaction<'_>, items: &[PivotItemDef]) -> DbResult<(usize, usize)> {
     upsert_items_in(tx, items)
 }
 
-fn upsert_items_in(
-    tx: &rusqlite::Transaction<'_>,
-    items: &[PivotItemDef],
-) -> DbResult<(usize, usize)> {
+fn upsert_items_in(tx: &rusqlite::Transaction<'_>, items: &[PivotItemDef]) -> DbResult<(usize, usize)> {
     let mut added = 0usize;
     let mut updated = 0usize;
-    let mut dict_counts: std::collections::HashMap<(&'static str, String), i64> =
-        std::collections::HashMap::new();
+    let mut dict_counts: std::collections::HashMap<(&'static str, String), i64> = std::collections::HashMap::new();
 
     // 先查再写：内存预查已有编码，避免对成千上万物料逐行 round-trip SELECT
     {
@@ -805,10 +814,7 @@ fn upsert_items_in(
             } else {
                 item.item_name.clone()
             };
-            let item_type = item
-                .item_type
-                .clone()
-                .or_else(|| infer_item_type(code, None));
+            let item_type = item.item_type.clone().or_else(|| infer_item_type(code, None));
 
             if existing_codes.contains(code) {
                 update
@@ -938,10 +944,7 @@ mod tests {
                     name: name.to_string(),
                     opening,
                     closing,
-                    days: days
-                        .into_iter()
-                        .map(|(d, i, o)| (d, Some(i), Some(o)))
-                        .collect(),
+                    days: days.into_iter().map(|(d, i, o)| (d, Some(i), Some(o))).collect(),
                     ..Default::default()
                 })
                 .collect(),
@@ -953,13 +956,7 @@ mod tests {
     fn build_splits_opening_daily_and_closing() {
         let sheets = vec![sheet_of(
             "1月",
-            vec![(
-                "WG1",
-                "螺丝",
-                Some(10.0),
-                Some(7.0),
-                vec![(3, 5.0, 0.0), (4, 0.0, 8.0)],
-            )],
+            vec![("WG1", "螺丝", Some(10.0), Some(7.0), vec![(3, 5.0, 0.0), (4, 0.0, 8.0)])],
         )];
         let built = build(&sheets, 2026);
 
