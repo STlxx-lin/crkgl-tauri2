@@ -532,6 +532,44 @@ fn validate(input: &VoucherInput) -> Result<(String, String), String> {
     Ok((kind, date))
 }
 
+/// 单号占用检查：`vouchers` 里的单据头 + `ledger` 里 `voucher_id IS NULL`
+/// 的 Excel 导入行，都算「已被占用」。
+///
+/// 只查 `vouchers` 会漏掉导入数据：导入行不建单据头，`doc_search` 又按
+/// `doc_no + kind` 把它们聚成一张单，于是手工开一张同号单就会在台账里出现
+/// 两张同号单、查询时金额与行数被拆成两截。
+fn ensure_doc_no_free(
+    conn: &Connection,
+    kind: &str,
+    doc_no: &str,
+    exclude_voucher: Option<i64>,
+) -> DbResult<()> {
+    let head: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vouchers WHERE kind = ?1 AND doc_no = ?2 AND id <> ?3",
+            rusqlite::params![kind, doc_no, exclude_voucher.unwrap_or(-1)],
+            |r| r.get(0),
+        )
+        .map_err(DbError::from)?;
+    if head > 0 {
+        return Err(format!("单据编号 {doc_no} 已经存在"));
+    }
+    let imported: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ledger
+              WHERE voucher_id IS NULL AND kind = ?1 AND TRIM(COALESCE(doc_no, '')) = ?2",
+            rusqlite::params![kind, doc_no.trim()],
+            |r| r.get(0),
+        )
+        .map_err(DbError::from)?;
+    if imported > 0 {
+        return Err(format!(
+            "单据编号 {doc_no} 已被 {imported} 行 Excel 导入明细占用，请换一个编号或先处理那批数据"
+        ));
+    }
+    Ok(())
+}
+
 /// 新建单据。整张单一个事务：表头、明细、编号占用一起成功或一起失败。
 pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
     let (kind, date) = validate(input).map_err(|e| e)?;
@@ -540,17 +578,7 @@ pub fn create(conn: &Connection, input: &VoucherInput) -> DbResult<i64> {
         None => next_doc_no(conn, &kind, &date)?,
     };
 
-    // 编号不能重复（同一类型内）
-    let dup: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM vouchers WHERE kind = ?1 AND doc_no = ?2",
-            rusqlite::params![kind, doc_no],
-            |r| r.get(0),
-        )
-        .map_err(|e| DbError::from(e).0)?;
-    if dup > 0 {
-        return Err(format!("单据编号 {doc_no} 已经存在"));
-    }
+    ensure_doc_no_free(conn, &kind, &doc_no, None)?;
 
     let sheet = format!("voucher:{kind}");
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -654,16 +682,7 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
             .query_row("SELECT doc_no FROM vouchers WHERE id = ?1", [id], |r| r.get(0))
             .map_err(DbError::from)?,
     };
-    let dup: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM vouchers WHERE kind = ?1 AND doc_no = ?2 AND id <> ?3",
-            rusqlite::params![kind, doc_no, id],
-            |r| r.get(0),
-        )
-        .map_err(DbError::from)?;
-    if dup > 0 {
-        return Err(format!("单据编号 {doc_no} 已经存在"));
-    }
+    ensure_doc_no_free(&tx, &kind, &doc_no, Some(id))?;
     tx.execute(
         "UPDATE vouchers SET kind=?1, doc_no=?2, doc_date=?3, partner=?4, delivery_no=?5, buyer=?6,
                 owner=?7, receiver=?8, remark=?9, updated_at=datetime('now','localtime')
@@ -936,6 +955,46 @@ mod tests {
         let mut second = input("in", "2026-08-31", vec![line("B", "y", 1.0, Some(10_000))]);
         second.doc_no = Some("20260831999".into());
         assert!(db.with_loose(|c| create(c, &second)).is_err());
+    }
+
+    /// Excel 导入行没有 `vouchers` 头，只查 `vouchers` 会漏掉它们，
+    /// 手工再开一张同号单就会在台账里出现两张同号单。
+    #[test]
+    fn imported_doc_no_also_blocks_new_voucher() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_loose(|c| {
+            c.execute(
+                "INSERT INTO ledger (sheet, row_no, kind, doc_date, doc_no, item_code, item_name, qty, flags)
+                 VALUES ('入库明细', 2, 'in', '2026-08-31', '20260831555', 'X', '导入的', 1, '')",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut clash = input("in", "2026-08-31", vec![line("A", "x", 1.0, Some(10_000))]);
+        clash.doc_no = Some("20260831555".into());
+        let err = db.with_loose(|c| create(c, &clash)).unwrap_err();
+        assert!(err.contains("Excel 导入明细"), "实际 {err}");
+
+        // 出库侧不受同号的入库导入行影响（单号按 kind 独立）
+        let mut out = input("out", "2026-08-31", vec![line("A", "x", 1.0, None)]);
+        out.doc_no = Some("20260831555".into());
+        assert!(db.with_loose(|c| create(c, &out)).is_ok());
+    }
+
+    /// 改单时不能因为「自己已占用这个号」而失败。
+    #[test]
+    fn update_may_keep_its_own_doc_no() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = input("in", "2026-08-31", vec![line("A", "x", 1.0, Some(10_000))]);
+        first.doc_no = Some("20260831777".into());
+        let id = db.with_loose(|c| create(c, &first)).unwrap();
+
+        let mut same = input("in", "2026-09-01", vec![line("A", "x", 2.0, Some(10_000))]);
+        same.doc_no = Some("20260831777".into());
+        assert!(db.with_loose(|c| update(c, id, &same)).is_ok(), "沿用原单号应允许");
     }
 
     #[test]

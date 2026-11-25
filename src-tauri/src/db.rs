@@ -71,6 +71,7 @@ impl Db {
         }
         let conn = Connection::open(path).map_err(|e| format!("打开数据库失败: {e}"))?;
         tune(&conn).map_err(|e| format!("初始化数据库失败: {e}"))?;
+        backup_before_migrate(path, &conn);
         migrate(&conn).map_err(|e| format!("数据库迁移失败: {e}"))?;
         Ok(Db {
             conn: Mutex::new(conn),
@@ -112,24 +113,126 @@ fn tune(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 迁移前留一份快照，迁移失败也能手工回退。
+///
+/// 用 `VACUUM INTO` 而不是复制文件：WAL 模式下 `.db` 里可能缺最近的提交，
+/// 直接复制会得到一份「旧但看起来正常」的库，比没有备份更危险。
+fn backup_before_migrate(path: &Path, conn: &Connection) {
+    if path == Path::new(":memory:") || !path.is_file() {
+        return;
+    }
+    let backup = path.with_extension("db.bak");
+    // 只保留最近一次「迁移前」快照，避免每次升级堆一个文件
+    let _ = std::fs::remove_file(&backup);
+    match conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().to_string()]) {
+        Ok(_) => log::info!("迁移前已备份数据库到 {}", backup.display()),
+        Err(err) => log::warn!("迁移前备份失败（继续迁移）: {err}"),
+    }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn object_exists(conn: &Connection, kind: &str, name: &str) -> rusqlite::Result<bool> {
+    let found: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        [kind, name],
+        |r| r.get(0),
+    )?;
+    Ok(found > 0)
+}
+
+/// 该迁移带来的结构是否已经在库里。
+///
+/// `user_version` 只是「我们的记账」，可能落后于真实结构（历史中断、手工改库、
+/// 只恢复了 `.db` 没恢复 `-wal`）。靠 `PRAGMA table_info` 看实际结构，才不会在
+/// 已经存在的列上再 `ADD COLUMN` 撞出 `duplicate column name` 而彻底起不来。
+///
+/// 只对「纯结构」迁移返回真；006/007 这类数据订正每次都重跑（本身幂等）。
+fn structure_already_applied(conn: &Connection, index: usize) -> rusqlite::Result<bool> {
+    let has = |table: &str, column: &str| column_exists(conn, table, column);
+    match index {
+        // 001 建表
+        0 => Ok(object_exists(conn, "table", "ledger")?
+            && object_exists(conn, "table", "imports")?
+            && object_exists(conn, "table", "settings")?
+            && object_exists(conn, "table", "header_alias")?
+            && object_exists(conn, "table", "access_log")?),
+        // 002 单据
+        1 => has("ledger", "voucher_id"),
+        // 003 基础资料
+        2 => Ok(object_exists(conn, "table", "items")? && object_exists(conn, "table", "suppliers")?),
+        // 004 单价精度：新列已加、旧列已删才算完整
+        3 => Ok(has("ledger", "price_micros")?
+            && has("items", "price_micros")?
+            && !has("ledger", "price_cents")?
+            && !has("items", "price_cents")?),
+        // 005 物料类型
+        4 => Ok(has("items", "item_type")? && has("items", "drawing_no")?),
+        // 006/007 是数据订正，不参与探测
+        5 | 6 => Ok(false),
+        // 008 库位
+        7 => has("items", "location"),
+        // 009 字典
+        8 => object_exists(conn, "table", "dict"),
+        // 010-013 索引
+        9 => object_exists(conn, "index", "ix_ledger_stock_perf"),
+        10 => object_exists(conn, "index", "ix_ledger_import_id"),
+        11 => Ok(has("items", "seq")? && object_exists(conn, "trigger", "trg_items_seq_ai")?),
+        12 => Ok(object_exists(conn, "index", "ix_ledger_date_id")?
+            && object_exists(conn, "index", "ix_ledger_buyer")?),
+        _ => Ok(false),
+    }
+}
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let target = MIGRATIONS.len() as i64;
     if current > target {
-        // 老版本程序打开了新版本数据库：不静默降级，只在日志里提示
-        log::warn!("数据库版本 {current} 高于当前程序支持的 {target}");
-        return Ok(());
+        // 旧程序打开新版本数据库：继续读写未知结构只会写坏数据，直接拒绝启动，
+        // 让用户看到「请升级程序」而不是后面某次查询莫名失败。
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "数据库版本 {current} 高于当前程序支持的 {target}，请升级到新版程序再打开"
+            )),
+        ));
     }
     for (index, (name, sql)) in MIGRATIONS.iter().enumerate() {
         let next = (index + 1) as i64;
         if next <= current {
             continue;
         }
+        if structure_already_applied(conn, index)? {
+            // 结构已在、版本号没跟上：只补版本号，绝不重跑 DDL
+            log::warn!("迁移 {name} 的结构已存在于库中，只补记版本号 {next}");
+            conn.pragma_update(None, "user_version", next)?;
+            continue;
+        }
         // 迁移整体放进事务：要么结构和版本号一起落地，要么都不留痕迹。
         // 之前的写法先改结构再写 user_version，中断后会重复执行并撞上
         // "duplicate column name" —— 那正是升级一次就再也起不来的来源。
         let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(sql)?;
+        if let Err(err) = tx.execute_batch(sql) {
+            let hint = if err.to_string().contains("duplicate column") {
+                "（库里已有该列但缺少其它结构，属于更新中断留下的半套结构；请用同目录下的 ledger.db.bak 恢复后重试）"
+            } else {
+                ""
+            };
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!("迁移 {name} 失败: {err}{hint}")),
+            ));
+        }
         tx.pragma_update(None, "user_version", next)?;
         tx.commit()?;
         log::info!("已应用迁移 {name}");
@@ -166,19 +269,96 @@ pub fn set_setting(db: &Db, key: &str, value: &str) -> DbResult<()> {
     })
 }
 
+/// 访问日志先攒在内存里，再一次性写库。
+///
+/// 只读站每翻一页原本要起两个写事务（INSERT + 全表裁剪），而 `Db` 只有一条
+/// `Mutex<Connection>`，局域网刷页面会跟本机开单抢锁。改成攒批：满 50 条或
+/// 距上次落库超过 3 秒才写一次，`recent_access` 读之前强制刷一次，界面照样即时。
+const ACCESS_BUFFER_MAX: usize = 50;
+const ACCESS_FLUSH_SECS: f64 = 3.0;
+const ACCESS_KEEP_ROWS: i64 = 500;
+
+#[derive(Default)]
+struct AccessBuffer {
+    pending: Vec<(String, String, u16)>,
+    last_flush: Option<std::time::Instant>,
+}
+
+static ACCESS_BUFFER: Mutex<Option<AccessBuffer>> = Mutex::new(None);
+
+fn access_due(now: std::time::Instant, buf: &AccessBuffer) -> bool {
+    if buf.pending.len() >= ACCESS_BUFFER_MAX {
+        return true;
+    }
+    match buf.last_flush {
+        Some(at) => now.duration_since(at).as_secs_f64() >= ACCESS_FLUSH_SECS,
+        None => false,
+    }
+}
+
 pub fn record_access(db: &Db, ip: &str, path: &str, status: u16) {
+    let drained = {
+        let mut guard = match ACCESS_BUFFER.lock() {
+            Ok(guard) => guard,
+            // 缓冲锁中毒：丢掉旧状态重新开始，访问日志不值得拖垮请求处理
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let buf = guard.get_or_insert_with(AccessBuffer::default);
+        buf.pending.push((ip.to_string(), path.to_string(), status));
+        let now = std::time::Instant::now();
+        if access_due(now, buf) {
+            buf.last_flush = Some(now);
+            std::mem::take(&mut buf.pending)
+        } else {
+            Vec::new()
+        }
+    };
+    if drained.is_empty() {
+        return;
+    }
+    write_access_batch(db, &drained);
+}
+
+/// 把缓冲里剩下的条目立刻落库（读取前 / 退出前调用）。
+pub fn flush_access(db: &Db) {
+    let pending = {
+        let mut guard = match ACCESS_BUFFER.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let buf = guard.get_or_insert_with(AccessBuffer::default);
+        buf.last_flush = Some(std::time::Instant::now());
+        std::mem::take(&mut buf.pending)
+    };
+    if !pending.is_empty() {
+        write_access_batch(db, &pending);
+    }
+}
+
+fn write_access_batch(db: &Db, entries: &[(String, String, u16)]) {
     let _ = db.with(|c| {
-        c.execute(
-            "INSERT INTO access_log (at, ip, path, status)
-             VALUES (datetime('now', 'localtime'), ?1, ?2, ?3)",
-            rusqlite::params![ip, path, status],
+        let tx = c.unchecked_transaction().map_err(DbError::from)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO access_log (at, ip, path, status)
+                     VALUES (datetime('now', 'localtime'), ?1, ?2, ?3)",
+                )
+                .map_err(DbError::from)?;
+            for (ip, path, status) in entries {
+                stmt.execute(rusqlite::params![ip, path, status])
+                    .map_err(DbError::from)?;
+            }
+        }
+        // 只保留最近 500 条：用 `MIN(id)` 定位边界，避免每次都对全表排序再比较
+        tx.execute(
+            "DELETE FROM access_log WHERE id < (
+                 SELECT MIN(id) FROM (SELECT id FROM access_log ORDER BY id DESC LIMIT ?1)
+             )",
+            [ACCESS_KEEP_ROWS],
         )
         .map_err(DbError::from)?;
-        c.execute(
-            "DELETE FROM access_log WHERE id NOT IN (SELECT id FROM access_log ORDER BY id DESC LIMIT 500)",
-            [],
-        )
-        .map_err(DbError::from)?;
+        tx.commit().map_err(DbError::from)?;
         Ok(())
     });
 }
@@ -193,6 +373,8 @@ pub struct AccessEntry {
 }
 
 pub fn recent_access(db: &Db, limit: i64) -> DbResult<Vec<AccessEntry>> {
+    // 缓冲里的条目还没落库，直接查会「刚访问的看不到」
+    flush_access(db);
     db.with(|c| {
         let mut stmt = c
             .prepare("SELECT at, ip, path, status FROM access_log ORDER BY id DESC LIMIT ?1")
@@ -306,6 +488,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tables, 5);
+    }
+
+    /// 旧程序打开新版本数据库：必须明确报错，不能继续读写未知结构。
+    #[test]
+    fn newer_database_version_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        tune(&conn).unwrap();
+        migrate(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        let err = migrate(&conn).unwrap_err();
+        assert!(err.to_string().contains("请升级"), "实际 {err}");
+    }
+
+    /// `user_version` 落后于真实结构（中断/手工改库）时只补版本号，
+    /// 不重跑 DDL —— 否则 002 的 ALTER 会撞 duplicate column 让程序起不来。
+    #[test]
+    fn lagging_version_with_complete_structure_only_bumps_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        tune(&conn).unwrap();
+        migrate(&conn).unwrap();
+        // 假装只是版本号丢了：结构与最高版本一致
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        migrate(&conn).expect("结构已完整时不该重跑 DDL");
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
     }
 
     #[test]

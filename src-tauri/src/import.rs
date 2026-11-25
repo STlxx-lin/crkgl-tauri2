@@ -1229,6 +1229,9 @@ fn null_if_empty(value: &str) -> Option<&str> {
 }
 
 /// 实际写库：一个事务，要么全进要么一条不进。返回 (导入批次 id, 被覆盖的行数)。
+///
+/// 「覆盖同名 sheet」按 `header.file_name` 限定在同一个源工作簿内：同一张
+/// `入库明细` 在两个不同工作簿里都存在时，导入第二个不能把第一个的明细删掉。
 pub fn write_rows(
     db: &Db,
     header: &HeaderRow,
@@ -1240,8 +1243,22 @@ pub fn write_rows(
         let mut replaced = 0usize;
         for sheet in replace_sheets {
             replaced += tx
-                .execute("DELETE FROM ledger WHERE sheet = ?1", [sheet])
+                .execute(
+                    "DELETE FROM ledger WHERE sheet = ?1
+                       AND import_id IN (SELECT id FROM imports WHERE file_name = ?2)",
+                    rusqlite::params![sheet, header.file_name],
+                )
                 .map_err(DbError::from)?;
+        }
+        // 被覆盖批次的 row_count 得跟着修正，否则导入历史里仍显示原来的行数
+        if replaced > 0 {
+            tx.execute(
+                "UPDATE imports SET row_count =
+                    (SELECT COUNT(*) FROM ledger l WHERE l.import_id = imports.id)
+                 WHERE file_name = ?1",
+                rusqlite::params![header.file_name],
+            )
+            .map_err(DbError::from)?;
         }
         tx.execute(
             "INSERT INTO imports (file_name, file_hash, sheets, imported_at, row_count, skipped_count, note)
@@ -1389,6 +1406,22 @@ pub fn run_with_year(
     replace_all: bool,
     year: i32,
 ) -> Result<ImportOutcome, String> {
+    run_with_options(db, path, plans, replace_all, year, false)
+}
+
+/// 完整导入 + 「允许重复导入」开关。
+///
+/// 默认拒绝重复导入：同一个文件（内容 hash 相同）再追加一次，台账、库存结存、
+/// 月度汇总、金额合计全部翻倍，而这种错误很难事后发现。用户确实要重导时，
+/// 前端会二次确认后再带 `allow_duplicate = true` 调一次。
+pub fn run_with_options(
+    db: &Db,
+    path: &Path,
+    plans: Option<Vec<SheetPlan>>,
+    replace_all: bool,
+    year: i32,
+    allow_duplicate: bool,
+) -> Result<ImportOutcome, String> {
     let (report, pivot_parsed) = inspect_and_collect_cached(path)?;
     let mut all_rows: Vec<DraftRow> = Vec::new();
     let mut all_issues: Vec<Issue> = Vec::new();
@@ -1488,6 +1521,7 @@ pub fn run_with_year(
     }
     let hash = file_hash(path)?;
     let duplicate_of = find_import_by_hash(db, &hash)?;
+    ensure_not_duplicate(db, &report.file_name, duplicate_of, allow_duplicate)?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let sheets_json = serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string());
     let note = if replace_sheets.is_empty() {
@@ -1572,6 +1606,48 @@ fn find_import_by_hash(db: &Db, hash: &str) -> Result<Option<i64>, String> {
         })
         .ok();
     Ok(found)
+}
+
+/// 同一份文件（内容 hash 相同）已经导过时怎么办。
+///
+/// 默认拒绝：再追加一次会让台账行、库存结存、月度汇总与金额合计全部翻倍，
+/// 事后极难拆回。确实要重导（例如上次只导了一半）时，前端二次确认后带
+/// `allow_duplicate = true` 再调一次。
+fn ensure_not_duplicate(
+    db: &Db,
+    file_name: &str,
+    duplicate_of: Option<i64>,
+    allow_duplicate: bool,
+) -> Result<(), String> {
+    let Some(existing) = duplicate_of else {
+        return Ok(());
+    };
+    if allow_duplicate {
+        log::warn!("用户显式允许重复导入：{file_name}（命中批次 #{existing}）");
+        return Ok(());
+    }
+    let detail = db
+        .with(|c| {
+            c.query_row(
+                "SELECT file_name, imported_at, row_count FROM imports WHERE id = ?1",
+                [existing],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(DbError::from)
+        })
+        .ok()
+        .map(|(name, at, rows)| format!("#{existing}（{name}，{at}，{rows} 行）"))
+        .unwrap_or_else(|| format!("#{existing}"));
+    Err(format!(
+        "这个文件之前已经导入过（批次 {detail}）。再导一次会让台账、库存和汇总翻倍；\
+         需要重导请先在导入历史里删掉那一批，或打开「允许重复导入」再点一次。"
+    ))
 }
 
 /// 导入历史。
@@ -1852,6 +1928,67 @@ mod tests {
             .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// 「覆盖同名表」只能覆盖同一个源工作簿的数据：
+    /// 两个工作簿都有 `入库明细` 时，导第二个不能把第一个的明细删掉。
+    #[test]
+    fn replace_mode_is_scoped_to_same_workbook() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = header();
+        first.file_name = "一月.xlsm".into();
+        first.file_hash = "h-jan".into();
+        let mut second = header();
+        second.file_name = "二月.xlsm".into();
+        second.file_hash = "h-feb".into();
+
+        write_rows(&db, &first, &[sample_row(), sample_row()], &[]).unwrap();
+        // 第二个工作簿覆盖同名表，不该动第一个工作簿的行
+        let (_id, replaced) = write_rows(&db, &second, &[sample_row()], &["入库明细".to_string()]).unwrap();
+        assert_eq!(replaced, 0, "别的批次没有同名表行可删");
+        let count: i64 = db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(count, 3, "1 月的两行必须还在");
+
+        // 同一个工作簿再覆盖一次，才清掉它自己那批
+        let (_id, replaced) = write_rows(&db, &second, &[sample_row()], &["入库明细".to_string()]).unwrap();
+        assert_eq!(replaced, 1);
+        let count: i64 = db
+            .with(|c| c.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0)).map_err(DbError::from))
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    /// 覆盖后旧批次的 `row_count` 要跟着改，导入历史不能继续显示原来的行数。
+    #[test]
+    fn replace_mode_repairs_old_import_row_count() {
+        let db = Db::open_in_memory().unwrap();
+        write_rows(&db, &header(), &[sample_row(), sample_row(), sample_row()], &[]).unwrap();
+        write_rows(&db, &header(), &[sample_row()], &["入库明细".to_string()]).unwrap();
+        let rows = history(&db).unwrap();
+        // 最新一条是本次导入（1 行），旧批次已被清空（0 行）
+        assert_eq!(rows[0].row_count, 1);
+        assert_eq!(rows[1].row_count, 0);
+        assert_eq!(rows[1].live_rows, 0);
+    }
+
+    /// 同 hash 的文件默认拒绝，显式允许后才放行。
+    #[test]
+    fn duplicate_import_is_rejected_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        write_rows(&db, &header(), &[sample_row()], &[]).unwrap();
+        let existing = find_import_by_hash(&db, "h1").unwrap();
+        assert_eq!(existing, Some(1));
+
+        let err = ensure_not_duplicate(&db, "t.xlsm", existing, false).unwrap_err();
+        assert!(err.contains("已经导入过"), "错误文案要说明原因，实际 {err}");
+        assert!(err.contains("t.xlsm"));
+
+        // 没有重复时放行
+        assert!(ensure_not_duplicate(&db, "t.xlsm", None, false).is_ok());
+        // 显式允许时放行
+        assert!(ensure_not_duplicate(&db, "t.xlsm", existing, true).is_ok());
     }
 
     #[test]

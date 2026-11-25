@@ -201,9 +201,18 @@ pub fn is_private(ip: IpAddr) -> bool {
     }
 }
 
+/// 令牌桶 + 有界的「来源 IP → 令牌数」表。
+///
+/// 每个来源 IP 都留一条记录，托盘常驻几个月、或遇到换源地址扫描时会缓慢吃内存；
+/// 这里按「满桶」的条目定期回收——满桶等价于刚补满、丢弃后下个请求重建状态相同。
+const BUCKET_MAX_IPS: usize = 4096;
+const BUCKET_IDLE_SECS: f64 = 600.0;
+
 #[derive(Default)]
 struct Bucket {
     tokens: HashMap<IpAddr, (f64, Instant)>,
+    /// 上次清理时间，避免每个请求都遍历整表
+    swept_at: Option<Instant>,
 }
 
 impl Bucket {
@@ -211,6 +220,7 @@ impl Bucket {
     /// 注意不能让“本次补充”影响“本次是否存在令牌”：先补 → 再判 → 再扣。
     fn allow(&mut self, ip: IpAddr) -> bool {
         let now = Instant::now();
+        self.sweep_if_needed(now);
         let entry = self.tokens.entry(ip).or_insert((RATE_PER_SECOND, now));
         let elapsed = now.duration_since(entry.1).as_secs_f64();
         if elapsed > 0.0 {
@@ -223,6 +233,40 @@ impl Bucket {
         } else {
             false
         }
+    }
+
+    /// 超过上限时立刻收紧；「满桶 + 闲置」的回收最多每 60 秒一次，避免每个请求都遍历整表。
+    fn sweep_if_needed(&mut self, now: Instant) {
+        let due = match self.swept_at {
+            Some(at) => now.duration_since(at).as_secs_f64() >= 60.0,
+            None => true,
+        };
+        if self.tokens.len() < BUCKET_MAX_IPS {
+            if due {
+                self.swept_at = Some(now);
+            }
+            return;
+        }
+        // 先按「满桶 + 长时间没动」清，满桶等同于从未出现过
+        self.tokens.retain(|_, (tokens, seen)| {
+            let full = *tokens >= RATE_PER_SECOND - f64::EPSILON;
+            let idle = now.duration_since(*seen).as_secs_f64() > BUCKET_IDLE_SECS;
+            !(full && idle)
+        });
+        // 还超就当 LRU：保留最近活跃的一半。硬上限不能等 60 秒窗口，否则
+        // 短时间大量换源地址就能把内存吃满。
+        if self.tokens.len() >= BUCKET_MAX_IPS {
+            let mut seen: Vec<(IpAddr, Instant)> =
+                self.tokens.iter().map(|(ip, (_, at))| (*ip, *at)).collect();
+            seen.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+            let keep: std::collections::HashSet<IpAddr> = seen
+                .into_iter()
+                .take(BUCKET_MAX_IPS / 2)
+                .map(|(ip, _)| ip)
+                .collect();
+            self.tokens.retain(|ip, _| keep.contains(ip));
+        }
+        self.swept_at = Some(now);
     }
 }
 
@@ -256,8 +300,16 @@ fn too_many() -> Response {
 }
 
 
+/// 500 响应。**不把内部错误原文回给局域网**：`message` 多数来自
+/// `DbError`，里面带着表名、SQL 片段甚至本机路径，等于给扫描者送情报。
+/// 原始错误写进日志，对外只给固定文案 + 错误码，需要排障时按时间对日志。
 fn server_error(message: String) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": message }))).into_response()
+    log::error!("只读站请求失败: {message}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "查询失败", "code": "INTERNAL" })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -380,11 +432,17 @@ async fn guard_request(
         db::record_access(&state.db, &ip_text, &path, 403);
         return secure_headers(forbidden());
     }
-    let allowed = state
-        .rate
-        .lock()
-        .map(|mut bucket| bucket.allow(connect.ip()))
-        .unwrap_or(true);
+    // 锁中毒说明之前某次 panic 打断了限流状态，此时宁可拒绝也不能放行——
+    // 放行等于限流彻底失效且没有任何痕迹。
+    let allowed = match state.rate.lock() {
+        Ok(mut bucket) => bucket.allow(connect.ip()),
+        Err(poisoned) => {
+            log::error!("限流锁中毒，本次请求按拒绝处理（来源 {ip_text}）");
+            // 顺手把状态修好，避免后续每个请求都走这条分支
+            let mut bucket = poisoned.into_inner();
+            bucket.allow(connect.ip())
+        }
+    };
     if !allowed {
         db::record_access(&state.db, &ip_text, &path, 429);
         return secure_headers(too_many());
@@ -867,6 +925,40 @@ mod tests {
         assert!(validate_page(0, 100).is_err());
         assert!(validate_page(1, 0).is_err());
         assert!(validate_page(1, 501).is_err());
+    }
+
+    /// 来源 IP 表必须有硬上限：托盘常驻 + 换源扫描时不能无限吃内存。
+    #[test]
+    fn bucket_table_is_bounded() {
+        let mut bucket = Bucket::default();
+        for i in 0..(BUCKET_MAX_IPS + 200) {
+            let ip: IpAddr = format!("10.1.{}.{}", (i / 250) % 250, (i % 250) + 1).parse().unwrap();
+            bucket.allow(ip);
+        }
+        assert!(
+            bucket.tokens.len() <= BUCKET_MAX_IPS,
+            "条目数应被压到上限内，实际 {}",
+            bucket.tokens.len()
+        );
+    }
+
+    /// 满桶且长期没动的条目应被回收，等于从未出现过。
+    #[test]
+    fn bucket_drops_idle_full_entries() {
+        let mut bucket = Bucket::default();
+        let idle: IpAddr = "10.2.0.1".parse().unwrap();
+        bucket.allow(idle);
+        // 立刻补满桶（allow 之后只剩 <1 个令牌），并把时间戳往回拨到过期
+        if let Some(entry) = bucket.tokens.get_mut(&idle) {
+            entry.0 = RATE_PER_SECOND;
+            entry.1 -= std::time::Duration::from_secs((BUCKET_IDLE_SECS as u64) + 10);
+        }
+        // 撑满表宽度触发清理
+        for i in 0..(BUCKET_MAX_IPS + 10) {
+            let ip: IpAddr = format!("10.3.{}.{}", (i / 250) % 250, (i % 250) + 1).parse().unwrap();
+            bucket.allow(ip);
+        }
+        assert!(!bucket.tokens.contains_key(&idle), "闲置的满桶条目应被回收");
     }
 
     #[test]

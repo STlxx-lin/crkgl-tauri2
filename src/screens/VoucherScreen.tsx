@@ -27,7 +27,7 @@ import {
   updateVoucher,
 } from "../lib/api";
 import type { DocHit, Item, Kind, LedgerRow, Supplier, Voucher, VoucherLineInput, VoucherSummary } from "../lib/types";
-import { amount, count, date, flagLabel, kindLabel, money, priceInput, priceText, qty } from "../lib/format";
+import { amount, count, date, flagLabel, kindLabel, money, priceInput4, priceText, qty } from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { toast } from "@/components/base/toast/toast";
@@ -125,23 +125,81 @@ interface VoucherDraft {
   lines: DraftLine[];
 }
 
+/** 草稿里的一行必须是「字段都在、且都是字符串」的对象。 */
+function isDraftLine(value: unknown): value is DraftLine {
+  if (!value || typeof value !== "object") return false;
+  const line = value as Record<string, unknown>;
+  return (
+    typeof line.key === "string" &&
+    typeof line.deliveryNo === "string" &&
+    typeof line.itemCode === "string" &&
+    typeof line.itemName === "string" &&
+    typeof line.unit === "string" &&
+    typeof line.qty === "string" &&
+    typeof line.price === "string" &&
+    typeof line.remark === "string" &&
+    (line.spec === undefined || typeof line.spec === "string")
+  );
+}
+
+function sanitizeHead(value: unknown, kind: Kind): HeadDraft | null {
+  if (!value || typeof value !== "object") return null;
+  const head = value as Record<string, unknown>;
+  const text = (key: keyof HeadDraft) => {
+    const v = head[key];
+    return typeof v === "string" ? v : null;
+  };
+  const docNo = text("docNo");
+  const docDate = text("docDate");
+  const partner = text("partner");
+  const buyer = text("buyer");
+  const owner = text("owner");
+  const receiver = text("receiver");
+  const storekeeper = text("storekeeper");
+  if ([docNo, docDate, partner, buyer, owner, receiver, storekeeper].some((v) => v === null)) {
+    return null;
+  }
+  const fallback = blankHead(kind);
+  return {
+    docNo: docNo ?? "",
+    // 日期非法时退回今天，否则开单会被后端直接拒绝
+    docDate: docDate && /^\d{4}-\d{2}-\d{2}$/.test(docDate) ? docDate : fallback.docDate,
+    partner: partner ?? "",
+    buyer: buyer ?? fallback.buyer,
+    owner: owner ?? "",
+    receiver: receiver ?? "",
+    storekeeper: storekeeper ?? "",
+  };
+}
+
+/**
+ * 读本机草稿。
+ *
+ * 只校验最外层（mode 合法、lines 是非空数组）不够：`lines` 里的元素可能是
+ * 数字、null、缺字段的旧版本对象，渲染时 `line.qty.trim()` 直接抛 TypeError，
+ * 而这段代码在首屏渲染路径上，于是应用一启动就白屏、还清不掉本地存储。
+ * 这里逐行校验，任何一行不合法就整份丢弃。
+ */
 function loadVoucherDraft(): VoucherDraft | null {
   try {
     const raw = window.localStorage.getItem(VOUCHER_DRAFT_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      parsed.mode &&
-      (parsed.mode.kind === "in" || parsed.mode.kind === "out") &&
-      parsed.head &&
-      Array.isArray(parsed.lines) &&
-      parsed.lines.length > 0
-    ) {
-      return parsed;
-    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const draft = parsed as Record<string, unknown>;
+    const mode = draft.mode as Record<string, unknown> | undefined;
+    if (!mode || (mode.kind !== "in" && mode.kind !== "out")) return null;
+    const id = mode.id;
+    if (id !== null && (typeof id !== "number" || !Number.isFinite(id))) return null;
+    const kind = mode.kind as Kind;
+    if (!Array.isArray(draft.lines) || draft.lines.length === 0) return null;
+    if (!draft.lines.every(isDraftLine)) return null;
+    const head = sanitizeHead(draft.head, kind);
+    if (!head) return null;
+    return { mode: { kind, id: id as number | null }, head, lines: draft.lines };
   } catch {
-    // 忽略解析错误
+    // 解析失败或本地存储被禁用：当作没有草稿
+    clearVoucherDraft();
   }
   return null;
 }
@@ -394,6 +452,9 @@ export function VoucherScreen({
    */
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      // 开单页可能被挂在别的页面后面（App 用 active 控制显隐），
+      // 不在这一页时全局快捷键不能去提交那张看不见的表单。
+      if (!active) return;
       const meta = event.ctrlKey || event.metaKey;
       if (meta && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -418,7 +479,7 @@ export function VoucherScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [active]);
 
   // 保存过新采购人后，正在编辑的空白新单跟着换默认值（已填的不动）
   useEffect(() => onBuyerChange((buyer) => {
@@ -469,6 +530,18 @@ export function VoucherScreen({
   const setLine = (key: string, patch: Partial<DraftLine>) => {
     dirty.current = true;
     setLines((prev) => prev.map((line) => (line.key === key ? { ...line, ...patch } : line)));
+  };
+
+  /**
+   * 改表头：统一置脏。
+   *
+   * 之前只有 `setLine` 会置 dirty，改供应商/日期/单号/采购人/领用人都不置，
+   * 于是「载入编辑」和「转单」看到 `dirty.current === false` 就直接覆盖，
+   * 用户刚敲的单头一声不响没了。
+   */
+  const editHead = (patch: Partial<HeadDraft>) => {
+    dirty.current = true;
+    setHead((prev) => ({ ...prev, ...patch }));
   };
 
   /** 把当前录入内容拼成打印视图要的 Voucher 形状（不落库）。 */
@@ -585,7 +658,9 @@ export function VoucherScreen({
                 itemName: line.itemName ?? "",
                 unit: line.unit ?? "",
                 qty: line.qty === null ? "" : String(line.qty),
-                price: line.priceMicros === null ? "" : priceInput(line.priceMicros),
+                // 单价按万分之一元存，厘级价（0.202）用两位小数回填会被截成 0.2，
+                // 直接保存就把历史单价的精度改掉了。这里保留到 4 位。
+                price: line.priceMicros === null ? "" : priceInput4(line.priceMicros),
                 remark: line.remark ?? "",
                 spec: line.spec ?? "",
               };
@@ -642,7 +717,7 @@ export function VoucherScreen({
             unit: line.unit ?? "",
             qty: line.qty === null ? "" : String(line.qty),
             // 出库单不记单价，转成入库单时留空让用户按当前进价填
-            price: target === "in" && line.priceMicros !== null ? priceInput(line.priceMicros) : "",
+            price: target === "in" && line.priceMicros !== null ? priceInput4(line.priceMicros) : "",
             remark: line.remark ?? "",
             spec: line.spec ?? "",
           };
@@ -663,16 +738,46 @@ export function VoucherScreen({
       toast("只读站不能开单", { description: "请在装有本程序的电脑上开单。", status: "error" });
       return;
     }
-    const payloadLines: VoucherLineInput[] = lines
-      .filter((line) => line.itemCode.trim() || line.itemName.trim() || line.qty.trim())
-      .map((line) => {
-        const p = Number(line.price);
+    // 先在前端挡掉明显的脏输入：数量是 NaN / Infinity / 0 / 负数，
+    // 或单价不是有限数。否则这些值会以 null 落库，或让后端回一句
+    // 「第 1 行数量不能为 0」，用户根本看不出是哪一栏打错了。
+    const filled = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.itemCode.trim() || line.itemName.trim() || line.qty.trim());
+    for (const { line, index } of filled) {
+      const row = index + 1;
+      const qtyRaw = line.qty.trim();
+      if (qtyRaw === "") {
+        toast(`第 ${row} 行没填数量`, { status: "error" });
+        return;
+      }
+      const q = Number(qtyRaw.replace(/[,，]/g, ""));
+      if (!Number.isFinite(q)) {
+        toast(`第 ${row} 行数量不是数字`, { description: `填的是「${qtyRaw}」`, status: "error" });
+        return;
+      }
+      if (q <= 0) {
+        toast(`第 ${row} 行数量必须大于 0`, { description: `填的是 ${q}`, status: "error" });
+        return;
+      }
+      if (mode.kind === "in" && line.price.trim() !== "") {
+        const p = Number(line.price.replace(/[,，¥￥\s]/g, ""));
+        if (!Number.isFinite(p) || p < 0) {
+          toast(`第 ${row} 行单价不是有效数字`, { description: `填的是「${line.price}」`, status: "error" });
+          return;
+        }
+      }
+    }
+
+    const payloadLines: VoucherLineInput[] = filled
+      .map(({ line }) => {
+        const p = Number(line.price.replace(/[,，¥￥\s]/g, ""));
         return {
           itemCode: line.itemCode.trim() || null,
           deliveryNo: line.deliveryNo.trim() || null,
           itemName: line.itemName.trim() || null,
           unit: line.unit.trim() || null,
-          qty: line.qty.trim() === "" ? null : Number(line.qty),
+          qty: Number(line.qty.replace(/[,，]/g, "")),
           priceMicros: mode.kind === "in" && Number.isFinite(p) && line.price.trim() !== "" ? Math.round(p * 10000) : null,
           remark: line.remark.trim() || null,
           spec: (line.spec ?? "").trim() || null,
@@ -912,7 +1017,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                   ariaLabel={isIn ? "供应商" : "出库部门"}
                   value={isIn ? head.partner : head.owner}
                   onChange={(v) =>
-                    setHead((prev) => (isIn ? { ...prev, partner: v } : { ...prev, owner: v }))
+                    editHead(isIn ? { partner: v } : { owner: v })
                   }
                   options={
                     isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))
@@ -941,7 +1046,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <input
                   aria-label={isIn ? "入库时间" : "出库时间"}
                   value={head.docDate}
-                  onChange={(e) => setHead((prev) => ({ ...prev, docDate: e.target.value }))}
+                  onChange={(e) => editHead({ docDate: e.target.value })}
                   onBlur={() => {
                     if (mode.id === null) freshDocNo(mode.kind, head.docDate);
                   }}
@@ -953,7 +1058,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <input
                   aria-label="单据编号"
                   value={head.docNo}
-                  onChange={(e) => setHead((prev) => ({ ...prev, docNo: e.target.value }))}
+                  onChange={(e) => editHead({ docNo: e.target.value })}
                   className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.8125rem] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
                 />
               </div>
@@ -1119,7 +1224,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <ComboPicker
                   ariaLabel="采购人"
                   value={head.buyer}
-                  onChange={(v) => setHead((prev) => ({ ...prev, buyer: v }))}
+                  onChange={(v) => editHead({ buyer: v })}
                   options={buyerOptions.map((name) => ({ value: name }))}
                   allowCustom
                   placeholder="选或输入"
@@ -1132,7 +1237,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <input
                   aria-label="仓管"
                   value={head.storekeeper}
-                  onChange={(e) => setHead((prev) => ({ ...prev, storekeeper: e.target.value }))}
+                  onChange={(e) => editHead({ storekeeper: e.target.value })}
                   placeholder="签字"
                   className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
@@ -1142,7 +1247,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
                 <input
                   aria-label="领用人签字"
                   value={head.receiver}
-                  onChange={(e) => setHead((prev) => ({ ...prev, receiver: e.target.value }))}
+                  onChange={(e) => editHead({ receiver: e.target.value })}
                   placeholder="签字"
                   className="h-8 min-w-0 flex-1 rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-body-regular text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                 />
@@ -1633,7 +1738,7 @@ const runDocSearch = useCallback(async (keyword: string) => {
           onCreated={(record) => {
             if (record.supplier) {
               // 新供应商直接填进单头
-              setHead((prev) => ({ ...prev, partner: record.supplier!.name }));
+              editHead({ partner: record.supplier!.name });
               void loadSuppliers();
               return;
             }
