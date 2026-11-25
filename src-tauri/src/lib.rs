@@ -49,8 +49,13 @@ pub fn run() {
             let dev_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .map(|p| p.to_path_buf());
+            let resource_dir = app.path().resource_dir().ok();
 
-            let state = Arc::new(commands::AppState::new(db.clone(), dev_root.clone()));
+            let state = Arc::new(commands::AppState::new(
+                db.clone(),
+                dev_root.clone(),
+                resource_dir.clone(),
+            ));
 
             let startup = commands::auto_import(&state);
             commands::seed_master_data(&state);
@@ -66,7 +71,7 @@ pub fn run() {
                 // 开发态：仓库根目录里的那一份，npm run build:remote 之后立刻生效
                 Some(dev_dist)
             } else {
-                paths::remote_dist(app.path().resource_dir().ok().as_deref(), None)
+                paths::remote_dist(resource_dir.as_deref(), None)
             };
             log::info!("只读站静态目录: {dist:?}");
             let handle = web::start(db.clone(), dist, web::DEFAULT_PORT);
@@ -80,17 +85,20 @@ pub fn run() {
             // 真正退出走托盘菜单「退出」。
             setup_tray(app.handle())?;
 
-            // 默认打开开机自动启动：只要用户没有手动在设置中关闭过，就默认开启并保持
-            let autostart_disabled = db::get_setting(&state.db, "autostart_disabled")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            if !autostart_disabled {
-                if let Ok(exe) = commands::current_exe() {
-                    if !autostart::is_enabled(&exe) {
-                        if let Err(e) = autostart::set_enabled(&exe, true) {
-                            log::warn!("默认开启开机自启失败: {e}");
-                        } else {
-                            log::info!("已默认开启开机自启: {}", exe.display());
+            // 默认打开开机自动启动（仅正式打包版生效，避免开发态把 target/debug 写进用户注册表）
+            #[cfg(not(debug_assertions))]
+            {
+                let autostart_disabled = db::get_setting(&state.db, "autostart_disabled")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
+                if !autostart_disabled {
+                    if let Ok(exe) = commands::current_exe() {
+                        if !autostart::is_enabled(&exe) {
+                            if let Err(e) = autostart::set_enabled(&exe, true) {
+                                log::warn!("默认开启开机自启失败: {e}");
+                            } else {
+                                log::info!("已默认开启开机自启: {}", exe.display());
+                            }
                         }
                     }
                 }
@@ -258,7 +266,13 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 bring_main_window_to_front(app);
             }
             "open_site" => {
-                let url = format!("http://localhost:{}", web::DEFAULT_PORT);
+                let port = app
+                    .try_state::<Arc<commands::AppState>>()
+                    .and_then(|st| st.web.lock().ok().and_then(|g| g.as_ref().map(|h| h.snapshot())))
+                    .filter(|s| s.listening && s.port > 0)
+                    .map(|s| s.port)
+                    .unwrap_or(web::DEFAULT_PORT);
+                let url = format!("http://localhost:{port}");
                 let _ = tauri_plugin_opener::open_url(url, None::<&str>);
             }
             "quit" => app.exit(0),
