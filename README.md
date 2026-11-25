@@ -34,10 +34,11 @@ crkgl-tauri2/
 │  ├─ src/summary.rs        GROUP BY 汇总
 │  ├─ src/import.rs         xlsm 解析：inspect → preview → run
 │  ├─ src/voucher.rs        单据（开单）与明细，voucher_create / voucher_get 等
+│  ├─ src/warehouse.rs      仓库档案、当前仓库、删除保护
 │  ├─ src/dict.rs           字典（单位/类别/类型/出库部门/采购人）增删改与同步
 │  ├─ src/web.rs            80 端口只读站（axum）
 │  ├─ src/commands.rs       Tauri 命令（唯一能写数据的入口）
-│  └─ migrations/           SQLite 增量迁移（001 ~ 013）
+│  └─ migrations/           SQLite 增量迁移（001 ~ 014）
 └─ scripts/                 rust90.cmd / bundle.cmd（MSVC + Rust 1.90 包装）、verify-*.mjs（DB 复核）
 ```
 
@@ -215,6 +216,28 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 
 开单页取字典的位置：明细的「单位」列是带搜索的下拉（可现输），表头的「出库部门」和
 「采购人」也是。物料表单的「单位」「类型」候选同样来自字典。
+
+## 多仓库
+
+侧栏顶部是仓库切换器，当前仓库名下面标着它的台账行数；点「管理仓库…」可以新建、改名、
+停用和删除（只在桌面端提供）。
+
+- **业务数据按仓隔离**：`ledger` / `vouchers` / `imports` 三张表带 `warehouse_id`。
+  台账、库存、开单、导入、导出、清空都只作用于当前仓库。
+- **基础资料全库通用**：物料、供应商、字典（单位/类别/类型/出库部门/采购人）不分仓，
+  多个仓共用同一套档案，删仓库也不会连带删物料。
+- **单号每仓独立**：仍是 `YYYYMMDD` + 3 位流水，唯一索引改成 `(warehouse_id, kind, doc_no)`，
+  两个仓同一天可以各有一张 `20260901001`。
+- **汇总页可以看全部**：汇总页的「全部仓库」开关把 `warehouse_id` 置空做合并统计，
+  只用于看总量；台账、库存、CSV 导出始终严格单仓。
+- **只读站的仓库选择是本地的**：每个同事在自己浏览器里选仓库，存在 `localStorage`，
+  互不影响；`/api/warehouses` 只返回清单，`/api/summary*` 才接受 `warehouse=all`。
+- **开单草稿按仓各存一份**：`ledger.voucher.draft.<warehouseId>`，切回来接着录；
+  老版本那份不带的草稿会在首次升级时归到当前仓。
+- **删除仓库需要二次确认**：有数据时后端先报数量，确认后在一个事务里删掉该仓的
+  台账、单据与导入记录；始终至少保留一个仓库。
+
+升级到这一版时，老库里的全部数据会落到自动创建的「主仓库」，单号与日期区间不变。
 
 ## 开单与批量操作
 
