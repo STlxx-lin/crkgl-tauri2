@@ -420,34 +420,40 @@ pub fn update(conn: &Connection, id: i64, patch: &LedgerPatch) -> DbResult<()> {
             }
         }
     }
-    tx.execute(
-        "UPDATE ledger SET
-            doc_date = COALESCE(?1, doc_date),
-            doc_no = COALESCE(?2, doc_no),
-            item_code = COALESCE(?3, item_code),
-            item_name = COALESCE(?4, item_name),
-            unit = COALESCE(?5, unit),
-            qty = COALESCE(?6, qty),
-            price_micros = COALESCE(?7, price_micros),
-            amount_cents = COALESCE(?8, amount_cents),
-            remark = COALESCE(?9, remark),
-            owner = COALESCE(?10, owner)
-         WHERE id = ?11",
-        rusqlite::params![
-            patch.doc_date.as_deref().map(normalize_date),
-            patch.doc_no,
-            patch.item_code,
-            patch.item_name,
-            patch.unit,
-            patch.qty,
-            patch.price_micros,
-            patch.amount_cents,
-            patch.remark,
-            patch.owner,
-            id
-        ],
-    )
-    .map_err(DbError::from)?;
+    let changed = tx
+        .execute(
+            "UPDATE ledger SET
+                doc_date = COALESCE(?1, doc_date),
+                doc_no = COALESCE(?2, doc_no),
+                item_code = COALESCE(?3, item_code),
+                item_name = COALESCE(?4, item_name),
+                unit = COALESCE(?5, unit),
+                qty = COALESCE(?6, qty),
+                price_micros = COALESCE(?7, price_micros),
+                amount_cents = COALESCE(?8, amount_cents),
+                remark = COALESCE(?9, remark),
+                owner = COALESCE(?10, owner)
+             WHERE id = ?11",
+            rusqlite::params![
+                patch.doc_date.as_deref().map(normalize_date),
+                patch.doc_no,
+                patch.item_code,
+                patch.item_name,
+                patch.unit,
+                patch.qty,
+                patch.price_micros,
+                patch.amount_cents,
+                patch.remark,
+                patch.owner,
+                id
+            ],
+        )
+        .map_err(DbError::from)?;
+    // 行在别处（批量删除/另一台机器）已经没了：以前这里静默成功，用户点保存
+    // 看不到任何变化也不报错。保存必须能失败，才知道该刷新列表。
+    if changed == 0 {
+        return Err("这一行已经不存在，可能已被删除，请刷新后重试".into());
+    }
     reconcile_vouchers(&tx)?;
     tx.commit().map_err(DbError::from)?;
     Ok(())
