@@ -59,6 +59,9 @@ fn voucher(kind: &str, date: &str, lines: Vec<VoucherLineInput>) -> VoucherInput
         },
         receiver: None,
         remark: None,
+        is_return: false,
+        source_voucher_id: None,
+        source_doc_no: None,
         lines,
     }
 }

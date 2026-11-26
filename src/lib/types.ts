@@ -2,10 +2,19 @@
 
 export type Kind = "in" | "out";
 
+/**
+ * 筛选用的类型：比 `Kind` 多一个 `ret`。
+ *
+ * 退货单在台账/单据表里的方向仍是 `out`（库存减少、金额计入出库），
+ * 但业务上是单独一类，所以筛选值多出 `ret`，由后端编译成
+ * `kind='out' AND is_return=1`；选 `out` 时不包含退货单。
+ */
+export type KindFilter = Kind | "ret";
+
 export interface LedgerFilter {
   from?: string | null;
   to?: string | null;
-  kind?: Kind | null;
+  kind?: KindFilter | null;
   owner?: string | null;
   partner?: string | null;
   buyer?: string | null;
@@ -40,6 +49,11 @@ export interface LedgerRow {
   rowNo: number;
   importId: number | null;
   createdAt: string | null;
+  /** 退回供应商的退货行（方向仍是 out） */
+  isReturn: boolean;
+  /** 退货行所属的原入库单 id / 单号 */
+  sourceVoucherId: number | null;
+  sourceDocNo: string | null;
 }
 
 export interface LedgerTotals {
@@ -362,6 +376,12 @@ export interface VoucherInput {
   owner?: string | null;
   receiver?: string | null;
   remark?: string | null;
+  /** 退回供应商的退货单：方向仍是 out，但单独取号、单独标记 */
+  isReturn?: boolean;
+  /** 退货的来源入库单 id（本机开过的单据） */
+  sourceVoucherId?: number | null;
+  /** 手工退货时填的原入库单号（Excel 导入的入库单没有单据头） */
+  sourceDocNo?: string | null;
   lines: VoucherLineInput[];
 }
 
@@ -394,6 +414,11 @@ export interface Voucher {
   amountCents: number;
   createdAt: string;
   sheet: string;
+  /** 是否退回供应商 */
+  isReturn: boolean;
+  /** 退货单的原入库单 id / 单号 */
+  sourceVoucherId: number | null;
+  sourceDocNo: string | null;
   lines: VoucherLine[];
 }
 
@@ -411,11 +436,15 @@ export interface VoucherSummary {
   firstItem: string | null;
   /** 送货单号：优先单头，老单据回落到第一行明细 */
   deliveryNo: string | null;
+  /** 是否退回供应商 */
+  isReturn: boolean;
+  /** 退货单的原入库单号 */
+  sourceDocNo: string | null;
 }
 
 /** 「开单记录」页的筛选条件，与 Rust `voucher::VoucherFilter` 一一对应。 */
 export interface VoucherFilter {
-  kind?: Kind | null;
+  kind?: KindFilter | null;
   /** 单号 / 送货单号 / 供应商 / 归属 / 采购人 / 明细物料编码或名称 */
   keyword?: string | null;
   from?: string | null;
@@ -433,6 +462,35 @@ export interface VoucherPage {
   amountCents: number;
   inCount: number;
   outCount: number;
+  /** 退货单张数（已包含在 outCount 里） */
+  retCount: number;
+}
+
+/** 原入库单的一行「可退明细」：按物料聚合后的原数量与已退数量。 */
+export interface ReturnableLine {
+  itemCode: string | null;
+  itemName: string | null;
+  spec: string | null;
+  unit: string | null;
+  /** 原单该物料的入库数量合计 */
+  origQty: number;
+  /** 已退数量（同一来源单的所有退货单合计） */
+  returnedQty: number;
+  /** 还可退 = 原数量 - 已退 */
+  returnableQty: number;
+  /** 原单该物料的单价（万分之一元） */
+  priceMicros: number | null;
+}
+
+/** 退货录入用的原入库单信息 + 可退明细。 */
+export interface ReturnSource {
+  voucherId: number;
+  docNo: string;
+  docDate: string;
+  partner: string | null;
+  buyer: string | null;
+  remark: string | null;
+  lines: ReturnableLine[];
 }
 
 export interface ItemMaster {
@@ -592,6 +650,10 @@ export interface DocHit {
   amountCents: number;
   source: "voucher" | "import";
   voucherId: number | null;
+  /** 是否退回供应商 */
+  isReturn: boolean;
+  /** 退货单的原入库单号 */
+  sourceDocNo: string | null;
 }
 
 // ---------- 库存 ----------

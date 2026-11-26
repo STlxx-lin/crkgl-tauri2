@@ -56,6 +56,11 @@ pub struct LedgerRow {
     pub row_no: i64,
     pub import_id: Option<i64>,
     pub created_at: Option<String>,
+    /// 退回供应商的退货行（台账方向仍是 `out`）
+    pub is_return: bool,
+    /// 退货行所属的原入库单 id / 单号
+    pub source_voucher_id: Option<i64>,
+    pub source_doc_no: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,9 +140,12 @@ pub fn compile_where(filter: &LedgerFilter) -> (String, Vec<Value>) {
         params.push(Value::Text(normalize_date(to)));
     }
     if let Some(kind) = text(&filter.kind) {
-        if kind == "in" || kind == "out" {
-            clauses.push("kind = ?");
-            params.push(Value::Text(kind.to_string()));
+        // 退货单在台账里方向仍是 out，但业务上与普通出库分开：选「出库」不含退货。
+        match kind {
+            "in" => clauses.push("(kind = 'in')"),
+            "out" => clauses.push("(kind = 'out' AND is_return = 0)"),
+            "ret" => clauses.push("(kind = 'out' AND is_return = 1)"),
+            _ => {}
         }
     }
     if let Some(owner) = text(&filter.owner) {
@@ -240,6 +248,9 @@ pub(crate) fn bind_row_pub(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRo
         row_no: row.get("row_no")?,
         import_id: row.get("import_id")?,
         created_at: row.get("created_at")?,
+        is_return: row.get::<_, i64>("is_return")? == 1,
+        source_voucher_id: row.get("source_voucher_id")?,
+        source_doc_no: row.get("source_doc_no")?,
     })
 }
 
@@ -252,7 +263,8 @@ fn split_flags(raw: &str) -> Vec<String> {
 }
 
 pub(crate) const SELECT_COLUMNS_PUB: &str = "id, kind, doc_date, doc_no, delivery_no, item_code, item_name, spec, unit,
-    qty, price_micros, amount_cents, remark, partner, buyer, owner, receiver, flags, sheet, row_no, import_id, created_at";
+    qty, price_micros, amount_cents, remark, partner, buyer, owner, receiver, flags, sheet, row_no, import_id, created_at,
+    is_return, source_voucher_id, source_doc_no";
 
 pub fn totals(conn: &Connection, filter: &LedgerFilter) -> DbResult<LedgerTotals> {
     let (where_sql, params) = compile_where(filter);
@@ -623,10 +635,17 @@ pub fn export_csv(conn: &Connection, filter: &LedgerFilter, limit: i64) -> DbRes
         .map_err(DbError::from)?;
 
     let mut out = String::from("\u{feff}");
-    out.push_str("类型,日期,单据编号,送货单号,物料编码,物料名称,规格/单位,单位,数量,单价,合计,供应商,采购人,归属,领用人,备注,提醒,来源表,源行号\n");
+    out.push_str("类型,日期,单据编号,送货单号,物料编码,物料名称,规格/单位,单位,数量,单价,合计,供应商,采购人,归属,领用人,备注,提醒,来源表,源行号,原单号\n");
     for row in &rows {
+        let kind_text = if row.is_return {
+            "退货"
+        } else if row.kind == "in" {
+            "入库"
+        } else {
+            "出库"
+        };
         let fields = [
-            if row.kind == "in" { "入库" } else { "出库" }.to_string(),
+            kind_text.to_string(),
             row.doc_date.clone().unwrap_or_default(),
             row.doc_no.clone().unwrap_or_default(),
             row.delivery_no.clone().unwrap_or_default(),
@@ -645,6 +664,7 @@ pub fn export_csv(conn: &Connection, filter: &LedgerFilter, limit: i64) -> DbRes
             row.flags.join(" "),
             row.sheet.clone(),
             row.row_no.to_string(),
+            row.source_doc_no.clone().unwrap_or_default(),
         ];
         out.push_str(&csv_row(&fields));
     }

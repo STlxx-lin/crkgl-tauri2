@@ -46,6 +46,9 @@ export function PrintVoucher({
   }, [onClose]);
 
   const isIn = voucher.kind === "in";
+  /** 退货单：方向是出库，但纸面按「退货单」排版（带单价金额、签字是供应商签收） */
+  const isReturn = voucher.isReturn;
+  const hasDeliveryCol = isIn;
   const pages = useMemo(() => paginate(voucher.lines, perPage), [voucher.lines, perPage]);
   const totalAmount = voucher.lines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0);
   const totalQty = voucher.lines.reduce((sum, line) => sum + (line.qty ?? 0), 0);
@@ -95,21 +98,26 @@ export function PrintVoucher({
               {companyName?.trim() ? (
                 <div className="print-company">{companyName.trim()}</div>
               ) : null}
-              <h1 className="print-title">{isIn ? "入库单" : "出库单"}</h1>
+              <h1 className="print-title">{isReturn ? "退货单" : isIn ? "入库单" : "出库单"}</h1>
             </div>
 
             <div className="print-meta">
               <div className="print-meta-row">
-                <span className="print-meta-label">{isIn ? "供应商名称" : "归属"}：</span>
+                <span className="print-meta-label">{isIn || isReturn ? "供应商名称" : "归属"}：</span>
                 <span className="print-meta-value">
-                  {(isIn ? voucher.partner : (voucher.owner ?? voucher.partner)) ?? ""}
+                  {(isIn || isReturn ? voucher.partner : (voucher.owner ?? voucher.partner)) ?? ""}
                 </span>
               </div>
               <div className="print-meta-row">
                 <span className="print-meta-label">单据编号：</span>
                 <span className="print-meta-value">{voucher.docNo}</span>
               </div>
-              {isIn ? (
+              {isReturn ? (
+                <div className="print-meta-row">
+                  <span className="print-meta-label">原入库单号：</span>
+                  <span className="print-meta-value">{voucher.sourceDocNo ?? ""}</span>
+                </div>
+              ) : isIn ? (
                 <div className="print-meta-row">
                   <span className="print-meta-label">送货单号：</span>
                   <span className="print-meta-value">
@@ -120,13 +128,13 @@ export function PrintVoucher({
                 <div aria-hidden />
               )}
               <div className="print-meta-row">
-                <span className="print-meta-label">{isIn ? "入库时间" : "出库时间"}：</span>
+                <span className="print-meta-label">{isReturn ? "退货时间" : isIn ? "入库时间" : "出库时间"}：</span>
                 <span className="print-meta-value">{date(voucher.docDate)}</span>
               </div>
             </div>
 
             <table className="print-table">
-              {isIn ? (
+              {hasDeliveryCol ? (
                 <colgroup>
                   <col style={{ width: "5%" }} />
                   <col style={{ width: "13%" }} />
@@ -153,7 +161,7 @@ export function PrintVoucher({
               <thead>
                 <tr>
                   <th>序号</th>
-                  {isIn ? <th>送货单号</th> : null}
+                  {hasDeliveryCol ? <th>送货单号</th> : null}
                   <th>物料编码</th>
                   <th>物料名称</th>
                   <th>单位</th>
@@ -167,7 +175,7 @@ export function PrintVoucher({
                 {chunk.map((line, index) => (
                   <tr key={`${pageIndex}-${line.id}`}>
                     <td className="print-center">{pageIndex * perPage + index + 1}</td>
-                    {isIn ? <td>{line.deliveryNo ?? ""}</td> : null}
+                    {hasDeliveryCol ? <td>{line.deliveryNo ?? ""}</td> : null}
                     <td>{line.itemCode ?? ""}</td>
                     <td>{line.itemName ?? ""}</td>
                     <td className="print-center">{line.unit ?? ""}</td>
@@ -181,12 +189,12 @@ export function PrintVoucher({
                 {chunk.length === 0 ? (
                   <tr aria-hidden>
                     <td className="print-center">1</td>
-                    <td colSpan={isIn ? 8 : 7}>&nbsp;</td>
+                    <td colSpan={hasDeliveryCol ? 8 : 7}>&nbsp;</td>
                   </tr>
                 ) : null}
                 {pageIndex === pages.length - 1 ? (
                   <tr className="print-total">
-                    <td colSpan={isIn ? 5 : 4} className="print-num">
+                    <td colSpan={hasDeliveryCol ? 5 : 4} className="print-num">
                       合计
                     </td>
                     <td className="print-num">{qty(totalQty)}</td>
@@ -206,7 +214,7 @@ export function PrintVoucher({
                 仓管：<span>&nbsp;</span>
               </div>
               <div>
-                领用人：<span>{voucher.receiver || "\u00a0"}</span>
+                {isReturn ? "供应商签收" : "领用人"}：<span>{voucher.receiver || "\u00a0"}</span>
               </div>
             </div>
 

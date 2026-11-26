@@ -24,6 +24,7 @@ import type {
   DocHit,
   VoucherInput,
   VoucherSummary,
+  ReturnSource,
   BootstrapInfo,
   ExportResult,
   Facets,
@@ -329,6 +330,19 @@ export function listVoucherPage(filter: VoucherFilter, page: number, pageSize: n
 
 export function nextDocNo(kind: Kind, date: string): Promise<string> {
   return call<string>("voucher_next_no", { kind, date });
+}
+
+/** 退货单取号：`TH` + 日期 + 3 位流水。 */
+export function nextReturnDocNo(date: string): Promise<string> {
+  return call<string>("voucher_next_return_no", { date });
+}
+
+/** 退货录入：原入库单信息 + 每行「已退 / 可退」。编辑退货单时传 excludeVoucher。 */
+export function fetchReturnSource(id: number, excludeVoucher?: number | null): Promise<ReturnSource> {
+  return call<ReturnSource>("voucher_return_source", {
+    id,
+    excludeVoucher: excludeVoucher ?? null,
+  });
 }
 
 export function fetchItemMaster(

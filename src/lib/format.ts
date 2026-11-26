@@ -96,9 +96,16 @@ export function flagLabel(flag: string): string {
 export function kindLabel(kind: string): string {
   if (kind === "in") return "入库";
   if (kind === "out") return "出库";
+  // 退回供应商：台账方向仍是 out，但业务上是单独一类
+  if (kind === "ret") return "退货";
   // 月度进销存宽表拆出来的流水，方向逐行不同
   if (kind === "pivot") return "进销存";
   return kind;
+}
+
+/** 一行台账/一张单据的显示类型：退货优先于 kind（退货的方向也是 out）。 */
+export function rowKindLabel(row: { kind: string; isReturn?: boolean }): string {
+  return row.isReturn ? "退货" : kindLabel(row.kind);
 }
 
 /**

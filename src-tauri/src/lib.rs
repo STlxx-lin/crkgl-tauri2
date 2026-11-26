@@ -159,6 +159,8 @@ pub fn run() {
             commands::voucher_list,
             commands::voucher_list_page,
             commands::voucher_next_no,
+            commands::voucher_next_return_no,
+            commands::voucher_return_source,
             commands::item_master,
             commands::items_list,
             commands::items_count,

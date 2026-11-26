@@ -8,8 +8,8 @@
 export interface VoucherRequest {
   nonce: number;
   id: number;
-  /** edit = 载入编辑；convert = 抄成反向类型的新单 */
-  action: "edit" | "convert";
+  /** edit = 载入编辑；convert = 抄成反向类型的新单；return = 从这张入库单退货 */
+  action: "edit" | "convert" | "return";
 }
 
 let seq = 0;
