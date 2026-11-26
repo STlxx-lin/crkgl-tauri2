@@ -11,12 +11,14 @@ import { AppShell, type PageKey } from "./components/AppShell";
 import { WarehousePicker, loadRemoteWarehouses, rememberRemoteWarehouse } from "./components/WarehousePicker";
 import { LedgerScreen } from "./screens/LedgerScreen";
 import { VoucherScreen } from "./screens/VoucherScreen";
+import { VoucherRecordsScreen } from "./screens/VoucherRecordsScreen";
 import { MasterScreen } from "./screens/MasterScreen";
 import { SummaryScreen } from "./screens/SummaryScreen";
 import { StockScreen } from "./screens/StockScreen";
 import { ImportScreen } from "./screens/ImportScreen";
 import { RemoteScreen } from "./screens/RemoteScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { nextVoucherRequest, type VoucherRequest } from "./lib/voucherRequest";
 
 type Phase = "boot" | "ready" | "error";
 
@@ -37,6 +39,8 @@ export default function App() {
   const [activeWarehouseId, setActiveWarehouseId] = useState<number>(0);
   // 切换仓库后加一：给各页面当 key，强制重新挂载重新拉数
   const [warehouseEpoch, setWarehouseEpoch] = useState(0);
+  // 从「开单记录」交给开单页的请求（载入编辑 / 转单）
+  const [voucherRequest, setVoucherRequest] = useState<VoucherRequest | null>(null);
   const loaded = useRef(false);
 
   const load = useCallback(async (silent = false) => {
@@ -262,6 +266,8 @@ export default function App() {
               warehouseName={activeWarehouse?.name ?? null}
               companyName={activeWarehouse?.companyName ?? null}
               onChanged={refreshBoot}
+              onOpenRecords={() => setPage("records")}
+              request={voucherRequest}
             />
           </div>
         ) : null}
@@ -273,6 +279,19 @@ export default function App() {
             boot={boot}
             warehouseName={activeWarehouse?.name ?? null}
             onChanged={refreshBoot}
+          />
+        ) : page === "records" ? (
+          <VoucherRecordsScreen
+            key={warehouseEpoch}
+            warehouseName={activeWarehouse?.name ?? null}
+            companyName={activeWarehouse?.companyName ?? null}
+            onChanged={refreshBoot}
+            onNewVoucher={() => setPage("voucher")}
+            onOpenVoucher={(req) => {
+              // 先落请求再切页：开单页常驻挂载，靠 nonce 触发一次
+              setVoucherRequest(nextVoucherRequest(req.id, req.action));
+              setPage("voucher");
+            }}
           />
         ) : page === "master" ? (
           <MasterScreen onChanged={refreshBoot} />

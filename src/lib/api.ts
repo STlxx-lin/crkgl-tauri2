@@ -19,6 +19,8 @@ import type {
   MasterImportOutcome,
   Kind,
   Voucher,
+  VoucherFilter,
+  VoucherPage,
   DocHit,
   VoucherInput,
   VoucherSummary,
@@ -318,6 +320,11 @@ export function getVoucher(id: number): Promise<Voucher | null> {
 
 export function listVouchers(kind?: Kind | null, limit = 50): Promise<VoucherSummary[]> {
   return call<VoucherSummary[]>("voucher_list", { kind: kind ?? null, limit });
+}
+
+/** 「开单记录」页：按条件分页取单据，汇总按整份命中集算。 */
+export function listVoucherPage(filter: VoucherFilter, page: number, pageSize: number): Promise<VoucherPage> {
+  return call<VoucherPage>("voucher_list_page", { filter, page, pageSize });
 }
 
 export function nextDocNo(kind: Kind, date: string): Promise<string> {

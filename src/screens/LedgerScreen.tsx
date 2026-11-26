@@ -25,6 +25,7 @@ import { exportFileName, saveCsvFile } from "../lib/exportCsv";
 import { amount, count, date, flagLabel, kindLabel, money, priceText, qty } from "../lib/format";
 import { useVirtualRows } from "../lib/useVirtualRows";
 import { useStoredPageSize } from "../lib/pageSize";
+import { RANGE_PRESETS, rangeFor } from "../lib/dateRange";
 import { mergeRowsByDoc, onMergeByDocChange, saveMergeByDoc, storedMergeByDoc } from "../lib/mergeDocs";
 import { Button } from "@/components/base/buttons/button";
 import { Pagination } from "@/components/base/pagination/pagination";
@@ -38,6 +39,7 @@ import { Spinner } from "@/components/base/spinner/spinner";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/AppShell";
 import { RowDetail } from "../components/RowDetail";
+import { ChipGroup } from "../components/ChipGroup";
 
 // 每页行数可选：8 千行时 100 行/页要翻 77 页，看着累。
 const PAGE_SIZES = [50, 100, 200, 500] as const;
@@ -54,33 +56,6 @@ const KINDS: { id: string; label: string }[] = [
   { id: "in", label: "入库" },
   { id: "out", label: "出库" },
 ];
-const RANGE_PRESETS: { id: string; label: string }[] = [
-  { id: "all", label: "全部" },
-  { id: "month", label: "本月" },
-  { id: "lastMonth", label: "上月" },
-  { id: "thisYear", label: "本年" },
-];
-function isoDate(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function rangeFor(preset: string): { from: string | null; to: string | null } {
-  const now = new Date();
-  if (preset === "month") {
-    return { from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)), to: isoDate(now) };
-  }
-  if (preset === "lastMonth") {
-    return {
-      from: isoDate(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
-      to: isoDate(new Date(now.getFullYear(), now.getMonth(), 0)),
-    };
-  }
-  if (preset === "thisYear") {
-    return { from: `${now.getFullYear()}-01-01`, to: isoDate(now) };
-  }
-  return { from: null, to: null };
-}
 
 interface LedgerScreenProps {
   boot: BootstrapInfo | null;
@@ -861,44 +836,6 @@ function SortHeader({
         {active && !desc ? "↑" : "↓"}
       </span>
     </button>
-  );
-}
-
-function ChipGroup({
-  items,
-  value,
-  onSelect,
-  label,
-}: {
-  items: { id: string; label: string }[];
-  value: string;
-  onSelect: (id: string) => void;
-  label: string;
-}) {
-  return (
-    <div
-      role="radiogroup"
-      aria-label={label}
-      className="flex items-center gap-0.5 rounded-lg bg-background-secondary-default p-0.5"
-    >
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          role="radio"
-          aria-checked={value === item.id}
-          onClick={() => onSelect(item.id)}
-          className={
-            "h-7 rounded-md px-2.5 text-caption-1-semibold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring " +
-            (value === item.id
-              ? "bg-background-primary-default text-text-primary shadow-xs ring-1 ring-separator-border"
-              : "text-text-tertiary hover:text-text-secondary")
-          }
-        >
-          {item.label}
-        </button>
-      ))}
-    </div>
   );
 }
 

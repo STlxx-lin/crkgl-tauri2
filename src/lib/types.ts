@@ -409,6 +409,30 @@ export interface VoucherSummary {
   createdAt: string;
   /** 第一行明细的物料名，供应商为空时用它显示 */
   firstItem: string | null;
+  /** 送货单号：优先单头，老单据回落到第一行明细 */
+  deliveryNo: string | null;
+}
+
+/** 「开单记录」页的筛选条件，与 Rust `voucher::VoucherFilter` 一一对应。 */
+export interface VoucherFilter {
+  kind?: Kind | null;
+  /** 单号 / 送货单号 / 供应商 / 归属 / 采购人 / 明细物料编码或名称 */
+  keyword?: string | null;
+  from?: string | null;
+  to?: string | null;
+  owner?: string | null;
+  buyer?: string | null;
+}
+
+/** 分页结果：汇总字段是整份命中集的，不是当前页。 */
+export interface VoucherPage {
+  rows: VoucherSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+  amountCents: number;
+  inCount: number;
+  outCount: number;
 }
 
 export interface ItemMaster {

@@ -651,6 +651,17 @@ pub fn voucher_next_no(state: State<'_, Arc<AppState>>, kind: String, date: Stri
     voucher::next_doc_no_db(&state.db, state.wh()?, &kind, &date)
 }
 
+/// 「开单记录」页：按条件分页取单据 + 整份命中集汇总。
+#[tauri::command]
+pub fn voucher_list_page(
+    state: State<'_, Arc<AppState>>,
+    filter: voucher::VoucherFilter,
+    page: i64,
+    page_size: i64,
+) -> Result<voucher::VoucherPage, String> {
+    voucher::list_page_db(&state.db, state.wh()?, &filter, page, page_size)
+}
+
 /// 物料快速输入候选。`inbound_only` 为真时只统计已入库的物料，
 /// 开单页的「物料编码」就是要引用真正入库过的数据。
 #[tauri::command]

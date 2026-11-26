@@ -444,3 +444,215 @@ fn each_line_keeps_its_own_delivery_no() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// 「开单记录」页的分页命令：走真实文件库，验证
+/// 分页顺序、筛选、以及**整份命中集**的汇总都和列表页一致。
+#[test]
+fn voucher_list_page_filters_and_counts() {
+    use warehouse_ledger_lib::voucher::VoucherFilter;
+
+    let (db, dir) = temp_db();
+    let db = Arc::new(db);
+
+    // 两张入库（不同日期、不同供应商）、一张出库
+    let in1 = voucher::create_db(
+        &db,
+        1,
+        &voucher("in", "2026-09-01", vec![line("WG-A", "外卡", 2.0, Some(10_000))]),
+    )
+    .expect("in1");
+    let in2 = voucher::create_db(
+        &db,
+        1,
+        &voucher("in", "2026-09-03", vec![line("WG-B", "轴承", 1.0, Some(50_000))]),
+    )
+    .expect("in2");
+    let out1 = voucher::create_db(
+        &db,
+        1,
+        &voucher("out", "2026-09-02", vec![line("WG-A", "外卡", 1.0, None)]),
+    )
+    .expect("out1");
+    assert!(in1 != in2 && in2 != out1);
+
+    // 第一页只放一张：应按日期倒序，最新的在前
+    let first = voucher::list_page_db(&db, 1, &VoucherFilter::default(), 1, 1).expect("page1");
+    assert_eq!(first.total, 3);
+    assert_eq!(first.in_count, 2);
+    assert_eq!(first.out_count, 1);
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].id, in2);
+    assert_eq!(first.page, 1);
+    assert_eq!(first.page_size, 1);
+    // 汇总按整份命中集算，不是当前页：2 件 × 1.00 元 + 1 件 × 5.00 元
+    assert_eq!(first.amount_cents, 2 * 100 + 500);
+
+    let second = voucher::list_page_db(&db, 1, &VoucherFilter::default(), 2, 1).expect("page2");
+    assert_eq!(second.rows[0].id, out1);
+
+    // 越界页返回空行，但汇总仍是整份
+    let beyond = voucher::list_page_db(&db, 1, &VoucherFilter::default(), 9, 10).expect("page9");
+    assert!(beyond.rows.is_empty());
+    assert_eq!(beyond.total, 3);
+
+    // 类型筛选：汇总跟着筛选变
+    let only_out = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            kind: Some("out".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("only out");
+    assert_eq!(only_out.total, 1);
+    assert_eq!(only_out.in_count, 0);
+    assert_eq!(only_out.out_count, 1);
+    assert_eq!(only_out.rows[0].id, out1);
+
+    // 关键字命中单号片段
+    let by_no = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            keyword: Some("0901".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by no");
+    assert_eq!(by_no.total, 1);
+    assert_eq!(by_no.rows[0].id, in1);
+
+    // 关键字命中明细物料名（单头里没有这两个字）
+    let by_item = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            keyword: Some("轴承".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by item");
+    assert_eq!(by_item.total, 1);
+    assert_eq!(by_item.rows[0].id, in2);
+
+    // 日期区间闭区间
+    let ranged = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            from: Some("2026-09-02".into()),
+            to: Some("2026-09-03".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("ranged");
+    assert_eq!(ranged.total, 2);
+
+    // 归属（出库单才有）
+    let by_owner = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            owner: Some("乾力车间".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by owner");
+    assert_eq!(by_owner.total, 1);
+    assert_eq!(by_owner.rows[0].id, out1);
+
+    // 采购人（三张单都是严兰兰）
+    let by_buyer = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            buyer: Some("严兰兰".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by buyer");
+    assert_eq!(by_buyer.total, 3);
+
+    // 另一个仓看不到这些单
+    let other_wh = voucher::list_page_db(&db, 2, &VoucherFilter::default(), 1, 10).expect("other wh");
+    assert_eq!(other_wh.total, 0);
+    assert!(other_wh.rows.is_empty());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 送货单号既要能搜，也要在列表里显示出来：
+/// 新单据记在单头，老单据只写在明细行上，两种都得能搜到、能显示。
+#[test]
+fn voucher_list_page_delivery_no_search_and_fallback() {
+    use warehouse_ledger_lib::voucher::VoucherFilter;
+
+    let (db, dir) = temp_db();
+    let db = Arc::new(db);
+
+    // 甲：送货单号只在单头
+    let mut head_only = voucher("in", "2026-10-01", vec![line("WG-A", "外卡", 1.0, Some(10_000))]);
+    head_only.delivery_no = Some("SD-HEAD-1".into());
+    let head_id = voucher::create_db(&db, 1, &head_only).expect("head only");
+
+    // 乙：单头不填，只写在明细行上（老单据的存法）
+    let mut line_only = voucher(
+        "in",
+        "2026-10-02",
+        vec![line_with_delivery("WG-B", 1.0, Some("SD-LINE-2"))],
+    );
+    line_only.delivery_no = None;
+    let line_id = voucher::create_db(&db, 1, &line_only).expect("line only");
+
+    // 列表里两种都要显示出来（单头为空时回落到第一行明细）
+    let all = voucher::list_page_db(&db, 1, &VoucherFilter::default(), 1, 10).expect("all");
+    assert_eq!(all.total, 2);
+    let by_id = |id: i64| all.rows.iter().find(|r| r.id == id).expect("row");
+    assert_eq!(by_id(head_id).delivery_no.as_deref(), Some("SD-HEAD-1"));
+    assert_eq!(by_id(line_id).delivery_no.as_deref(), Some("SD-LINE-2"));
+
+    // 搜索命中单头送货单号
+    let by_head = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            keyword: Some("SD-HEAD".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by head delivery");
+    assert_eq!(by_head.total, 1);
+    assert_eq!(by_head.rows[0].id, head_id);
+
+    // 搜索命中明细行送货单号
+    let by_line = voucher::list_page_db(
+        &db,
+        1,
+        &VoucherFilter {
+            keyword: Some("SD-LINE".into()),
+            ..Default::default()
+        },
+        1,
+        10,
+    )
+    .expect("by line delivery");
+    assert_eq!(by_line.total, 1);
+    assert_eq!(by_line.rows[0].id, line_id);
+
+    let _ = std::fs::remove_dir_all(dir);
+}

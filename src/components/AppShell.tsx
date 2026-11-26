@@ -4,6 +4,7 @@ import {
   RiBookOpenLine,
   RiFileAddLine,
   RiFileList3Line,
+  RiHistoryLine,
   RiInbox2Line,
   RiServerLine,
   RiSettings3Line,
@@ -13,7 +14,16 @@ import { cx } from "@/utils/cx";
 import { ThemeToggle } from "./ThemeToggle";
 import { FontScaleToggle } from "./FontScaleToggle";
 
-export type PageKey = "ledger" | "voucher" | "master" | "summary" | "stock" | "import" | "remote" | "settings";
+export type PageKey =
+  | "ledger"
+  | "voucher"
+  | "records"
+  | "master"
+  | "summary"
+  | "stock"
+  | "import"
+  | "remote"
+  | "settings";
 
 interface NavItem {
   key: PageKey;
@@ -25,6 +35,7 @@ interface NavItem {
 const ITEMS: NavItem[] = [
   // 开单放第一位：日常最常做的就是录一张单
   { key: "voucher", label: "开单", icon: RiFileAddLine, hint: "新入库/出库单" },
+  { key: "records", label: "开单记录", icon: RiHistoryLine, hint: "已保存的单据" },
   { key: "ledger", label: "台账", icon: RiFileList3Line, hint: "入库与出库明细" },
   { key: "master", label: "基础资料", icon: RiBookOpenLine, hint: "物料与供应商" },
   { key: "summary", label: "汇总", icon: RiBarChart2Line, hint: "按月与按归属" },

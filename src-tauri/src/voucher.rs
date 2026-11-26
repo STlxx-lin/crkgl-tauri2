@@ -4,6 +4,7 @@
 //! 单据编号沿用 Excel 的习惯：`YYYYMMDD` + 3 位当日流水（`20260831206`）。
 //! 物料主数据不单独建表，直接从历史台账里按编码聚合出「名称 / 单位 / 最近单价」。
 
+use rusqlite::types::Value;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +101,37 @@ pub struct VoucherSummary {
     pub created_at: String,
     /// 第一行明细的物料名：供应商/归属为空时用它撑起列表第二条信息
     pub first_item: Option<String>,
+    /// 送货单号：优先取单头的，没有就回落到第一行明细的。
+    /// 老单据的送货单号只记在明细行上，只看单头会显示成「—」。
+    pub delivery_no: Option<String>,
+}
+
+/// 「开单记录」页的筛选条件。字段名与前端 `VoucherFilter` 一致（camelCase）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VoucherFilter {
+    /// `in` / `out` / 空 = 全部
+    pub kind: Option<String>,
+    /// 关键字：单号、送货单号、供应商、归属、采购人、明细物料编码/名称
+    pub keyword: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub owner: Option<String>,
+    pub buyer: Option<String>,
+}
+
+/// 分页结果。`total` / 金额与类型计数都是**整份筛选命中集**的汇总，
+/// 不是当前页的合计——记录页底部要显示「共 N 张 · 合计 ¥…」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoucherPage {
+    pub rows: Vec<VoucherSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub amount_cents: i64,
+    pub in_count: i64,
+    pub out_count: i64,
 }
 
 /// 物料主数据：从历史台账聚合，用于开单时联动带出单位与单价。
@@ -335,8 +367,8 @@ pub fn get(conn: &Connection, id: i64) -> DbResult<Option<Voucher>> {
 }
 
 pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64) -> DbResult<Vec<VoucherSummary>> {
-    // 上限跟前端 `HISTORY_CAP` 对齐：前端允许「加载更早」到 500 张，
-    // 这里若仍卡在 200，点两次之后按钮就消失，用户会以为系统里只有 200 张单。
+    // 开单页只取最近几张做快捷回看（`RECENT_LIMIT`），完整历史走 `list_page`。
+    // 上限仍留 500：外部脚本或旧前端调这个命令时要够用。
     let limit = limit.clamp(1, 500);
     let mut stmt = conn
         .prepare(
@@ -344,7 +376,12 @@ pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64
                     v.created_at,
                     (SELECT l.item_name FROM ledger l
                       WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
-                      ORDER BY l.row_no, l.id LIMIT 1) AS first_item
+                      ORDER BY l.row_no, l.id LIMIT 1) AS first_item,
+                    -- 送货单号优先取单头；老单据只把号码记在明细行上，回落到第一行
+                    COALESCE(NULLIF(TRIM(v.delivery_no), ''),
+                             (SELECT l.delivery_no FROM ledger l
+                               WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.delivery_no,'')) <> ''
+                               ORDER BY l.row_no, l.id LIMIT 1)) AS delivery_no
              FROM vouchers v
              WHERE v.warehouse_id = ?3 AND (?1 IS NULL OR v.kind = ?1)
              ORDER BY v.doc_date DESC, v.id DESC
@@ -364,11 +401,149 @@ pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64
                 amount_cents: r.get(7)?,
                 created_at: r.get(8)?,
                 first_item: r.get(9)?,
+                delivery_no: r.get(10)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
         .map_err(DbError::from)?;
     Ok(rows)
+}
+
+/// 把筛选条件编译成 `WHERE` 片段 + 参数。列表与汇总共用，保证
+/// 「筛出来的单」和底部「共 N 张 · 合计」永远对应（同 `ledger::compile_where`）。
+fn compile_voucher_where(filter: &VoucherFilter, warehouse_id: i64) -> (String, Vec<Value>) {
+    let mut clauses: Vec<&str> = vec!["v.warehouse_id = ?"];
+    let mut params: Vec<Value> = vec![Value::Integer(warehouse_id)];
+
+    if let Some(kind) = trimmed(&filter.kind) {
+        if kind == "in" || kind == "out" {
+            clauses.push("v.kind = ?");
+            params.push(Value::Text(kind.to_string()));
+        }
+    }
+    if let Some(from) = trimmed(&filter.from) {
+        clauses.push("v.doc_date >= ?");
+        params.push(Value::Text(normalize_date(from)));
+    }
+    if let Some(to) = trimmed(&filter.to) {
+        clauses.push("v.doc_date <= ?");
+        params.push(Value::Text(normalize_date(to)));
+    }
+    if let Some(owner) = trimmed(&filter.owner) {
+        clauses.push("v.owner = ?");
+        params.push(Value::Text(owner.to_string()));
+    }
+    if let Some(buyer) = trimmed(&filter.buyer) {
+        clauses.push("v.buyer = ?");
+        params.push(Value::Text(buyer.to_string()));
+    }
+    if let Some(keyword) = trimmed(&filter.keyword) {
+        // 单头字段之外还要能按明细分「这张单里有没有这个料」，
+        // 用 EXISTS 走 `ix_ledger_wh_voucher`（前缀是 warehouse_id），
+        // 不去 JOIN 放大行数。
+        //
+        // 送货单号两头都要搜：新单记在单头，老单据只写在明细行上，
+        // 只搜单头的话列表里明明显示着号码却搜不出来。
+        let like = crate::ledger::like_pattern(keyword);
+        clauses.push(
+            "(v.doc_no LIKE ? ESCAPE '\\' OR v.partner LIKE ? ESCAPE '\\'
+              OR v.owner LIKE ? ESCAPE '\\' OR v.buyer LIKE ? ESCAPE '\\'
+              OR v.delivery_no LIKE ? ESCAPE '\\'
+              OR EXISTS (SELECT 1 FROM ledger l
+                          WHERE l.warehouse_id = v.warehouse_id AND l.voucher_id = v.id
+                            AND (l.item_name LIKE ? ESCAPE '\\' OR l.item_code LIKE ? ESCAPE '\\'
+                                 OR l.delivery_no LIKE ? ESCAPE '\\')))",
+        );
+        for _ in 0..8 {
+            params.push(Value::Text(like.clone()));
+        }
+    }
+    (clauses.join(" AND "), params)
+}
+
+/// 记录页：按条件分页取单据，并带回整份命中集的汇总。
+pub fn list_page(
+    conn: &Connection,
+    warehouse_id: i64,
+    filter: &VoucherFilter,
+    page: i64,
+    page_size: i64,
+) -> DbResult<VoucherPage> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 200);
+    let (where_sql, params) = compile_voucher_where(filter, warehouse_id);
+
+    let summary_sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(v.amount_cents), 0),
+                COALESCE(SUM(CASE WHEN v.kind = 'in' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN v.kind = 'out' THEN 1 ELSE 0 END), 0)
+         FROM vouchers v WHERE {where_sql}"
+    );
+    let (total, amount_cents, in_count, out_count) = conn
+        .query_row(&summary_sql, rusqlite::params_from_iter(params.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(DbError::from)?;
+
+    let rows_sql = format!(
+        "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,
+                v.created_at,
+                (SELECT l.item_name FROM ledger l
+                  WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
+                  ORDER BY l.row_no, l.id LIMIT 1) AS first_item,
+                -- 送货单号优先取单头；老单据只把号码记在明细行上，回落到第一行
+                COALESCE(NULLIF(TRIM(v.delivery_no), ''),
+                         (SELECT l.delivery_no FROM ledger l
+                           WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.delivery_no,'')) <> ''
+                           ORDER BY l.row_no, l.id LIMIT 1)) AS delivery_no
+         FROM vouchers v
+         WHERE {where_sql}
+         ORDER BY v.doc_date DESC, v.id DESC
+         LIMIT ? OFFSET ?"
+    );
+    let mut page_params = params;
+    page_params.push(Value::Integer(page_size));
+    page_params.push(Value::Integer((page - 1) * page_size));
+
+    let mut stmt = conn.prepare(&rows_sql).map_err(DbError::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(page_params.iter()), |r| {
+            Ok(VoucherSummary {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                doc_no: r.get(2)?,
+                doc_date: r.get(3)?,
+                partner: r.get(4)?,
+                owner: r.get(5)?,
+                row_count: r.get(6)?,
+                amount_cents: r.get(7)?,
+                created_at: r.get(8)?,
+                first_item: r.get(9)?,
+                delivery_no: r.get(10)?,
+            })
+        })
+        .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        .map_err(DbError::from)?;
+
+    Ok(VoucherPage {
+        rows,
+        total,
+        page,
+        page_size,
+        amount_cents,
+        in_count,
+        out_count,
+    })
+}
+
+pub fn list_page_db(
+    db: &Db,
+    warehouse_id: i64,
+    filter: &VoucherFilter,
+    page: i64,
+    page_size: i64,
+) -> DbResult<VoucherPage> {
+    db.with(|c| list_page(c, warehouse_id, filter, page, page_size).map_err(DbError))
 }
 
 /// 单据查询结果。覆盖两种来源：
@@ -1480,5 +1655,153 @@ mod tests {
         assert_eq!(db.with_loose(|c| list(c, WH, None, 10)).unwrap().len(), 2);
         assert_eq!(db.with_loose(|c| list(c, WH, Some("in"), 10)).unwrap().len(), 1);
         assert_eq!(db.with_loose(|c| list(c, WH, Some("out"), 10)).unwrap().len(), 1);
+    }
+
+    /// 记录页的分页、筛选与汇总必须互相对得上：
+    /// 「共 N 张 / 入库 X / 出库 Y / 合计金额」是按整份命中集算的，不是当前页。
+    #[test]
+    fn list_page_filters_counts_and_pages() {
+        let db = Db::open_in_memory().unwrap();
+        // 两张入库（不同日期、不同供应商）、一张出库
+        db.with_loose(|c| {
+            create(
+                c,
+                WH,
+                &VoucherInput {
+                    partner: Some("万杨五金".into()),
+                    ..input("in", "2026-09-01", vec![line("WG-A", "外卡", 2.0, Some(10_000))])
+                },
+            )
+        })
+        .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                WH,
+                &VoucherInput {
+                    partner: Some("亚德客".into()),
+                    ..input("in", "2026-09-03", vec![line("WG-B", "轴承", 1.0, Some(50_000))])
+                },
+            )
+        })
+        .unwrap();
+        db.with_loose(|c| {
+            create(
+                c,
+                WH,
+                &VoucherInput {
+                    owner: Some("乾力车间".into()),
+                    ..input("out", "2026-09-02", vec![line("WG-A", "外卡", 1.0, None)])
+                },
+            )
+        })
+        .unwrap();
+
+        // 分页：每页 1 张，按日期倒序
+        let first = db
+            .with_loose(|c| list_page(c, WH, &VoucherFilter::default(), 1, 1))
+            .unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(first.in_count, 2);
+        assert_eq!(first.out_count, 1);
+        // 2 件 × 1.00 元 + 1 件 × 5.00 元
+        assert_eq!(first.amount_cents, 2 * 100 + 500);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0].doc_date, "2026-09-03");
+
+        let second = db
+            .with_loose(|c| list_page(c, WH, &VoucherFilter::default(), 2, 1))
+            .unwrap();
+        assert_eq!(second.rows[0].doc_date, "2026-09-02");
+
+        // 类型筛选：汇总跟着变
+        let only_out = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        kind: Some("out".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(only_out.total, 1);
+        assert_eq!(only_out.in_count, 0);
+        assert_eq!(only_out.out_count, 1);
+
+        // 关键字命中单号片段
+        let by_no = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        keyword: Some("0901".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(by_no.total, 1);
+
+        // 关键字命中明细物料名（单头里没有这个字）
+        let by_item = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        keyword: Some("轴承".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(by_item.total, 1);
+        assert_eq!(by_item.rows[0].partner.as_deref(), Some("亚德客"));
+
+        // 日期区间
+        let ranged = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        from: Some("2026-09-02".into()),
+                        to: Some("2026-09-03".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(ranged.total, 2);
+
+        // 归属
+        let by_owner = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        owner: Some("乾力车间".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(by_owner.total, 1);
+        assert_eq!(by_owner.rows[0].kind, "out");
     }
 }

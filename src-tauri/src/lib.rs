@@ -157,6 +157,7 @@ pub fn run() {
             commands::voucher_delete,
             commands::voucher_get,
             commands::voucher_list,
+            commands::voucher_list_page,
             commands::voucher_next_no,
             commands::item_master,
             commands::items_list,

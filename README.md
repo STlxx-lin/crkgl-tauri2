@@ -20,11 +20,13 @@ Tauri 2 + Rust + React 19 + Vite 7 + Tailwind v4 + BoardUI 的仓库台账程序
 crkgl-tauri2/
 ├─ src/                     前端
 │  ├─ App.tsx               启动状态机（boot → ready），读 bootstrap
-│  ├─ screens/              台账 / 汇总 / 导入 / 基础资料 / 开单 / 库存 / 只读站
-│  ├─ components/           AppShell、RowDetail、EmptyState、FontScaleToggle
+│  ├─ screens/              台账 / 汇总 / 导入 / 基础资料 / 开单 / 开单记录 / 库存 / 只读站
+│  ├─ components/           AppShell、RowDetail、EmptyState、FontScaleToggle、VoucherLinesTable
 │  ├─ lib/api.ts            Tauri 命令 + 只读站 HTTP 的统一客户端
 │  ├─ lib/format.ts         金额（分→元）、数量、日期、环比
-│  ├─ lib/pageSize.ts       各页「每页条数」的统一存储（四页共用）
+│  ├─ lib/pageSize.ts       各页「每页条数」的统一存储（各页共用）
+│  ├─ lib/dateRange.ts      日期区间预设（台账与开单记录共用）
+│  ├─ lib/voucherRequest.ts 开单记录 → 开单页的交接请求（nonce）
 │  ├─ lib/fontScale.ts      界面字号缩放（四档，改根字号）
 │  ├─ lib/printPrefs.ts     打印偏好（A4 每页行数上限）
 │  ├─ lib/*.test.ts         vitest 单测（纯函数与 localStorage 读写）
@@ -35,7 +37,7 @@ crkgl-tauri2/
 │  ├─ src/ledger.rs         台账查询/筛选/编辑/删除/CSV
 │  ├─ src/summary.rs        GROUP BY 汇总
 │  ├─ src/import.rs         xlsm 解析：inspect → preview → run
-│  ├─ src/voucher.rs        单据（开单）与明细，voucher_create / voucher_get 等
+│  ├─ src/voucher.rs        单据（开单）与明细，voucher_create / voucher_get / voucher_list_page 等
 │  ├─ src/warehouse.rs      仓库档案、当前仓库、删除保护
 │  ├─ src/dict.rs           字典（单位/类别/类型/出库部门/采购人）增删改与同步
 │  ├─ src/web.rs            80 端口只读站（axum）
@@ -261,6 +263,16 @@ npm run tauri build        # 会先跑 npm run build 与 build:remote
 - 选物料编码会自动带出名称、单位和最近一次入库单价（从历史台账聚合，不另建主数据表）
 - 开单产生的行 `sheet` 记为 `voucher:in` / `voucher:out`，`voucher_id` 串回单据头
 - 删单据会连带删掉它的明细；明细在台账里被删空时，单据头也会自动清理
+
+**开单记录页**（侧栏「开单记录」）是完整历史：开单页底部只留最近 5 张做快捷回看。
+
+- 服务端分页（`voucher_list_page`，每页 20/50/100/200 可存），按日期倒序
+- 筛选：关键字（单号 / 送货单号 / 供应商 / 归属 / 采购人 / 明细物料编码或名称）、类型、日期区间、归属、采购人
+- 底部「共 N 张 · 入库 X · 出库 Y · 合计 ¥…」按**整份筛选结果**统计，不是当前页
+- 点一行看明细；详情里可 A4 打印、删除、「载入编辑」或「转单」——
+  后两个动作会切回开单页并复用它的表单，「转单」把明细抄成反向类型的新单（原单不变）；
+  开单页有未保存内容时会先确认
+- 只在桌面端出现：只读站（80 端口）导航里没有这一页
 
 **台账批量操作**：表格支持多选，选中后出现批量操作栏。
 

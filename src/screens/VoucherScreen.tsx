@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RiAddLine,
-  RiArrowDownLine,
   RiArrowLeftRightLine,
   RiDeleteBinLine,
   RiFileAddLine,
@@ -38,6 +37,7 @@ import { ItemPicker } from "../components/ItemPicker";
 import { ComboPicker, type PickerOption } from "../components/ComboPicker";
 import { QuickAddDialog, type QuickAddKind } from "../components/QuickAddDialog";
 import { PrintVoucher } from "../components/PrintVoucher";
+import { VoucherLinesTable } from "../components/VoucherLinesTable";
 import {
   onBuyerChange,
   onPrintAfterSaveChange,
@@ -46,6 +46,7 @@ import {
   storedBuyer,
   storedPrintAfterSave,
 } from "../lib/voucherPrefs";
+import type { VoucherRequest } from "../lib/voucherRequest";
 
 type Mode = { kind: Kind; id: number | null };
 
@@ -128,10 +129,8 @@ function blankHead(kind: Kind): HeadDraft {
 }
 
 const VOUCHER_DRAFT_KEY = "ledger.voucher.draft";
-/** 本机开单列表一次最多加载多少张。 */
-const HISTORY_CAP = 500;
-/** 点一次「加载更早」多取多少张。 */
-const HISTORY_STEP = 50;
+/** 开单页只留最近几张做快捷回看：完整历史在侧栏「开单记录」页。 */
+const RECENT_LIMIT = 5;
 
 function draftKey(warehouseId: number): string {
   // 每个仓一份草稿：切仓回来还在，又不会把 A 仓的供应商写到 B 仓的单上
@@ -343,6 +342,8 @@ export function VoucherScreen({
   warehouseName,
   companyName,
   onChanged,
+  onOpenRecords,
+  request,
 }: {
   active?: boolean;
   /** 当前仓库：草稿按仓分开存，切仓回来还在 */
@@ -351,6 +352,10 @@ export function VoucherScreen({
   /** 该仓库的打印抬头：单头与纸面都用它，空则不打公司名 */
   companyName: string | null;
   onChanged: () => void;
+  /** 跳到「开单记录」看完整历史 */
+  onOpenRecords: () => void;
+  /** 从开单记录页交过来的「载入编辑 / 转单」请求 */
+  request: VoucherRequest | null;
 }) {
   // 老版本草稿不带仓库：先归到当前仓，再读（只在首次挂载时做一次）
   const [initialDraft] = useState<VoucherDraft | null>(() => {
@@ -365,17 +370,13 @@ export function VoucherScreen({
   const [unitOptions, setUnitOptions] = useState<string[]>([]);
   const [ownerOptions, setOwnerOptions] = useState<string[]>([]);
   const [buyerOptions, setBuyerOptions] = useState<string[]>([]);
+  // 最近开单：只留几张做快捷回看，完整历史在「开单记录」页
   const [history, setHistory] = useState<VoucherSummary[]>([]);
-  // 列表分页：默认 50，点「加载更早」一次多取 50，最多 HISTORY_CAP 张
-  const [historyLimit, setHistoryLimit] = useState(HISTORY_STEP);
   // 保存后是否自动打印（打印完毕后原单继续留在表单里，方便接着编号）
   const [printAfterSave, setPrintAfterSave] = useState(() => storedPrintAfterSave());
-  // 本机开单列表：按编号/供应商筛 + 入库出库筛选
-  const [historyQuery, setHistoryQuery] = useState("");
-  const [historyKind, setHistoryKind] = useState<"all" | "in" | "out">("all");
   const [busy, setBusy] = useState(false);
   // 待删单据只认 id / 单号 / 行数，不回查已加载列表：
-  // history 只装最近 50 张，从「单据查询」打开较早的单时回查会拿不到，
+  // history 只装最近几张，从「单据查询」打开较早的单时回查会拿不到，
   // 点删除就什么都不发生（没有 toast、没有确认框），像程序卡住了。
   const [pendingDelete, setPendingDelete] = useState<{ id: number; docNo: string; rowCount: number } | null>(null);
   // A4 打印：用当前录入内容出稿，未保存也能先打一份校样
@@ -401,11 +402,11 @@ export function VoucherScreen({
   const loadHistory = useCallback(async () => {
     if (!isTauri) return;
     try {
-      setHistory(await listVouchers(null, historyLimit));
+      setHistory(await listVouchers(null, RECENT_LIMIT));
     } catch (err) {
       toast("单据列表读取失败", { description: String(err), status: "error" });
     }
-  }, [historyLimit]);
+  }, []);
 
   const loadSuppliers = useCallback(async () => {
     if (!isTauri) return;
@@ -591,21 +592,8 @@ export function VoucherScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode.kind, mode.id]);
 
-  /** 列表展示用：按编号/供应商/归属过滤，再按类型筛。 */
-  const shownHistory = useMemo(() => {
-    const q = historyQuery.trim().toLowerCase();
-    return history.filter((v) => {
-      if (historyKind !== "all" && v.kind !== historyKind) return false;
-      if (!q) return true;
-      return (
-        v.docNo.toLowerCase().includes(q) ||
-        (v.partner ?? "").toLowerCase().includes(q) ||
-        (v.owner ?? "").toLowerCase().includes(q)
-      );
-    });
-  }, [history, historyQuery, historyKind]);
-
-  const shownAmount = useMemo(() => shownHistory.reduce((sum, v) => sum + v.amountCents, 0), [shownHistory]);
+  /** 最近开单的合计金额：只用于「最近 N 张」那一行的说明。 */
+  const recentAmount = useMemo(() => history.reduce((sum, v) => sum + v.amountCents, 0), [history]);
 
   const totals = useMemo(() => {
     let amount = 0;
@@ -827,6 +815,33 @@ export function VoucherScreen({
     }
   };
 
+  /**
+   * 从「开单记录」交过来的手势：载入编辑 / 转单。
+   *
+   * 开单页常驻挂载，不能用重挂载传参，所以按 `nonce` 只执行一次；
+   * 两者都有「有未保存内容先确认」的保护，不会静默覆盖正在录的单。
+   */
+  const handledRequest = useRef(0);
+  useEffect(() => {
+    if (!request || handledRequest.current === request.nonce) return;
+    handledRequest.current = request.nonce;
+    void (async () => {
+      try {
+        const voucher = await getVoucher(request.id);
+        if (!voucher) {
+          toast("单据不存在", { description: "可能已被删除，请刷新记录页。", status: "error" });
+          return;
+        }
+        if (request.action === "convert") await convertVoucher(voucher);
+        else await loadVoucherIntoForm(voucher);
+      } catch (err) {
+        toast("单据读取失败", { description: String(err), status: "error" });
+      }
+    })();
+    // 只用 nonce 触发；两个回调每次渲染都是新的，但行为只取决于当前 request
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.nonce]);
+
   const submit = async () => {
     if (!isTauri) {
       toast("只读站不能开单", { description: "请在装有本程序的电脑上开单。", status: "error" });
@@ -966,6 +981,7 @@ export function VoucherScreen({
         amountCents: hit.amountCents,
         createdAt: "",
         firstItem: null,
+        deliveryNo: hit.deliveryNo ?? null,
       });
       return;
     }
@@ -1516,60 +1532,39 @@ export function VoucherScreen({
             </section>
           ) : null}
 
-          {/* 单据列表 */}
+          {/* 最近开单：只留几张做快捷回看，完整历史在「开单记录」页 */}
           <section className="flex flex-col rounded-2xl border border-border-button-default bg-background-primary-default">
-            <div className="flex flex-wrap items-center gap-2 px-4 pb-2 pt-4">
-              <h2 className="text-title-4-semibold text-text-primary">本机开单</h2>
+            <div className="flex flex-wrap items-baseline gap-2 px-4 pb-2 pt-4">
+              <h2 className="text-title-4-semibold text-text-primary">最近开单</h2>
               <span className="text-caption-1-regular text-text-tertiary">
-                {historyQuery || historyKind !== "all"
-                  ? `筛选命中 ${count(shownHistory.length)} 张 / 已加载 ${count(history.length)} 张`
-                  : `已加载 ${count(history.length)} 张`}
-                {history.length >= HISTORY_CAP ? "（只保留最近 500 张）" : ""}
+                {history.length === 0
+                  ? "还没有开过单"
+                  : `最近 ${count(history.length)} 张 · 合计 ${money(recentAmount)}`}
               </span>
-              <div className="ms-auto flex items-center gap-2">
-                <input
-                  aria-label="筛选本机单据"
-                  value={historyQuery}
-                  onChange={(e) => setHistoryQuery(e.target.value)}
-                  placeholder="编号 / 供应商"
-                  className="h-7 w-36 rounded-lg border border-border-button-default bg-background-secondary-default px-2 text-[0.75rem] text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-hover focus:border-border-focus-ring"
-                />
-                {(["all", "in", "out"] as const).map((k) => (
-                  <button
-                    key={k}
-                    type="button"
-                    aria-pressed={historyKind === k}
-                    onClick={() => setHistoryKind(k)}
-                    className={
-                      "h-7 rounded-md px-2 text-[0.6875rem] font-medium transition-colors " +
-                      (historyKind === k
-                        ? "bg-background-primary-default text-text-primary ring-1 ring-separator-border"
-                        : "text-text-tertiary hover:text-text-secondary")
-                    }
-                  >
-                    {k === "all" ? "全部" : kindLabel(k)}
-                  </button>
-                ))}
-              </div>
+              <Button
+                size="small"
+                variant="ghost"
+                leadingIcon={RiFileList3Line}
+                onClick={onOpenRecords}
+                className="ms-auto"
+              >
+                查看全部
+              </Button>
             </div>
             <p className="px-4 pb-2 text-caption-1-regular text-text-tertiary">
-              点一行看明细；要改内容用弹窗里的「载入编辑」，不会冲掉左边正在录的单。
+              点一行看明细；完整的筛选、分页、打印与删除在「开单记录」。
             </p>
-            {shownHistory.length === 0 ? (
+            {history.length === 0 ? (
               <div className="px-4 pb-8 pt-2">
                 <EmptyState
                   icon={RiFileList3Line}
-                  title={history.length === 0 ? "还没有开过单" : "没有符合条件的单据"}
-                  description={
-                    history.length === 0
-                      ? "左边填一张入库单或出库单，保存后会出现在台账里。"
-                      : `这里只在已加载的 ${count(history.length)} 张里筛。更早的单请用上方「单据查询」按编号查。`
-                  }
+                  title="还没有开过单"
+                  description="左边填一张入库单或出库单，保存后会出现在开单记录里。"
                 />
               </div>
             ) : (
-              <ul className="max-h-[560px] overflow-auto px-2 pb-3">
-                {shownHistory.map((voucher) => (
+              <ul className="overflow-auto px-2 pb-3">
+                {history.map((voucher) => (
                   <li key={voucher.id}>
                     <button
                       type="button"
@@ -1606,11 +1601,6 @@ export function VoucherScreen({
                         <span className="truncate" title={voucher.firstItem ?? ""}>
                           {voucher.partner ?? voucher.owner ?? voucher.firstItem ?? "未填供应商"}
                         </span>
-                        {voucher.partner || voucher.owner ? (
-                          <span className="shrink-0 truncate text-text-tertiary/70" title={voucher.firstItem ?? ""}>
-                            {voucher.firstItem ?? ""}
-                          </span>
-                        ) : null}
                         <span className="ms-auto shrink-0 font-mono tabular-nums">
                           {count(voucher.rowCount)} 行 · {money(voucher.amountCents)}
                         </span>
@@ -1620,27 +1610,6 @@ export function VoucherScreen({
                 ))}
               </ul>
             )}
-            {shownHistory.length > 0 ? (
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-separator-border px-4 py-2">
-                <span className="text-caption-1-regular text-text-tertiary">
-                  已加载范围内：入库 {count(shownHistory.filter((v) => v.kind === "in").length)} 张 · 出库{" "}
-                  {count(shownHistory.filter((v) => v.kind === "out").length)} 张
-                </span>
-                <span className="ms-auto font-mono text-body-2-medium tabular-nums text-text-primary">
-                  已加载合计 {money(shownAmount)}
-                </span>
-                {history.length >= historyLimit && historyLimit < HISTORY_CAP ? (
-                  <Button
-                    size="small"
-                    variant="ghost"
-                    leadingIcon={RiArrowDownLine}
-                    onClick={() => setHistoryLimit((n) => Math.min(HISTORY_CAP, n + HISTORY_STEP))}
-                  >
-                    加载更早的 50 张
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
           </section>
         </div>
       </div>
@@ -1656,66 +1625,7 @@ export function VoucherScreen({
                 )} · ${viewingVoucher.partner ?? viewingVoucher.owner ?? "—"}`}
               />
               <ModalBody>
-                <div className="overflow-x-auto rounded-xl border border-separator-border">
-                  <table className="w-full border-collapse text-[0.8125rem]">
-                    <thead>
-                      <tr className="border-b border-separator-border bg-background-tertiary-default text-caption-1-semibold text-text-tertiary">
-                        <th className="w-12 px-2 py-2 text-center font-medium">#</th>
-                        <th className="w-32 px-2 py-2 text-start font-medium">送货单号</th>
-                        <th className="w-32 px-2 py-2 text-start font-medium">物料编码</th>
-                        <th className="px-2 py-2 text-start font-medium">物料名称</th>
-                        <th className="w-14 px-2 py-2 text-start font-medium">单位</th>
-                        <th className="w-24 px-2 py-2 text-end font-medium">数量</th>
-                        <th className="w-24 px-2 py-2 text-end font-medium">单价</th>
-                        <th className="w-28 px-2 py-2 text-end font-medium">合计</th>
-                        <th className="w-32 px-2 py-2 text-start font-medium">备注</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {viewingVoucher.lines.map((line, index) => (
-                        <tr key={line.id} className="border-b border-separator-border last:border-0">
-                          <td className="px-2 py-1 text-center font-mono text-[0.75rem] tabular-nums text-text-tertiary">
-                            {index + 1}
-                          </td>
-                          <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
-                            {line.deliveryNo ?? "—"}
-                          </td>
-                          <td className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary">
-                            {line.itemCode ?? "—"}
-                          </td>
-                          <td className="px-2 py-1 text-text-primary">
-                            <div className="flex items-center gap-1.5 truncate">
-                              <span className="truncate" title={line.itemName ?? ""}>
-                                {line.itemName ?? "—"}
-                              </span>
-                              {line.spec ? (
-                                <span
-                                  className="shrink-0 rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default"
-                                  title={`规格型号: ${line.spec}`}
-                                >
-                                  {line.spec}
-                                </span>
-                              ) : null}
-                            </div>
-                          </td>
-                          <td className="px-2 py-1 text-text-tertiary">{line.unit ?? "—"}</td>
-                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-secondary">
-                            {qty(line.qty)}
-                          </td>
-                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-tertiary">
-                            {line.priceMicros === null ? "—" : priceText(line.priceMicros)}
-                          </td>
-                          <td className="px-2 py-1 text-end font-mono tabular-nums text-text-primary">
-                            {line.amountCents === null ? "—" : amount(line.amountCents)}
-                          </td>
-                          <td className="truncate px-2 py-1 text-text-tertiary" title={line.remark ?? ""}>
-                            {line.remark ?? "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <VoucherLinesTable lines={viewingVoucher.lines} showDeliveryNo={viewingVoucher.kind === "in"} />
                 <p className="mt-2 text-caption-1-regular text-text-tertiary">
                   点「载入编辑」才会把这张单读进左边表单；直接关闭不会动你正在录的内容。
                 </p>
