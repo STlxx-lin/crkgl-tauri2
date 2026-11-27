@@ -9,8 +9,8 @@ import {
   RiSearchLine,
 } from "@remixicon/react";
 import { deleteVoucher, fetchFacets, getVoucher, isTauri, listVoucherPage, onFacetsInvalidated } from "../lib/api";
-import type { Facets, Kind, Voucher, VoucherFilter, VoucherPage, VoucherSummary } from "../lib/types";
-import { amount, count, date, kindLabel, money, shortTs } from "../lib/format";
+import type { Facets, KindFilter, Voucher, VoucherFilter, VoucherPage, VoucherSummary } from "../lib/types";
+import { amount, count, date, money, rowKindLabel, shortTs } from "../lib/format";
 import { RANGE_PRESETS, rangeFor } from "../lib/dateRange";
 import { useStoredPageSize } from "../lib/pageSize";
 import { Button } from "@/components/base/buttons/button";
@@ -29,11 +29,12 @@ import type { VoucherRequest } from "../lib/voucherRequest";
 
 const PAGE_SIZES = [20, 50, 100, 200] as const;
 const PAGE_SIZE_KEY = "ledger.records.pageSize";
-/** 类型筛选胶囊：`all` 表示不加类型条件。 */
+/** 类型筛选胶囊：`all` 表示不加类型条件；`ret` 只看退回供应商的退货单。 */
 const KINDS: { id: string; label: string }[] = [
   { id: "all", label: "全部" },
   { id: "in", label: "入库" },
   { id: "out", label: "出库" },
+  { id: "ret", label: "退货" },
 ];
 
 /**
@@ -89,7 +90,7 @@ export function VoucherRecordsScreen({
   const filter = useMemo<VoucherFilter>(() => {
     const { from, to } = rangeFor(range);
     return {
-      kind: kind === "all" ? null : (kind as Kind),
+      kind: kind === "all" ? null : (kind as KindFilter),
       keyword: debouncedKeyword || null,
       from,
       to,
@@ -192,8 +193,8 @@ export function VoucherRecordsScreen({
         title="开单记录"
         description={
           warehouseName
-            ? `${warehouseName} · 本机开过的入库单与出库单，可回看、打印、载入编辑或转单`
-            : "本机开过的入库单与出库单，可回看、打印、载入编辑或转单"
+            ? `${warehouseName} · 本机开过的入库单、出库单与退货单，可回看、打印、载入编辑或转单`
+            : "本机开过的入库单、出库单与退货单，可回看、打印、载入编辑或转单"
         }
         actions={
           <>
@@ -355,12 +356,14 @@ export function VoucherRecordsScreen({
                     <td className="px-3 py-1.5">
                       <span
                         className={
-                          row.kind === "in"
-                            ? "inline-flex items-center rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500"
-                            : "inline-flex items-center rounded-md bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
+                          row.isReturn
+                            ? "inline-flex items-center rounded-md bg-amber-500/12 px-1.5 py-0.5 text-caption-1-semibold text-amber-500"
+                            : row.kind === "in"
+                              ? "inline-flex items-center rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500"
+                              : "inline-flex items-center rounded-md bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
                         }
                       >
-                        {kindLabel(row.kind)}
+                        {rowKindLabel(row)}
                       </span>
                     </td>
                     <td className="truncate px-3 py-1.5 font-mono tabular-nums text-text-primary" title={row.docNo}>
@@ -403,6 +406,9 @@ export function VoucherRecordsScreen({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-body-2-regular text-text-tertiary">
             共 {count(total)} 张 · 入库 {count(data?.inCount ?? 0)} · 出库 {count(data?.outCount ?? 0)}
+            {(data?.retCount ?? 0) > 0 ? (
+              <span className="text-text-tertiary/70">（其中退货 {count(data?.retCount ?? 0)}）</span>
+            ) : null}
             <span className="mx-2 text-text-tertiary/40">·</span>
             合计 <span className="font-mono tabular-nums text-text-secondary">{money(data?.amountCents ?? 0)}</span>
             {total > rows.length ? (
@@ -451,10 +457,12 @@ export function VoucherRecordsScreen({
           {({ close }) => (
             <>
               <ModalHeader
-                title={`${kindLabel(viewing.kind)}单 ${viewing.docNo}`}
+                title={`${rowKindLabel(viewing)}单 ${viewing.docNo}`}
                 description={`${date(viewing.docDate)} · ${count(viewing.lines.length)} 行 · ${money(
                   viewing.lines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0),
-                )} · ${viewing.partner ?? viewing.owner ?? "—"}`}
+                )} · ${viewing.partner ?? viewing.owner ?? "—"}${
+                  viewing.sourceDocNo ? ` · 原单 ${viewing.sourceDocNo}` : ""
+                }`}
               />
               <ModalBody>
                 <VoucherLinesTable lines={viewing.lines} showDeliveryNo={viewing.kind === "in"} />
@@ -488,18 +496,34 @@ export function VoucherRecordsScreen({
                 <Button size="small" variant="secondary" onClick={close}>
                   关闭
                 </Button>
-                <Button
-                  size="small"
-                  variant="secondary"
-                  leadingIcon={RiArrowLeftRightLine}
-                  title={`把这单的明细抄成一张新的${kindLabel(viewing.kind === "in" ? "out" : "in")}；原单不受影响`}
-                  onClick={() => {
-                    close();
-                    onOpenVoucher({ id: viewing.id, action: "convert" });
-                  }}
-                >
-                  {viewing.kind === "in" ? "转出库单" : "转入库单"}
-                </Button>
+                {viewing.kind === "in" && !viewing.isReturn ? (
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    leadingIcon={RiArrowLeftRightLine}
+                    title="按原单未退数量开一张退货单（退回供应商）"
+                    onClick={() => {
+                      close();
+                      onOpenVoucher({ id: viewing.id, action: "return" });
+                    }}
+                  >
+                    退货
+                  </Button>
+                ) : null}
+                {!viewing.isReturn ? (
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    leadingIcon={RiArrowLeftRightLine}
+                    title={`把这单的明细抄成一张新的${viewing.kind === "in" ? "出库单" : "入库单"}；原单不受影响`}
+                    onClick={() => {
+                      close();
+                      onOpenVoucher({ id: viewing.id, action: "convert" });
+                    }}
+                  >
+                    {viewing.kind === "in" ? "转出库单" : "转入库单"}
+                  </Button>
+                ) : null}
                 <Button
                   size="small"
                   leadingIcon={RiPencilLine}

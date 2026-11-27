@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { RiAlertLine, RiDeleteBinLine } from "@remixicon/react";
 import type { LedgerRow } from "../lib/types";
-import { flagLabel, kindLabel, shortTs } from "../lib/format";
+import { flagLabel, rowKindLabel, shortTs } from "../lib/format";
 import { updateRow } from "../lib/api";
 import { Button } from "@/components/base/buttons/button";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
@@ -105,17 +105,21 @@ export function RowDetail({ row, canEdit, onClose, onSaved, onDelete }: RowDetai
           <div className="flex items-center gap-2">
             <span
               className={
-                row.kind === "in"
-                  ? "rounded bg-emerald-500/12 px-2 py-0.5 text-caption-1-semibold text-emerald-400"
-                  : "rounded bg-sky-500/12 px-2 py-0.5 text-caption-1-semibold text-sky-400"
+                row.isReturn
+                  ? "rounded bg-amber-500/12 px-2 py-0.5 text-caption-1-semibold text-amber-500"
+                  : row.kind === "in"
+                    ? "rounded bg-emerald-500/12 px-2 py-0.5 text-caption-1-semibold text-emerald-400"
+                    : "rounded bg-sky-500/12 px-2 py-0.5 text-caption-1-semibold text-sky-400"
               }
             >
-              {kindLabel(row.kind)}
+              {rowKindLabel(row)}
             </span>
             <span className="truncate">{row.itemName ?? row.itemCode ?? "台账明细"}</span>
           </div>
         }
-        description={`源工作表：${row.sheet} · 第 ${row.rowNo} 行 · 导入批次 #${row.importId ?? "—"}`}
+        description={`源工作表：${row.sheet} · 第 ${row.rowNo} 行 · 导入批次 #${row.importId ?? "—"}${
+          row.sourceDocNo ? ` · 原入库单 ${row.sourceDocNo}` : ""
+        }`}
       />
 
       <ModalBody className="flex flex-col gap-4 py-2">

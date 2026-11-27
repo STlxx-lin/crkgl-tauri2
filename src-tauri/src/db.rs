@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-static MIGRATIONS: [(&str, &str); 15] = [
+static MIGRATIONS: [(&str, &str); 16] = [
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_voucher", include_str!("../migrations/002_voucher.sql")),
     ("003_master_data", include_str!("../migrations/003_master_data.sql")),
@@ -34,6 +34,7 @@ static MIGRATIONS: [(&str, &str); 15] = [
         "015_warehouse_company",
         include_str!("../migrations/015_warehouse_company.sql"),
     ),
+    ("016_return", include_str!("../migrations/016_return.sql")),
 ];
 
 pub struct Db {
@@ -215,6 +216,8 @@ fn structure_already_applied(conn: &Connection, index: usize) -> rusqlite::Resul
             && has("imports", "warehouse_id")?),
         // 015 每仓打印抬头
         14 => has("warehouses", "company_name"),
+        // 016 退货单：单据头与台账都要有 is_return 才算完整
+        15 => Ok(has("vouchers", "is_return")? && has("ledger", "is_return")?),
         _ => Ok(false),
     }
 }

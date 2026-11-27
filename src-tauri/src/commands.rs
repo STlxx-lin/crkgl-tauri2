@@ -651,6 +651,24 @@ pub fn voucher_next_no(state: State<'_, Arc<AppState>>, kind: String, date: Stri
     voucher::next_doc_no_db(&state.db, state.wh()?, &kind, &date)
 }
 
+/// 退货单取号：`TH` + 日期 + 3 位流水，与出库单分开。
+#[tauri::command]
+pub fn voucher_next_return_no(state: State<'_, Arc<AppState>>, date: String) -> Result<String, String> {
+    voucher::next_return_doc_no_db(&state.db, state.wh()?, &date)
+}
+
+/// 退货录入：读原入库单 + 每行「已退 / 可退」。
+///
+/// `exclude_voucher` 只在编辑已有退货单时传，避免把自己算成已退。
+#[tauri::command]
+pub fn voucher_return_source(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+    exclude_voucher: Option<i64>,
+) -> Result<voucher::ReturnSource, String> {
+    voucher::return_source_db(&state.db, state.wh()?, id, exclude_voucher)
+}
+
 /// 「开单记录」页：按条件分页取单据 + 整份命中集汇总。
 #[tauri::command]
 pub fn voucher_list_page(

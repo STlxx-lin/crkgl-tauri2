@@ -25,6 +25,9 @@ function row(patch: Partial<LedgerRow> & Pick<LedgerRow, "id">): LedgerRow {
     rowNo: 2,
     importId: null,
     createdAt: null,
+    isReturn: false,
+    sourceVoucherId: null,
+    sourceDocNo: null,
     ...patch,
   };
 }

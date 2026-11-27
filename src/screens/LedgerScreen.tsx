@@ -20,9 +20,9 @@ import {
   isTauri,
   onFacetsInvalidated,
 } from "../lib/api";
-import type { BootstrapInfo, Facets, Kind, LedgerFilter, LedgerPage, LedgerRow } from "../lib/types";
+import type { BootstrapInfo, Facets, KindFilter, LedgerFilter, LedgerPage, LedgerRow } from "../lib/types";
 import { exportFileName, saveCsvFile } from "../lib/exportCsv";
-import { amount, count, date, flagLabel, kindLabel, money, priceText, qty } from "../lib/format";
+import { amount, count, date, flagLabel, money, priceText, qty, rowKindLabel } from "../lib/format";
 import { useVirtualRows } from "../lib/useVirtualRows";
 import { useStoredPageSize } from "../lib/pageSize";
 import { RANGE_PRESETS, rangeFor } from "../lib/dateRange";
@@ -55,6 +55,7 @@ const KINDS: { id: string; label: string }[] = [
   { id: "all", label: "全部" },
   { id: "in", label: "入库" },
   { id: "out", label: "出库" },
+  { id: "ret", label: "退货" },
 ];
 
 interface LedgerScreenProps {
@@ -207,7 +208,7 @@ export function LedgerScreen({ boot, warehouseName, onChanged }: LedgerScreenPro
   const applyKind = (value: string) => {
     setKind(value);
     setPage(1);
-    setFilter((prev) => ({ ...prev, kind: value === "all" ? null : (value as Kind) }));
+    setFilter((prev) => ({ ...prev, kind: value === "all" ? null : (value as KindFilter) }));
   };
 
   const applyRange = (value: string) => {
@@ -643,12 +644,14 @@ export function LedgerScreen({ boot, warehouseName, onChanged }: LedgerScreenPro
                     <TableCell>
                       <span
                         className={
-                          row.kind === "in"
-                            ? "inline-flex items-center rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500"
-                            : "inline-flex items-center rounded-md bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
+                          row.isReturn
+                            ? "inline-flex items-center rounded-md bg-amber-500/12 px-1.5 py-0.5 text-caption-1-semibold text-amber-500"
+                            : row.kind === "in"
+                              ? "inline-flex items-center rounded-md bg-emerald-500/12 px-1.5 py-0.5 text-caption-1-semibold text-emerald-500"
+                              : "inline-flex items-center rounded-md bg-sky-500/12 px-1.5 py-0.5 text-caption-1-semibold text-sky-400"
                         }
                       >
-                        {kindLabel(row.kind)}
+                        {rowKindLabel(row)}
                       </span>
                     </TableCell>
                     <TableCell className="font-mono tabular-nums text-text-secondary">{date(row.docDate)}</TableCell>

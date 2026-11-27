@@ -1,8 +1,13 @@
-//! 本机开单：入库单 / 出库单的表头 + 明细行，写入同一张 `ledger`，
-//! 用 `voucher_id` 串回单据头，`sheet` 记成 `voucher:in` / `voucher:out`。
+//! 本机开单：入库单 / 出库单 / 退货单的表头 + 明细行，写入同一张 `ledger`，
+//! 用 `voucher_id` 串回单据头，`sheet` 记成 `voucher:in` / `voucher:out` / `voucher:ret`。
 //!
 //! 单据编号沿用 Excel 的习惯：`YYYYMMDD` + 3 位当日流水（`20260831206`）。
+//! 退回供应商的退货单单独用 `TH` 前缀（`TH20260831001`），与出库单分开取号，
+//! 但台账里方向仍是 `out`（库存减少、金额计入出库），靠 `is_return` 区分。
+//!
 //! 物料主数据不单独建表，直接从历史台账里按编码聚合出「名称 / 单位 / 最近单价」。
+
+use std::collections::HashMap;
 
 use rusqlite::types::Value;
 use rusqlite::Connection;
@@ -47,6 +52,16 @@ pub struct VoucherInput {
     /// 出库：领用人
     pub receiver: Option<String>,
     pub remark: Option<String>,
+    /// 退回供应商的退货单：台账方向仍是 out，但单独取号、单独标记
+    #[serde(default)]
+    pub is_return: bool,
+    /// 退货单的来源入库单（本机开过的单据头 id）
+    #[serde(default)]
+    pub source_voucher_id: Option<i64>,
+    /// 退货单的原入库单号：有 source_voucher_id 时以库里为准，
+    /// 手工退货（Excel 导入的入库单没有单据头）时用用户填的这串文本追溯
+    #[serde(default)]
+    pub source_doc_no: Option<String>,
     pub lines: Vec<VoucherLineInput>,
 }
 
@@ -82,8 +97,13 @@ pub struct Voucher {
     pub row_count: i64,
     pub amount_cents: i64,
     pub created_at: String,
-    /// 明细写入 ledger 时用的来源标记：voucher:in / voucher:out
+    /// 明细写入 ledger 时用的来源标记：voucher:in / voucher:out / voucher:ret
     pub sheet: String,
+    /// 是否退回供应商
+    pub is_return: bool,
+    /// 退货单的原入库单 id / 单号
+    pub source_voucher_id: Option<i64>,
+    pub source_doc_no: Option<String>,
     pub lines: Vec<VoucherLine>,
 }
 
@@ -104,6 +124,9 @@ pub struct VoucherSummary {
     /// 送货单号：优先取单头的，没有就回落到第一行明细的。
     /// 老单据的送货单号只记在明细行上，只看单头会显示成「—」。
     pub delivery_no: Option<String>,
+    /// 是否退回供应商
+    pub is_return: bool,
+    pub source_doc_no: Option<String>,
 }
 
 /// 「开单记录」页的筛选条件。字段名与前端 `VoucherFilter` 一致（camelCase）。
@@ -132,6 +155,42 @@ pub struct VoucherPage {
     pub amount_cents: i64,
     pub in_count: i64,
     pub out_count: i64,
+    /// 退回供应商的退货单张数（已包含在 out_count 里）
+    pub ret_count: i64,
+}
+
+/// 退货单的可退明细：原入库单按物料聚合后，给出「已退 / 可退」。
+///
+/// 同一物料在原单可能出现多行（不同送货单号或不同批次价），这里按
+/// `COALESCE(item_code, item_name)` 合并成一行，前端退货时默认带满可退数量。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReturnableLine {
+    pub item_code: Option<String>,
+    pub item_name: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    /// 原单该物料的入库数量合计
+    pub orig_qty: f64,
+    /// 已退数量（同一来源单的所有退货单合计）
+    pub returned_qty: f64,
+    /// 还可退 = 原数量 − 已退
+    pub returnable_qty: f64,
+    /// 原单最近一行的单价（万分之一元）
+    pub price_micros: Option<i64>,
+}
+
+/// 退回供应商时用的原单信息 + 可退明细。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReturnSource {
+    pub voucher_id: i64,
+    pub doc_no: String,
+    pub doc_date: String,
+    pub partner: Option<String>,
+    pub buyer: Option<String>,
+    pub remark: Option<String>,
+    pub lines: Vec<ReturnableLine>,
 }
 
 /// 物料主数据：从历史台账聚合，用于开单时联动带出单位与单价。
@@ -154,30 +213,61 @@ fn trimmed(value: &Option<String>) -> Option<&str> {
     value.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// 明细行写进 `ledger.sheet` 的来源标记。退货单单独记 `voucher:ret`，
+/// 台账「来源表」一栏直接看得出这行是退货产生的。
+fn sheet_of(kind: &str, is_return: bool) -> String {
+    if is_return {
+        "voucher:ret".to_string()
+    } else {
+        format!("voucher:{kind}")
+    }
+}
+
 /// `20260831206` 的取号：同一仓库、同一天已有的最大流水 +1，没有就从 001 起。
+///
+/// 退货单用 `TH` 前缀单独取号：`TH20260831001`。前缀不同、长度不同，
+/// 所以两类单号天然不会互相挤占流水。
 pub fn next_doc_no(conn: &Connection, warehouse_id: i64, kind: &str, date: &str) -> DbResult<String> {
+    next_no(conn, warehouse_id, kind, date, "")
+}
+
+/// 退货单取号：`TH` + 日期 + 3 位流水。
+pub fn next_return_doc_no(conn: &Connection, warehouse_id: i64, date: &str) -> DbResult<String> {
+    // 台账里退货行的 kind 是 out，这里按 `is_return = 1` 找当天的退货单
+    next_no(conn, warehouse_id, "out", date, "TH")
+}
+
+fn next_no(conn: &Connection, warehouse_id: i64, kind: &str, date: &str, prefix_tag: &str) -> DbResult<String> {
     let compact: String = date.chars().filter(|c| c.is_ascii_digit()).collect();
     if compact.len() != 8 {
         return Err(format!("日期格式不对: {date}"));
     }
-    // 单据编号既可能来自 Excel 导入，也可能是本机开的单，两者都算
-    let prefix = format!("{compact}%");
+    // 单据编号既可能来自 Excel 导入，也可能是本机开的单，两者都算。
+    // 退货单（TH…）与普通单分开查：长度不同，LIKE 前缀也不同。
+    let prefix = format!("{prefix_tag}{compact}%");
+    let total_len = (prefix_tag.len() + 11) as i64;
+    let is_return = if prefix_tag.is_empty() { 0i64 } else { 1i64 };
     let max: Option<String> = conn
         .query_row(
             "SELECT doc_no FROM ledger
-             WHERE warehouse_id = ?1 AND kind = ?2 AND doc_no LIKE ?3 ESCAPE '\\' AND length(doc_no) = 11
+             WHERE warehouse_id = ?1 AND kind = ?2 AND doc_no LIKE ?3 ESCAPE '\\'
+               AND length(doc_no) = ?4 AND is_return = ?5
              ORDER BY doc_no DESC LIMIT 1",
-            rusqlite::params![warehouse_id, kind, prefix],
+            rusqlite::params![warehouse_id, kind, prefix, total_len, is_return],
             |r| r.get(0),
         )
         .ok();
     let seq = max
-        .and_then(|value| value.get(8..).and_then(|tail| tail.parse::<u32>().ok()))
+        .and_then(|value| {
+            value
+                .get(prefix_tag.len() + 8..)
+                .and_then(|tail| tail.parse::<u32>().ok())
+        })
         .unwrap_or(0);
     if seq >= 999 {
         return Err(format!("{date} 的流水号已用完（999）"));
     }
-    Ok(format!("{compact}{:03}", seq + 1))
+    Ok(format!("{prefix_tag}{compact}{:03}", seq + 1))
 }
 
 /// 物料快速输入的数据源。
@@ -333,13 +423,16 @@ fn load_lines(conn: &Connection, voucher_id: i64) -> DbResult<Vec<VoucherLine>> 
 pub fn get(conn: &Connection, id: i64) -> DbResult<Option<Voucher>> {
     let head = conn.query_row(
         "SELECT id, kind, doc_no, doc_date, partner, delivery_no, buyer, owner, receiver, remark,
-                row_count, amount_cents, created_at
+                row_count, amount_cents, created_at, is_return, source_voucher_id, source_doc_no
          FROM vouchers WHERE id = ?1",
         [id],
         |r| {
+            let kind: String = r.get(1)?;
+            let is_return: i64 = r.get(13)?;
+            let sheet = sheet_of(&kind, is_return == 1);
             Ok(Voucher {
                 id: r.get(0)?,
-                kind: r.get(1)?,
+                kind,
                 doc_no: r.get(2)?,
                 doc_date: r.get(3)?,
                 partner: r.get(4)?,
@@ -351,7 +444,10 @@ pub fn get(conn: &Connection, id: i64) -> DbResult<Option<Voucher>> {
                 row_count: r.get(10)?,
                 amount_cents: r.get(11)?,
                 created_at: r.get(12)?,
-                sheet: format!("voucher:{}", r.get::<_, String>(1)?),
+                is_return: is_return == 1,
+                source_voucher_id: r.get(14)?,
+                source_doc_no: r.get(15)?,
+                sheet,
                 lines: Vec::new(),
             })
         },
@@ -366,30 +462,55 @@ pub fn get(conn: &Connection, id: i64) -> DbResult<Option<Voucher>> {
     }
 }
 
+/// 把界面上的类型（`in` / `out` / `ret`）编译成 SQL 条件。
+///
+/// `out` 不含退货：退货单在台账里方向也是 `out`，但业务上是单独一类，
+/// 让「出库」里混进退货单对账时容易看错。
+///
+/// `alias` 是表别名（`v` / `l`），空串表示不加前缀。
+fn kind_clause(alias: &str, kind: &str) -> Option<String> {
+    let p = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
+    match kind {
+        "in" => Some(format!("{p}kind = 'in'")),
+        "out" => Some(format!("{p}kind = 'out' AND {p}is_return = 0")),
+        "ret" => Some(format!("{p}kind = 'out' AND {p}is_return = 1")),
+        _ => None,
+    }
+}
+
 pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64) -> DbResult<Vec<VoucherSummary>> {
     // 开单页只取最近几张做快捷回看（`RECENT_LIMIT`），完整历史走 `list_page`。
     // 上限仍留 500：外部脚本或旧前端调这个命令时要够用。
     let limit = limit.clamp(1, 500);
-    let mut stmt = conn
-        .prepare(
-            "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,
-                    v.created_at,
-                    (SELECT l.item_name FROM ledger l
-                      WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
-                      ORDER BY l.row_no, l.id LIMIT 1) AS first_item,
-                    -- 送货单号优先取单头；老单据只把号码记在明细行上，回落到第一行
-                    COALESCE(NULLIF(TRIM(v.delivery_no), ''),
-                             (SELECT l.delivery_no FROM ledger l
-                               WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.delivery_no,'')) <> ''
-                               ORDER BY l.row_no, l.id LIMIT 1)) AS delivery_no
-             FROM vouchers v
-             WHERE v.warehouse_id = ?3 AND (?1 IS NULL OR v.kind = ?1)
-             ORDER BY v.doc_date DESC, v.id DESC
-             LIMIT ?2",
-        )
-        .map_err(DbError::from)?;
+    let params: Vec<Value> = vec![Value::Integer(warehouse_id), Value::Integer(limit)];
+    let mut clauses = vec!["v.warehouse_id = ?1".to_string()];
+    if let Some(cond) = kind.and_then(|k| kind_clause("v", k)) {
+        clauses.push(cond);
+    }
+    let sql = format!(
+        "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,
+                v.created_at, v.is_return, v.source_doc_no,
+                (SELECT l.item_name FROM ledger l
+                  WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
+                  ORDER BY l.row_no, l.id LIMIT 1) AS first_item,
+                -- 送货单号优先取单头；老单据只把号码记在明细行上，回落到第一行
+                COALESCE(NULLIF(TRIM(v.delivery_no), ''),
+                         (SELECT l.delivery_no FROM ledger l
+                           WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.delivery_no,'')) <> ''
+                           ORDER BY l.row_no, l.id LIMIT 1)) AS delivery_no
+         FROM vouchers v
+         WHERE {}
+         ORDER BY v.doc_date DESC, v.id DESC
+         LIMIT ?2",
+        clauses.join(" AND ")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
-        .query_map(rusqlite::params![kind, limit, warehouse_id], |r| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
             Ok(VoucherSummary {
                 id: r.get(0)?,
                 kind: r.get(1)?,
@@ -400,8 +521,10 @@ pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64
                 row_count: r.get(6)?,
                 amount_cents: r.get(7)?,
                 created_at: r.get(8)?,
-                first_item: r.get(9)?,
-                delivery_no: r.get(10)?,
+                is_return: r.get::<_, i64>(9)? == 1,
+                source_doc_no: r.get(10)?,
+                first_item: r.get(11)?,
+                delivery_no: r.get(12)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -412,29 +535,28 @@ pub fn list(conn: &Connection, warehouse_id: i64, kind: Option<&str>, limit: i64
 /// 把筛选条件编译成 `WHERE` 片段 + 参数。列表与汇总共用，保证
 /// 「筛出来的单」和底部「共 N 张 · 合计」永远对应（同 `ledger::compile_where`）。
 fn compile_voucher_where(filter: &VoucherFilter, warehouse_id: i64) -> (String, Vec<Value>) {
-    let mut clauses: Vec<&str> = vec!["v.warehouse_id = ?"];
+    let mut clauses: Vec<String> = vec!["v.warehouse_id = ?".to_string()];
     let mut params: Vec<Value> = vec![Value::Integer(warehouse_id)];
 
     if let Some(kind) = trimmed(&filter.kind) {
-        if kind == "in" || kind == "out" {
-            clauses.push("v.kind = ?");
-            params.push(Value::Text(kind.to_string()));
+        if let Some(cond) = kind_clause("v", kind) {
+            clauses.push(cond);
         }
     }
     if let Some(from) = trimmed(&filter.from) {
-        clauses.push("v.doc_date >= ?");
+        clauses.push("v.doc_date >= ?".to_string());
         params.push(Value::Text(normalize_date(from)));
     }
     if let Some(to) = trimmed(&filter.to) {
-        clauses.push("v.doc_date <= ?");
+        clauses.push("v.doc_date <= ?".to_string());
         params.push(Value::Text(normalize_date(to)));
     }
     if let Some(owner) = trimmed(&filter.owner) {
-        clauses.push("v.owner = ?");
+        clauses.push("v.owner = ?".to_string());
         params.push(Value::Text(owner.to_string()));
     }
     if let Some(buyer) = trimmed(&filter.buyer) {
-        clauses.push("v.buyer = ?");
+        clauses.push("v.buyer = ?".to_string());
         params.push(Value::Text(buyer.to_string()));
     }
     if let Some(keyword) = trimmed(&filter.keyword) {
@@ -452,7 +574,8 @@ fn compile_voucher_where(filter: &VoucherFilter, warehouse_id: i64) -> (String, 
               OR EXISTS (SELECT 1 FROM ledger l
                           WHERE l.warehouse_id = v.warehouse_id AND l.voucher_id = v.id
                             AND (l.item_name LIKE ? ESCAPE '\\' OR l.item_code LIKE ? ESCAPE '\\'
-                                 OR l.delivery_no LIKE ? ESCAPE '\\')))",
+                                 OR l.delivery_no LIKE ? ESCAPE '\\')))"
+                .to_string(),
         );
         for _ in 0..8 {
             params.push(Value::Text(like.clone()));
@@ -476,18 +599,19 @@ pub fn list_page(
     let summary_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(v.amount_cents), 0),
                 COALESCE(SUM(CASE WHEN v.kind = 'in' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN v.kind = 'out' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN v.kind = 'out' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN v.kind = 'out' AND v.is_return = 1 THEN 1 ELSE 0 END), 0)
          FROM vouchers v WHERE {where_sql}"
     );
-    let (total, amount_cents, in_count, out_count) = conn
+    let (total, amount_cents, in_count, out_count, ret_count) = conn
         .query_row(&summary_sql, rusqlite::params_from_iter(params.iter()), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .map_err(DbError::from)?;
 
     let rows_sql = format!(
         "SELECT v.id, v.kind, v.doc_no, v.doc_date, v.partner, v.owner, v.row_count, v.amount_cents,
-                v.created_at,
+                v.created_at, v.is_return, v.source_doc_no,
                 (SELECT l.item_name FROM ledger l
                   WHERE l.voucher_id = v.id AND TRIM(COALESCE(l.item_name,'')) <> ''
                   ORDER BY l.row_no, l.id LIMIT 1) AS first_item,
@@ -518,8 +642,10 @@ pub fn list_page(
                 row_count: r.get(6)?,
                 amount_cents: r.get(7)?,
                 created_at: r.get(8)?,
-                first_item: r.get(9)?,
-                delivery_no: r.get(10)?,
+                is_return: r.get::<_, i64>(9)? == 1,
+                source_doc_no: r.get(10)?,
+                first_item: r.get(11)?,
+                delivery_no: r.get(12)?,
             })
         })
         .and_then(|it| it.collect::<Result<Vec<_>, _>>())
@@ -533,6 +659,7 @@ pub fn list_page(
         amount_cents,
         in_count,
         out_count,
+        ret_count,
     })
 }
 
@@ -565,6 +692,10 @@ pub struct DocHit {
     pub source: String,
     /// 本机开单时有值，用它打开编辑器
     pub voucher_id: Option<i64>,
+    /// 是否退回供应商
+    pub is_return: bool,
+    /// 退货单的原入库单号
+    pub source_doc_no: Option<String>,
 }
 
 /// 按单据编号查询。支持：
@@ -585,23 +716,26 @@ pub fn search_docs(
     let limit = limit.clamp(1, 200);
     let exact = raw.to_string();
     let like = crate::ledger::like_pattern(raw);
+    // 类型条件：in / out / ret。`out` 不含退货，与台账、记录页口径一致。
+    let kind_cond = kind.and_then(|k| kind_clause("", k));
 
     // 1) 本机开单
     let mut hits: Vec<DocHit> = Vec::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, doc_no, kind, doc_date, partner, owner, buyer, delivery_no, row_count, amount_cents
-                 FROM vouchers
-                 WHERE warehouse_id = ?5
-                   AND (?1 IS NULL OR kind = ?1)
-                   AND (doc_no = ?2 OR doc_no LIKE ?3 ESCAPE '\\')
-                 ORDER BY doc_no DESC
-                 LIMIT ?4",
-            )
-            .map_err(DbError::from)?;
+        let kind_sql = kind_cond.as_deref().map(|c| format!("AND {c}")).unwrap_or_default();
+        let sql = format!(
+            "SELECT id, doc_no, kind, doc_date, partner, owner, buyer, delivery_no, row_count, amount_cents,
+                    is_return, source_doc_no
+              FROM vouchers
+              WHERE warehouse_id = ?4
+                {kind_sql}
+                AND (doc_no = ?1 OR doc_no LIKE ?2 ESCAPE '\\')
+              ORDER BY doc_no DESC
+              LIMIT ?3"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params![kind, exact, like, limit, warehouse_id], |r| {
+            .query_map(rusqlite::params![exact, like, limit, warehouse_id], |r| {
                 Ok(DocHit {
                     voucher_id: Some(r.get(0)?),
                     doc_no: r.get(1)?,
@@ -613,6 +747,8 @@ pub fn search_docs(
                     delivery_no: r.get(7)?,
                     row_count: r.get(8)?,
                     amount_cents: r.get(9)?,
+                    is_return: r.get::<_, i64>(10)? == 1,
+                    source_doc_no: r.get(11)?,
                     source: "voucher".to_string(),
                 })
             })
@@ -623,24 +759,25 @@ pub fn search_docs(
 
     // 2) 导入的单据：按编号聚合
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT doc_no, kind, MIN(doc_date), COUNT(*),
-                        COALESCE(SUM(amount_cents), 0),
-                        MAX(partner), MAX(owner), MAX(buyer), MAX(delivery_no)
-                 FROM ledger
-                 WHERE warehouse_id = ?5
-                   AND voucher_id IS NULL
-                   AND TRIM(COALESCE(doc_no, '')) <> ''
-                   AND (?1 IS NULL OR kind = ?1)
-                   AND (doc_no = ?2 OR doc_no LIKE ?3 ESCAPE '\\')
-                 GROUP BY doc_no, kind
-                 ORDER BY doc_no DESC
-                 LIMIT ?4",
-            )
-            .map_err(DbError::from)?;
+        let kind_sql = kind_cond.as_deref().map(|c| format!("AND {c}")).unwrap_or_default();
+        let sql = format!(
+            "SELECT doc_no, kind, MIN(doc_date), COUNT(*),
+                    COALESCE(SUM(amount_cents), 0),
+                    MAX(partner), MAX(owner), MAX(buyer), MAX(delivery_no),
+                    MAX(is_return), MAX(source_doc_no)
+              FROM ledger
+              WHERE warehouse_id = ?4
+                AND voucher_id IS NULL
+                AND TRIM(COALESCE(doc_no, '')) <> ''
+                {kind_sql}
+                AND (doc_no = ?1 OR doc_no LIKE ?2 ESCAPE '\\')
+              GROUP BY doc_no, kind
+              ORDER BY doc_no DESC
+              LIMIT ?3"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params![kind, exact, like, limit, warehouse_id], |r| {
+            .query_map(rusqlite::params![exact, like, limit, warehouse_id], |r| {
                 Ok(DocHit {
                     doc_no: r.get(0)?,
                     kind: r.get(1)?,
@@ -651,6 +788,8 @@ pub fn search_docs(
                     owner: r.get(6)?,
                     buyer: r.get(7)?,
                     delivery_no: r.get(8)?,
+                    is_return: r.get::<_, i64>(9)? == 1,
+                    source_doc_no: r.get(10)?,
                     source: "import".to_string(),
                     voucher_id: None,
                 })
@@ -705,6 +844,10 @@ fn validate(input: &VoucherInput) -> Result<(String, String), String> {
         "in" | "out" => input.kind.clone(),
         other => return Err(format!("单据类型只能是 in / out，收到 `{other}`")),
     };
+    // 退货是「退回供应商」，方向只能是出库；入库单上打退货标记没有业务含义
+    if input.is_return && kind != "out" {
+        return Err("退货单的方向必须是出库".into());
+    }
     let date = normalize_date(trimmed(&input.doc_date).unwrap_or(""));
     if chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
         return Err("日期不对，需要 YYYY-MM-DD".into());
@@ -766,25 +909,201 @@ fn ensure_doc_no_free(
     Ok(())
 }
 
+/// 原入库单的单号 + 校验「这张单确实是一张本仓的入库单」。
+///
+/// 返回 `Ok(None)` 表示单据已经不在了（可能被删）；类型不对仍然报错。
+fn lookup_source_doc_no(conn: &Connection, warehouse_id: i64, source_voucher_id: i64) -> DbResult<Option<String>> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT doc_no, kind FROM vouchers WHERE id = ?1 AND warehouse_id = ?2",
+            rusqlite::params![source_voucher_id, warehouse_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    match row {
+        Some((doc_no, kind)) if kind == "in" => Ok(Some(doc_no)),
+        Some(_) => Err("只能从入库单退货".into()),
+        None => Ok(None),
+    }
+}
+
+/// 新建退货单时来源单必须还在。
+fn source_doc_no(conn: &Connection, warehouse_id: i64, source_voucher_id: i64) -> DbResult<String> {
+    lookup_source_doc_no(conn, warehouse_id, source_voucher_id)?
+        .ok_or_else(|| "原入库单不存在（可能已被删除）".to_string())
+}
+
+/// 一张入库单还能退多少：按物料聚合原单数量，再减去所有退货单已退的数量。
+///
+/// `exclude_voucher` 用于编辑退货单时把它自己排除在「已退」之外，
+/// 否则原数量 10、自己退了 3，再保存时会被算成「已退 3，最多 7」而误报超退。
+pub fn return_source(
+    conn: &Connection,
+    warehouse_id: i64,
+    source_voucher_id: i64,
+    exclude_voucher: Option<i64>,
+) -> DbResult<ReturnSource> {
+    let (doc_no, doc_date, partner, buyer, remark): (String, String, Option<String>, Option<String>, Option<String>) =
+        conn.query_row(
+            "SELECT doc_no, doc_date, partner, buyer, remark
+             FROM vouchers WHERE id = ?1 AND warehouse_id = ?2 AND kind = 'in'",
+            rusqlite::params![source_voucher_id, warehouse_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|_| "原入库单不存在（可能已被删除）".to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "WITH orig AS (
+                 SELECT COALESCE(NULLIF(TRIM(item_code), ''), TRIM(item_name)) AS key,
+                        MAX(NULLIF(TRIM(item_code), '')) AS item_code,
+                        MAX(NULLIF(TRIM(item_name), '')) AS item_name,
+                        MAX(NULLIF(TRIM(spec), '')) AS spec,
+                        MAX(NULLIF(TRIM(unit), '')) AS unit,
+                        COALESCE(SUM(qty), 0) AS orig_qty,
+                        MAX(price_micros) AS price_micros
+                   FROM ledger
+                  WHERE voucher_id = ?1 AND kind = 'in'
+                  GROUP BY key
+             ),
+             returned AS (
+                 SELECT COALESCE(NULLIF(TRIM(item_code), ''), TRIM(item_name)) AS key,
+                        COALESCE(SUM(qty), 0) AS returned_qty
+                   FROM ledger
+                  WHERE source_voucher_id = ?1 AND is_return = 1
+                    AND COALESCE(voucher_id, -1) <> ?2
+                  GROUP BY key
+             )
+             SELECT o.item_code, o.item_name, o.spec, o.unit, o.orig_qty,
+                    COALESCE(r.returned_qty, 0) AS returned_qty,
+                    o.price_micros
+               FROM orig o
+               LEFT JOIN returned r ON r.key = o.key
+              ORDER BY o.item_name, o.item_code",
+        )
+        .map_err(DbError::from)?;
+    let lines = stmt
+        .query_map(
+            rusqlite::params![source_voucher_id, exclude_voucher.unwrap_or(-1)],
+            |r| {
+                let orig_qty: f64 = r.get(4)?;
+                let returned_qty: f64 = r.get(5)?;
+                Ok(ReturnableLine {
+                    item_code: r.get(0)?,
+                    item_name: r.get(1)?,
+                    spec: r.get(2)?,
+                    unit: r.get(3)?,
+                    orig_qty,
+                    returned_qty,
+                    returnable_qty: (orig_qty - returned_qty).max(0.0),
+                    price_micros: r.get(6)?,
+                })
+            },
+        )
+        .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        .map_err(DbError::from)?;
+
+    Ok(ReturnSource {
+        voucher_id: source_voucher_id,
+        doc_no,
+        doc_date,
+        partner,
+        buyer,
+        remark,
+        lines,
+    })
+}
+
+/// 退货数量校验：本次每行不得超过「原数量 − 已退数量」。
+///
+/// 按物料聚合比较（与原单多行合并的口径一致）：同一物料这次填的数量合计
+/// 不能超过可退总量，否则报错并指出是哪个物料。
+fn validate_return_lines(
+    conn: &Connection,
+    warehouse_id: i64,
+    source_voucher_id: i64,
+    exclude_voucher: Option<i64>,
+    lines: &[VoucherLineInput],
+) -> DbResult<()> {
+    let source = return_source(conn, warehouse_id, source_voucher_id, exclude_voucher)?;
+    let mut quota: HashMap<String, (f64, f64)> = HashMap::new();
+    for line in &source.lines {
+        let key = return_key(line.item_code.as_deref(), line.item_name.as_deref());
+        quota.insert(key, (line.returnable_qty, line.orig_qty));
+    }
+
+    let mut wanted: HashMap<String, f64> = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        let key = return_key(line.item_code.as_deref(), line.item_name.as_deref());
+        if !quota.contains_key(&key) {
+            let label = line
+                .item_name
+                .as_deref()
+                .or(line.item_code.as_deref())
+                .unwrap_or("(未填物料)");
+            return Err(format!("第 {} 行物料「{label}」不在原入库单里", index + 1));
+        }
+        *wanted.entry(key).or_insert(0.0) += line.qty.unwrap_or(0.0);
+    }
+
+    for (key, qty) in wanted {
+        let (returnable, orig) = quota[&key];
+        if qty > returnable + 1e-9 {
+            let label = source
+                .lines
+                .iter()
+                .find(|l| return_key(l.item_code.as_deref(), l.item_name.as_deref()) == key)
+                .and_then(|l| l.item_name.as_deref().or(l.item_code.as_deref()))
+                .unwrap_or(key.as_str());
+            return Err(format!(
+                "物料「{label}」原入库 {orig}，已退 {:.4}，本次最多可退 {returnable:.4}",
+                orig - returnable
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 超退校验用的物料键：优先编码，没有编码时用名称（与 SQL 里的 COALESCE 一致）。
+fn return_key(code: Option<&str>, name: Option<&str>) -> String {
+    let code = code.map(str::trim).filter(|s| !s.is_empty());
+    let name = name.map(str::trim).filter(|s| !s.is_empty());
+    code.or(name).unwrap_or("").to_string()
+}
+
 /// 新建单据。整张单一个事务：表头、明细、编号占用一起成功或一起失败。
 pub fn create(conn: &Connection, warehouse_id: i64, input: &VoucherInput) -> DbResult<i64> {
     let (kind, date) = validate(input)?;
+    // 退货单：先确认来源单，再校验可退数量（整张单明细一起校验）。
+    // 没有来源单 id 的是手工退货 —— Excel 导入的入库单在库里没有单据头，
+    // 拿不到可退数量，只能记录用户填的原单号并跳过超退校验。
+    let (source_id, source_no) = match (input.is_return, input.source_voucher_id) {
+        (true, Some(source_id)) => {
+            let doc_no = source_doc_no(conn, warehouse_id, source_id)?;
+            validate_return_lines(conn, warehouse_id, source_id, None, &input.lines)?;
+            (Some(source_id), Some(doc_no))
+        }
+        (true, None) => (None, trimmed(&input.source_doc_no).map(str::to_string)),
+        _ => (None, None),
+    };
     let doc_no = match trimmed(&input.doc_no) {
         Some(no) => no.to_string(),
+        None if input.is_return => next_return_doc_no(conn, warehouse_id, &date)?,
         None => next_doc_no(conn, warehouse_id, &kind, &date)?,
     };
 
     ensure_doc_no_free(conn, warehouse_id, &kind, &doc_no, None)?;
 
-    let sheet = format!("voucher:{kind}");
+    let sheet = sheet_of(kind.as_str(), input.is_return);
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
 
     let mut total_cents: i64 = 0;
     let mut row_count: i64 = 0;
     let voucher_id = {
         tx.execute(
-            "INSERT INTO vouchers (warehouse_id, kind, doc_no, doc_date, partner, delivery_no, buyer, owner, receiver, remark)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO vouchers (warehouse_id, kind, doc_no, doc_date, partner, delivery_no, buyer, owner, receiver, remark,
+                                   is_return, source_voucher_id, source_doc_no)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 warehouse_id,
                 kind,
@@ -796,6 +1115,9 @@ pub fn create(conn: &Connection, warehouse_id: i64, input: &VoucherInput) -> DbR
                 trimmed(&input.owner),
                 trimmed(&input.receiver),
                 trimmed(&input.remark),
+                input.is_return as i64,
+                source_id,
+                source_no.clone(),
             ],
         )
         .map_err(DbError::from)?;
@@ -807,8 +1129,8 @@ pub fn create(conn: &Connection, warehouse_id: i64, input: &VoucherInput) -> DbR
             .prepare(
                 "INSERT INTO ledger (import_id, voucher_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
                     item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
-                    partner, buyer, owner, receiver, flags, warehouse_id)
-                 VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, '', ?20)",
+                    partner, buyer, owner, receiver, flags, warehouse_id, is_return, source_voucher_id, source_doc_no)
+                 VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, '', ?20, ?21, ?22, ?23)",
             )
             .map_err(DbError::from)?;
         for (index, line) in input.lines.iter().enumerate() {
@@ -838,6 +1160,9 @@ pub fn create(conn: &Connection, warehouse_id: i64, input: &VoucherInput) -> DbR
                 trimmed(&input.owner),
                 trimmed(&input.receiver),
                 warehouse_id,
+                input.is_return as i64,
+                source_id,
+                source_no.clone(),
             ])
             .map_err(DbError::from)?;
         }
@@ -867,6 +1192,29 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
     let house: i64 = conn
         .query_row("SELECT warehouse_id FROM vouchers WHERE id = ?1", [id], |r| r.get(0))
         .map_err(|_| "单据不存在".to_string())?;
+    // 退货单：来源单与可退数量校验，编辑时排除自己；
+    // 没有来源单 id 的是手工退货，只记用户填的原单号。
+    // 来源单已被删除时保留库里原来的原单号、跳过超退校验——否则这张退货单
+    // 会变成永远改不了也删不掉的死单据。
+    let (source_id, source_no) = match (input.is_return, input.source_voucher_id) {
+        (true, Some(source_id)) => match lookup_source_doc_no(conn, house, source_id)? {
+            Some(doc_no) => {
+                validate_return_lines(conn, house, source_id, Some(id), &input.lines)?;
+                (Some(source_id), Some(doc_no))
+            }
+            None => {
+                let kept: Option<String> = conn
+                    .query_row("SELECT source_doc_no FROM vouchers WHERE id = ?1", [id], |r| r.get(0))
+                    .unwrap_or(None);
+                (
+                    Some(source_id),
+                    trimmed(&input.source_doc_no).map(str::to_string).or(kept),
+                )
+            }
+        },
+        (true, None) => (None, trimmed(&input.source_doc_no).map(str::to_string)),
+        _ => (None, None),
+    };
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     tx.execute("DELETE FROM ledger WHERE voucher_id = ?1", [id])
         .map_err(DbError::from)?;
@@ -880,8 +1228,9 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
     ensure_doc_no_free(&tx, house, &kind, &doc_no, Some(id))?;
     tx.execute(
         "UPDATE vouchers SET kind=?1, doc_no=?2, doc_date=?3, partner=?4, delivery_no=?5, buyer=?6,
-                owner=?7, receiver=?8, remark=?9, updated_at=datetime('now','localtime')
-         WHERE id=?10",
+                owner=?7, receiver=?8, remark=?9, is_return=?10, source_voucher_id=?11, source_doc_no=?12,
+                updated_at=datetime('now','localtime')
+         WHERE id=?13",
         rusqlite::params![
             kind,
             doc_no,
@@ -892,20 +1241,23 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
             trimmed(&input.owner),
             trimmed(&input.receiver),
             trimmed(&input.remark),
+            input.is_return as i64,
+            source_id,
+            source_no.clone(),
             id,
         ],
     )
     .map_err(DbError::from)?;
 
-    let sheet = format!("voucher:{kind}");
+    let sheet = sheet_of(kind.as_str(), input.is_return);
     let mut total = 0i64;
     {
         let mut stmt = tx
             .prepare(
                 "INSERT INTO ledger (voucher_id, sheet, row_no, kind, doc_date, doc_no, delivery_no,
                     item_code, item_name, spec, unit, qty, price_micros, amount_cents, remark,
-                    partner, buyer, owner, receiver, flags, warehouse_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,'',?20)",
+                    partner, buyer, owner, receiver, flags, warehouse_id, is_return, source_voucher_id, source_doc_no)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,'',?20,?21,?22,?23)",
             )
             .map_err(DbError::from)?;
         for (index, line) in input.lines.iter().enumerate() {
@@ -934,6 +1286,9 @@ pub fn update(conn: &Connection, id: i64, input: &VoucherInput) -> DbResult<()> 
                 trimmed(&input.owner),
                 trimmed(&input.receiver),
                 house,
+                input.is_return as i64,
+                source_id,
+                source_no.clone(),
             ])
             .map_err(DbError::from)?;
         }
@@ -1023,6 +1378,20 @@ pub fn next_doc_no_db(db: &Db, warehouse_id: i64, kind: &str, date: &str) -> DbR
     db.with(|c| next_doc_no(c, warehouse_id, kind, date).map_err(DbError))
 }
 
+pub fn next_return_doc_no_db(db: &Db, warehouse_id: i64, date: &str) -> DbResult<String> {
+    db.with(|c| next_return_doc_no(c, warehouse_id, date).map_err(DbError))
+}
+
+/// 退货录入时读原单信息与可退数量；编辑已有退货单时传 `exclude_voucher`。
+pub fn return_source_db(
+    db: &Db,
+    warehouse_id: i64,
+    source_voucher_id: i64,
+    exclude_voucher: Option<i64>,
+) -> DbResult<ReturnSource> {
+    db.with(|c| return_source(c, warehouse_id, source_voucher_id, exclude_voucher).map_err(DbError))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,7 +1441,18 @@ mod tests {
             owner: None,
             receiver: None,
             remark: None,
+            is_return: false,
+            source_voucher_id: None,
+            source_doc_no: None,
             lines,
+        }
+    }
+
+    fn return_input(source_id: i64, date: &str, lines: Vec<VoucherLineInput>) -> VoucherInput {
+        VoucherInput {
+            is_return: true,
+            source_voucher_id: Some(source_id),
+            ..input("out", date, lines)
         }
     }
 
@@ -1803,5 +2183,298 @@ mod tests {
             .unwrap();
         assert_eq!(by_owner.total, 1);
         assert_eq!(by_owner.rows[0].kind, "out");
+    }
+
+    // ---------- 退货单 ----------
+
+    /// 开一张入库单，返回 (入库单 id, 入库单号)。
+    fn seed_inbound(db: &Db, date: &str, lines: Vec<VoucherLineInput>) -> (i64, String) {
+        let id = db.with_loose(|c| create(c, WH, &input("in", date, lines))).unwrap();
+        let doc_no = db.with_loose(|c| get(c, id)).unwrap().unwrap().doc_no;
+        (id, doc_no)
+    }
+
+    #[test]
+    fn return_doc_no_uses_th_prefix_and_does_not_consume_out_seq() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, _) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+
+        let first = db.with_loose(|c| next_return_doc_no(c, WH, "2026-09-01")).unwrap();
+        assert_eq!(first, "TH20260901001");
+
+        let return_id = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &return_input(src, "2026-09-01", vec![line("A", "螺丝", 2.0, Some(10_000))]),
+                )
+            })
+            .unwrap();
+        let saved = db.with_loose(|c| get(c, return_id)).unwrap().unwrap();
+        assert_eq!(saved.doc_no, "TH20260901001");
+        assert!(saved.is_return);
+        assert_eq!(saved.kind, "out", "退货在台账里的方向仍是出库");
+        assert_eq!(saved.sheet, "voucher:ret");
+        assert_eq!(saved.source_voucher_id, Some(src));
+
+        // 第二张继续 002，且不占普通出库的流水
+        let second = db.with_loose(|c| next_return_doc_no(c, WH, "2026-09-01")).unwrap();
+        assert_eq!(second, "TH20260901002");
+        let out_no = db.with_loose(|c| next_doc_no(c, WH, "out", "2026-09-01")).unwrap();
+        assert_eq!(out_no, "20260901001", "退货单与普通出库各自取号");
+    }
+
+    #[test]
+    fn return_voucher_writes_out_ledger_rows_with_source() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, src_no) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+
+        let return_id = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &return_input(src, "2026-09-02", vec![line("A", "螺丝", 3.0, Some(12_000))]),
+                )
+            })
+            .unwrap();
+
+        let rows = db
+            .with_loose(|c| {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT kind, is_return, source_voucher_id, source_doc_no, sheet, qty, amount_cents
+                           FROM ledger WHERE voucher_id = ?1",
+                    )
+                    .map_err(|e| e.to_string())?;
+                stmt.query_map([return_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, f64>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                    ))
+                })
+                .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (kind, is_return, source_id, source_no, sheet, qty, amount) = rows[0].clone();
+        assert_eq!(kind, "out", "库存据此扣减");
+        assert_eq!(is_return, 1);
+        assert_eq!(source_id, Some(src));
+        assert_eq!(source_no.as_deref(), Some(src_no.as_str()));
+        assert_eq!(sheet, "voucher:ret");
+        assert_eq!(qty, 3.0);
+        // 3 × 1.20 元 = 3.60 元
+        assert_eq!(amount, Some(360));
+
+        // 退货单计入出库金额，且能被「退货」筛选单独挑出来
+        let all = db
+            .with_loose(|c| list_page(c, WH, &VoucherFilter::default(), 1, 10))
+            .unwrap();
+        assert_eq!(all.ret_count, 1);
+        assert_eq!(all.out_count, 1, "退货方向是出库，计入出库张数");
+        assert_eq!(all.in_count, 1);
+        assert_eq!(all.total, 2);
+
+        let only_ret = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        kind: Some("ret".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(only_ret.total, 1);
+        assert_eq!(only_ret.rows[0].doc_no, "TH20260902001");
+        assert_eq!(only_ret.rows[0].source_doc_no.as_deref(), Some(src_no.as_str()));
+
+        // 「出库」筛选不含退货
+        let only_out = db
+            .with_loose(|c| {
+                list_page(
+                    c,
+                    WH,
+                    &VoucherFilter {
+                        kind: Some("out".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    10,
+                )
+            })
+            .unwrap();
+        assert_eq!(only_out.total, 0);
+    }
+
+    #[test]
+    fn return_rejects_quantity_over_remaining() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, _) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+
+        // 先退 4
+        db.with_loose(|c| {
+            create(
+                c,
+                WH,
+                &return_input(src, "2026-09-02", vec![line("A", "螺丝", 4.0, Some(10_000))]),
+            )
+        })
+        .unwrap();
+
+        // 再退 7 → 已退 4，最多 6，应被拒
+        let err = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &return_input(src, "2026-09-03", vec![line("A", "螺丝", 7.0, Some(10_000))]),
+                )
+            })
+            .unwrap_err();
+        assert!(err.contains("最多可退"), "实际错误：{err}");
+
+        // 退 6 刚好用满
+        db.with_loose(|c| {
+            create(
+                c,
+                WH,
+                &return_input(src, "2026-09-03", vec![line("A", "螺丝", 6.0, Some(10_000))]),
+            )
+        })
+        .unwrap();
+
+        let source = db.with_loose(|c| return_source(c, WH, src, None)).unwrap();
+        assert_eq!(source.lines.len(), 1);
+        assert_eq!(source.lines[0].orig_qty, 10.0);
+        assert_eq!(source.lines[0].returned_qty, 10.0);
+        assert_eq!(source.lines[0].returnable_qty, 0.0);
+    }
+
+    #[test]
+    fn editing_return_excludes_itself_from_returned_qty() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, _) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+
+        let mut ret = return_input(src, "2026-09-02", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+        let ret_id = db.with_loose(|c| create(c, WH, &ret)).unwrap();
+
+        // 不排除自己时，可退已经是 0
+        let inflated = db.with_loose(|c| return_source(c, WH, src, None)).unwrap();
+        assert_eq!(inflated.lines[0].returnable_qty, 0.0);
+        // 排除自己后又能退满 10
+        let own = db.with_loose(|c| return_source(c, WH, src, Some(ret_id))).unwrap();
+        assert_eq!(own.lines[0].returnable_qty, 10.0);
+
+        // 改成退 8 应当通过（否则会把自己的 10 算成已退而误报超退）
+        ret.lines = vec![line("A", "螺丝", 8.0, Some(10_000))];
+        db.with_loose(|c| update(c, ret_id, &ret)).unwrap();
+        let saved = db.with_loose(|c| get(c, ret_id)).unwrap().unwrap();
+        assert_eq!(saved.lines[0].qty, Some(8.0));
+        assert!(saved.is_return);
+        assert_eq!(saved.sheet, "voucher:ret");
+    }
+
+    #[test]
+    fn editing_return_survives_deleted_source() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, _) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+        let mut ret = return_input(src, "2026-09-02", vec![line("A", "螺丝", 4.0, Some(10_000))]);
+        let ret_id = db.with_loose(|c| create(c, WH, &ret)).unwrap();
+
+        // 原入库单被删掉后，退货单还会指向它
+        db.with_loose(|c| delete(c, src)).unwrap();
+
+        // 仍然能改：保留原单号，不再校验超退（拿不到原数量）
+        ret.lines = vec![line("A", "螺丝", 3.0, Some(10_000))];
+        db.with_loose(|c| update(c, ret_id, &ret)).unwrap();
+        let saved = db.with_loose(|c| get(c, ret_id)).unwrap().unwrap();
+        assert_eq!(saved.lines[0].qty, Some(3.0));
+        assert_eq!(saved.source_voucher_id, Some(src));
+        assert!(saved.source_doc_no.is_some(), "原单号要留着做追溯");
+    }
+
+    #[test]
+    fn return_requires_inbound_source() {
+        let db = Db::open_in_memory().unwrap();
+        // 不带来源单 = 手工退货（Excel 导入的入库单没有单据头）：允许保存，
+        // 只记用户填的原单号，不做超退校验
+        let manual = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &VoucherInput {
+                        is_return: true,
+                        source_voucher_id: None,
+                        source_doc_no: Some("20260831001".into()),
+                        ..input("out", "2026-09-02", vec![line("A", "螺丝", 1.0, Some(1))])
+                    },
+                )
+            })
+            .unwrap();
+        let saved = db.with_loose(|c| get(c, manual)).unwrap().unwrap();
+        assert!(saved.is_return);
+        assert_eq!(saved.source_voucher_id, None);
+        assert_eq!(saved.source_doc_no.as_deref(), Some("20260831001"));
+        assert_eq!(saved.sheet, "voucher:ret");
+
+        // 入库单不能打退货标记
+        let err = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &VoucherInput {
+                        is_return: true,
+                        ..input("in", "2026-09-02", vec![line("A", "螺丝", 1.0, Some(1))])
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(err.contains("必须是出库"), "实际错误：{err}");
+
+        // 指向一张出库单也不行
+        let out_id = db
+            .with_loose(|c| create(c, WH, &input("out", "2026-09-02", vec![line("A", "螺丝", 1.0, None)])))
+            .unwrap();
+        let err = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &return_input(out_id, "2026-09-03", vec![line("A", "螺丝", 1.0, Some(1))]),
+                )
+            })
+            .unwrap_err();
+        assert!(err.contains("只能从入库单退货"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn return_line_must_exist_in_source() {
+        let db = Db::open_in_memory().unwrap();
+        let (src, _) = seed_inbound(&db, "2026-09-01", vec![line("A", "螺丝", 10.0, Some(10_000))]);
+        let err = db
+            .with_loose(|c| {
+                create(
+                    c,
+                    WH,
+                    &return_input(src, "2026-09-02", vec![line("B", "轴承", 1.0, Some(10_000))]),
+                )
+            })
+            .unwrap_err();
+        assert!(err.contains("不在原入库单里"), "实际错误：{err}");
     }
 }

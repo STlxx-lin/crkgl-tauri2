@@ -19,14 +19,27 @@ import {
   getVoucher,
   isTauri,
   fetchDocLines,
+  fetchReturnSource,
   listDict,
   listVouchers,
   nextDocNo,
+  nextReturnDocNo,
   searchDocs,
   updateVoucher,
 } from "../lib/api";
 import type { DocHit, Item, Kind, LedgerRow, Supplier, Voucher, VoucherLineInput, VoucherSummary } from "../lib/types";
-import { amount, count, date, flagLabel, kindLabel, money, priceInput4, priceText, qty } from "../lib/format";
+import {
+  amount,
+  count,
+  date,
+  flagLabel,
+  kindLabel,
+  money,
+  priceInput4,
+  priceText,
+  qty,
+  rowKindLabel,
+} from "../lib/format";
 import { Button } from "@/components/base/buttons/button";
 import { AlertDialog, Modal, ModalBody, ModalFooter, ModalHeader } from "@/components/base/modal/modal";
 import { toast } from "@/components/base/toast/toast";
@@ -48,7 +61,28 @@ import {
 } from "../lib/voucherPrefs";
 import type { VoucherRequest } from "../lib/voucherRequest";
 
-type Mode = { kind: Kind; id: number | null };
+type Mode = {
+  kind: Kind;
+  id: number | null;
+  /** 退回供应商的退货单：方向仍是 out，但单独取号、单独标记 */
+  isReturn: boolean;
+  /** 退货单的来源入库单 id */
+  sourceVoucherId: number | null;
+};
+
+const newMode = (kind: Kind, id: number | null = null): Mode => ({
+  kind,
+  id,
+  isReturn: false,
+  sourceVoucherId: null,
+});
+
+const returnMode = (sourceVoucherId: number | null = null): Mode => ({
+  kind: "out",
+  id: null,
+  isReturn: true,
+  sourceVoucherId,
+});
 
 interface DraftLine {
   key: string;
@@ -72,6 +106,8 @@ interface HeadDraft {
   receiver: string;
   /** 仓管签字（纸单底部有，只做记录） */
   storekeeper: string;
+  /** 退货单的原入库单号（只读展示，保存时以 sourceVoucherId 为准） */
+  sourceDocNo: string;
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -125,6 +161,7 @@ function blankHead(kind: Kind): HeadDraft {
     owner: "",
     receiver: "",
     storekeeper: "",
+    sourceDocNo: "",
   };
 }
 
@@ -187,6 +224,8 @@ function sanitizeHead(value: unknown, kind: Kind): HeadDraft | null {
     owner: owner ?? "",
     receiver: receiver ?? "",
     storekeeper: storekeeper ?? "",
+    // 老草稿没有原单号：补空串，不影响普通单据
+    sourceDocNo: text("sourceDocNo") ?? "",
   };
 }
 
@@ -210,11 +249,17 @@ function loadVoucherDraft(warehouseId: number): VoucherDraft | null {
     const id = mode.id;
     if (id !== null && (typeof id !== "number" || !Number.isFinite(id))) return null;
     const kind = mode.kind as Kind;
+    // 老草稿没有这两个字段：按普通单据补齐，不影响首屏
+    const isReturn = mode.isReturn === true;
+    const rawSource = mode.sourceVoucherId;
+    const sourceVoucherId = typeof rawSource === "number" && Number.isFinite(rawSource) ? rawSource : null;
+    // 退货单必须是出库方向；草稿坏了就退回普通出库
+    if (isReturn && kind !== "out") return null;
     if (!Array.isArray(draft.lines) || draft.lines.length === 0) return null;
     if (!draft.lines.every(isDraftLine)) return null;
     const head = sanitizeHead(draft.head, kind);
     if (!head) return null;
-    return { mode: { kind, id: id as number | null }, head, lines: draft.lines };
+    return { mode: { kind, id: id as number | null, isReturn, sourceVoucherId }, head, lines: draft.lines };
   } catch {
     // 解析失败或本地存储被禁用：当作没有草稿
     clearVoucherDraft(warehouseId);
@@ -362,7 +407,7 @@ export function VoucherScreen({
     adoptLegacyDraft(warehouseId);
     return loadVoucherDraft(warehouseId);
   });
-  const [mode, setMode] = useState<Mode>(() => initialDraft?.mode ?? { kind: "in", id: null });
+  const [mode, setMode] = useState<Mode>(() => initialDraft?.mode ?? newMode("in"));
   const [head, setHead] = useState<HeadDraft>(() => initialDraft?.head ?? blankHead("in"));
   const [lines, setLines] = useState<DraftLine[]>(() => initialDraft?.lines ?? [blankLine()]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -435,9 +480,9 @@ export function VoucherScreen({
     setBuyerOptions(buyers);
   }, []);
 
-  const freshDocNo = useCallback(async (kind: Kind, docDate: string) => {
+  const freshDocNo = useCallback(async (kind: Kind, docDate: string, isReturn = false) => {
     try {
-      const no = await nextDocNo(kind, docDate || today());
+      const no = isReturn ? await nextReturnDocNo(docDate || today()) : await nextDocNo(kind, docDate || today());
       setHead((prev) => ({ ...prev, docNo: prev.docNo.trim() ? prev.docNo : no }));
     } catch (err) {
       toast("取号失败", { description: String(err), status: "error" });
@@ -478,7 +523,7 @@ export function VoucherScreen({
     saveVoucherDraft(from, { mode, head, lines });
     draftWarehouse.current = warehouseId;
     const draft = loadVoucherDraft(warehouseId);
-    const nextMode = draft?.mode ?? { kind: "in" as Kind, id: null };
+    const nextMode = draft?.mode ?? newMode("in");
     const nextHead = draft?.head ?? blankHead(nextMode.kind);
     setMode(nextMode);
     setHead(nextHead);
@@ -493,7 +538,7 @@ export function VoucherScreen({
     // 历史单据属于旧仓，重新拉一遍新仓的
     void loadHistory();
     // 新仓的流水单独起号：单据编号不能沿用上一个仓的
-    if (!draft || !nextHead.docNo.trim()) void freshDocNo(nextMode.kind, nextHead.docDate);
+    if (!draft || !nextHead.docNo.trim()) void freshDocNo(nextMode.kind, nextHead.docDate, nextMode.isReturn);
     // 只用 warehouseId 触发；mode/head/lines 是切换那一刻的快照
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [warehouseId]);
@@ -586,11 +631,11 @@ export function VoucherScreen({
 
   useEffect(() => {
     if (mode.id === null) {
-      freshDocNo(mode.kind, head.docDate);
+      freshDocNo(mode.kind, head.docDate, mode.isReturn);
     }
     // 只在新建单据且日期变化时取号
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode.kind, mode.id]);
+  }, [mode.kind, mode.id, mode.isReturn]);
 
   /** 最近开单的合计金额：只用于「最近 N 张」那一行的说明。 */
   const recentAmount = useMemo(() => history.reduce((sum, v) => sum + v.amountCents, 0), [history]);
@@ -650,16 +695,19 @@ export function VoucherScreen({
       kind: mode.kind,
       docNo: head.docNo,
       docDate: head.docDate,
-      partner: mode.kind === "in" ? head.partner.trim() || null : head.owner.trim() || null,
+      partner: mode.kind === "in" || mode.isReturn ? head.partner.trim() || null : head.owner.trim() || null,
       deliveryNo: null,
       buyer: head.buyer.trim() || null,
-      owner: head.owner.trim() || null,
+      owner: mode.isReturn ? null : head.owner.trim() || null,
       receiver: head.receiver.trim() || null,
       remark: null,
       rowCount: draftLines.length,
       amountCents: draftLines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0),
       createdAt: "",
-      sheet: `voucher:${mode.kind}`,
+      sheet: mode.isReturn ? "voucher:ret" : `voucher:${mode.kind}`,
+      isReturn: mode.isReturn,
+      sourceVoucherId: mode.sourceVoucherId,
+      sourceDocNo: mode.isReturn ? head.sourceDocNo.trim() || null : null,
       lines: draftLines,
     };
   }, [lines, head, mode]);
@@ -673,19 +721,74 @@ export function VoucherScreen({
       unit: item.unit ?? "",
       spec: item.spec ?? "",
     };
-    if (mode.kind === "in" && item.priceMicros !== null && item.priceMicros !== undefined) {
+    if ((mode.kind === "in" || mode.isReturn) && item.priceMicros !== null && item.priceMicros !== undefined) {
       patch.price = String(item.priceMicros / 10_000);
     }
     setLine(key, patch);
   };
 
-  const startNew = async (kind: Kind) => {
+  const startNew = async (kind: Kind, isReturn = false) => {
     clearVoucherDraft(warehouseId);
-    setMode({ kind, id: null });
-    setHead(blankHead(kind));
+    setMode(isReturn ? returnMode(null) : newMode(kind));
+    // 退货单要供应商与采购人，单头按入库单那套字段初始化（方向仍是 out）
+    setHead(blankHead(isReturn ? "in" : kind));
     setLines([blankLine()]);
     dirty.current = false;
-    await freshDocNo(kind, today());
+    await freshDocNo(kind, today(), isReturn);
+  };
+
+  /**
+   * 从原入库单开退货单：取回可退明细，数量默认带满可退，单价沿用原单。
+   * 来源单号记在单头只读显示，保存时后端会再校验一次超退。
+   */
+  const startReturn = async (sourceVoucherId: number) => {
+    if (dirty.current && !window.confirm("左边有未保存的内容，从这张入库单退货会覆盖。继续？")) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const detail = await fetchReturnSource(sourceVoucherId);
+      const usable = detail.lines.filter((line) => line.returnableQty > 0);
+      if (usable.length === 0) {
+        toast("这张入库单已经全部退完", { description: detail.docNo, status: "error" });
+        return;
+      }
+      setViewingVoucher(null);
+      setMode(returnMode(detail.voucherId));
+      setHead({
+        docNo: "",
+        docDate: today(),
+        partner: detail.partner ?? "",
+        buyer: detail.buyer ?? "",
+        owner: "",
+        receiver: "",
+        storekeeper: "",
+        sourceDocNo: detail.docNo,
+      });
+      setLines(
+        usable.map((line) => {
+          lineSeq += 1;
+          return {
+            key: `l${lineSeq}`,
+            deliveryNo: "",
+            itemCode: line.itemCode ?? "",
+            itemName: line.itemName ?? "",
+            unit: line.unit ?? "",
+            qty: String(line.returnableQty),
+            price: line.priceMicros === null ? "" : priceInput4(line.priceMicros),
+            remark: "",
+            spec: line.spec ?? "",
+          };
+        }),
+      );
+      dirty.current = false;
+      await freshDocNo("out", today(), true);
+      toast(`从 ${detail.docNo} 新建退货单，核对数量后保存`, { status: "success" });
+    } catch (err) {
+      toast("退货单生成失败", { description: String(err), status: "error" });
+    } finally {
+      setBusy(false);
+    }
   };
 
   /** 点列表：只打开详情，不动左边正在录的单。 */
@@ -718,7 +821,12 @@ export function VoucherScreen({
         return;
       }
       setViewingVoucher(null);
-      setMode({ kind: voucher.kind, id: voucher.id });
+      setMode({
+        kind: voucher.kind,
+        id: voucher.id,
+        isReturn: voucher.isReturn,
+        sourceVoucherId: voucher.sourceVoucherId,
+      });
       setHead({
         docNo: voucher.docNo,
         docDate: voucher.docDate,
@@ -727,6 +835,7 @@ export function VoucherScreen({
         owner: voucher.owner ?? "",
         receiver: voucher.receiver ?? "",
         storekeeper: "",
+        sourceDocNo: voucher.sourceDocNo ?? "",
       });
       setLines(
         voucher.lines.length > 0
@@ -764,6 +873,10 @@ export function VoucherScreen({
    * 存单成功后才清空弹窗里的原单，不会动原单本身。
    */
   const convertVoucher = async (voucher: Voucher) => {
+    if (voucher.isReturn) {
+      toast("退货单不能转单", { description: "退货请从原入库单重新开一张。", status: "error" });
+      return;
+    }
     const target: Kind = voucher.kind === "in" ? "out" : "in";
     const label = kindLabel(target);
     if (dirty.current && !window.confirm(`左边有未保存的内容，「转为${label}」会覆盖。继续？`)) {
@@ -777,7 +890,7 @@ export function VoucherScreen({
     setBusy(true);
     try {
       setViewingVoucher(null);
-      setMode({ kind: target, id: null });
+      setMode(newMode(target));
       setHead({
         docNo: "",
         docDate: today(),
@@ -787,6 +900,7 @@ export function VoucherScreen({
         owner: target === "in" ? "" : (voucher.partner ?? voucher.owner ?? ""),
         receiver: voucher.receiver ?? "",
         storekeeper: "",
+        sourceDocNo: "",
       });
       setLines(
         carried.map((line) => {
@@ -833,6 +947,7 @@ export function VoucherScreen({
           return;
         }
         if (request.action === "convert") await convertVoucher(voucher);
+        else if (request.action === "return") await startReturn(voucher.id);
         else await loadVoucherIntoForm(voucher);
       } catch (err) {
         toast("单据读取失败", { description: String(err), status: "error" });
@@ -869,13 +984,21 @@ export function VoucherScreen({
         toast(`第 ${row} 行数量必须大于 0`, { description: `填的是 ${q}`, status: "error" });
         return;
       }
-      if (mode.kind === "in" && line.price.trim() !== "") {
+      if ((mode.kind === "in" || mode.isReturn) && line.price.trim() !== "") {
         const p = Number(line.price.replace(/[,，¥￥\s]/g, ""));
         if (!Number.isFinite(p) || p < 0) {
           toast(`第 ${row} 行单价不是有效数字`, { description: `填的是「${line.price}」`, status: "error" });
           return;
         }
       }
+    }
+    // 从入库单生成的退货单必须挂在来源单上；手工退货（Excel 导入单没有单据头）只需填原单号文本
+    if (mode.isReturn && mode.sourceVoucherId !== null && !head.sourceDocNo.trim()) {
+      toast("退货单缺少原入库单号", {
+        description: "请重新从入库单点「退货」生成。",
+        status: "error",
+      });
+      return;
     }
 
     const payloadLines: VoucherLineInput[] = filled.map(({ line }) => {
@@ -887,7 +1010,9 @@ export function VoucherScreen({
         unit: line.unit.trim() || null,
         qty: Number(line.qty.replace(/[,，]/g, "")),
         priceMicros:
-          mode.kind === "in" && Number.isFinite(p) && line.price.trim() !== "" ? Math.round(p * 10000) : null,
+          (mode.kind === "in" || mode.isReturn) && Number.isFinite(p) && line.price.trim() !== ""
+            ? Math.round(p * 10000)
+            : null,
         remark: line.remark.trim() || null,
         spec: (line.spec ?? "").trim() || null,
       };
@@ -897,12 +1022,16 @@ export function VoucherScreen({
       kind: mode.kind,
       docNo: head.docNo.trim() || null,
       docDate: head.docDate,
-      partner: mode.kind === "in" ? head.partner.trim() || null : null,
-      buyer: mode.kind === "in" ? head.buyer.trim() || null : null,
-      owner: mode.kind === "out" ? head.owner.trim() || null : null,
+      partner: mode.kind === "in" || mode.isReturn ? head.partner.trim() || null : null,
+      buyer: mode.kind === "in" || mode.isReturn ? head.buyer.trim() || null : null,
+      owner: mode.kind === "out" && !mode.isReturn ? head.owner.trim() || null : null,
+      // 退货单的第三格签字是「供应商签收」，仍然存在 receiver 里
       receiver: mode.kind === "out" ? head.receiver.trim() || null : null,
       // 单头备注已去掉入口；备注按行填。这里固定 null，旧单据的备注仍在库里不回写。
       remark: null,
+      isReturn: mode.isReturn,
+      sourceVoucherId: mode.isReturn ? mode.sourceVoucherId : null,
+      sourceDocNo: mode.isReturn ? head.sourceDocNo.trim() || null : null,
       lines: payloadLines,
     };
 
@@ -913,7 +1042,7 @@ export function VoucherScreen({
         const id = await createVoucher(payload);
         savedId = id;
         toast("单据已保存", { description: `${head.docNo} · ${count(payloadLines.length)} 行`, status: "success" });
-        setMode({ kind: mode.kind, id });
+        setMode({ ...mode, id });
       } else {
         await updateVoucher(mode.id, payload);
         toast("单据已更新", { description: `${head.docNo} · ${count(payloadLines.length)} 行`, status: "success" });
@@ -921,9 +1050,9 @@ export function VoucherScreen({
       dirty.current = false;
       clearVoucherDraft(warehouseId);
       // 下次新开单沿用这次填的采购人
-      if (mode.kind === "in" && head.buyer.trim()) saveBuyer(head.buyer);
+      if ((mode.kind === "in" || mode.isReturn) && head.buyer.trim()) saveBuyer(head.buyer);
       // 手输的新供应商存进基础资料，下次输两个字就能关联出来
-      if (mode.kind === "in" && head.partner.trim()) await rememberSupplier(head.partner);
+      if ((mode.kind === "in" || mode.isReturn) && head.partner.trim()) await rememberSupplier(head.partner);
       await loadHistory();
 
       // 保存成功立刻出稿：拿去签字归档是紧接着的下一步。
@@ -982,6 +1111,8 @@ export function VoucherScreen({
         createdAt: "",
         firstItem: null,
         deliveryNo: hit.deliveryNo ?? null,
+        isReturn: hit.isReturn,
+        sourceDocNo: hit.sourceDocNo ?? null,
       });
       return;
     }
@@ -1003,7 +1134,8 @@ export function VoucherScreen({
       const removed = await deleteVoucher(pendingDelete.id);
       toast("单据已删除", { description: `${pendingDelete.docNo} · 同时删掉 ${count(removed)} 行明细` });
       setPendingDelete(null);
-      if (mode.id === pendingDelete.id) await startNew(mode.kind);
+      // 刚删的是退货单时不要又开一张空的退货草稿（退货必须有来源单）
+      if (mode.id === pendingDelete.id) await startNew(mode.kind, false);
       await loadHistory();
       onChanged();
     } catch (err) {
@@ -1030,6 +1162,16 @@ export function VoucherScreen({
   };
 
   const isIn = mode.kind === "in";
+  const isReturn = mode.isReturn;
+  /** 退货单要显示单价与合计（沿用原入库价），普通出库不显示 */
+  const showPrice = isIn || isReturn;
+  /** 送货单号只有入库单有；退货沿用原入库单号追溯，不再逐行填 */
+  const showDeliveryNo = isIn;
+  /**
+   * 从入库单生成的退货单：物料固定来自原单，只能改数量与单价。
+   * 手工退货（Excel 导入单没有单据头）没有来源，物料仍要自己选。
+   */
+  const lockedItems = isReturn && mode.sourceVoucherId !== null;
 
   // 供应商候选：按常用度（台账行数）排出常用名单，输入时再按「连号 > 按词 > 逐字」重排，
   // 这样打「亚德」「亚德客」都能落到「亚德客（中国）有限公司」。
@@ -1071,12 +1213,22 @@ export function VoucherScreen({
             </Button>
             <Button
               size="small"
-              variant={isIn ? "secondary" : "primary"}
+              variant={!isIn && !isReturn ? "primary" : "secondary"}
               leadingIcon={RiFileAddLine}
               onClick={() => startNew("out")}
               disabled={busy}
             >
               新出库单
+            </Button>
+            <Button
+              size="small"
+              variant={isReturn ? "primary" : "secondary"}
+              leadingIcon={RiArrowLeftRightLine}
+              title="手工开退货单（不带可退数量校验）；要按原入库单可退数量生成，请打开入库单点「退货」"
+              onClick={() => startNew("out", true)}
+              disabled={busy}
+            >
+              新退货单
             </Button>
             <Button
               size="small"
@@ -1110,7 +1262,7 @@ export function VoucherScreen({
                 <p className="whitespace-pre-line text-caption-1-regular text-text-tertiary">{companyName.trim()}</p>
               ) : null}
               <h2 className="mt-1 text-title-2-semibold tracking-wide text-text-primary">
-                {isIn ? "入库单" : "出库单"}
+                {isReturn ? "退货单" : isIn ? "入库单" : "出库单"}
               </h2>
               {mode.id !== null ? (
                 <p className="mt-0.5 font-mono text-caption-1-regular tabular-nums text-text-tertiary">
@@ -1121,24 +1273,22 @@ export function VoucherScreen({
 
             {/* 第 3 行横带：供应商名称 → 输入 → 日期 → 单据编号（出库单换成归属） */}
             <div className="grid grid-cols-1 gap-3 border-b border-separator-border px-5 py-3 md:grid-cols-[auto_1fr_auto_auto]">
-              {isIn ? (
-                <span className="self-center text-body-2-medium text-text-secondary">供应商名称：</span>
-              ) : (
-                <span className="self-center text-body-2-medium text-text-secondary">出库部门：</span>
-              )}
+              <span className="self-center text-body-2-medium text-text-secondary">
+                {isIn || isReturn ? "供应商名称：" : "出库部门："}
+              </span>
               <div className="flex items-center gap-1.5">
                 <ComboPicker
-                  ariaLabel={isIn ? "供应商" : "出库部门"}
-                  value={isIn ? head.partner : head.owner}
-                  onChange={(v) => editHead(isIn ? { partner: v } : { owner: v })}
-                  options={isIn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))}
-                  rank={isIn ? rankSupplier : undefined}
-                  autoCommitExact={isIn}
+                  ariaLabel={isIn || isReturn ? "供应商" : "出库部门"}
+                  value={isIn || isReturn ? head.partner : head.owner}
+                  onChange={(v) => editHead(isIn || isReturn ? { partner: v } : { owner: v })}
+                  options={isIn || isReturn ? supplierOptions : ownerOptions.map((name) => ({ value: name }))}
+                  rank={isIn || isReturn ? rankSupplier : undefined}
+                  autoCommitExact={isIn || isReturn}
                   allowCustom
-                  placeholder={isIn ? "输两个字关联供应商" : "选或输入部门"}
-                  emptyText={isIn ? "没有匹配的供应商，直接回车按新名称保存" : "没有这个部门，直接输入即可"}
+                  placeholder={isIn || isReturn ? "输两个字关联供应商" : "选或输入部门"}
+                  emptyText={isIn || isReturn ? "没有匹配的供应商，直接回车按新名称保存" : "没有这个部门，直接输入即可"}
                 />
-                {isIn ? (
+                {isIn || isReturn ? (
                   <Button
                     size="small"
                     variant="ghost"
@@ -1153,14 +1303,14 @@ export function VoucherScreen({
               </div>
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">
-                  {isIn ? "入库时间：" : "出库时间："}
+                  {isReturn ? "退货时间：" : isIn ? "入库时间：" : "出库时间："}
                 </span>
                 <input
-                  aria-label={isIn ? "入库时间" : "出库时间"}
+                  aria-label={isReturn ? "退货时间" : isIn ? "入库时间" : "出库时间"}
                   value={head.docDate}
                   onChange={(e) => editHead({ docDate: e.target.value })}
                   onBlur={() => {
-                    if (mode.id === null) freshDocNo(mode.kind, head.docDate);
+                    if (mode.id === null) freshDocNo(mode.kind, head.docDate, isReturn);
                   }}
                   className="h-9 w-36 rounded-lg border border-border-button-default bg-background-primary-default px-2.5 font-mono text-[0.8125rem] tabular-nums text-text-primary outline-none focus:border-border-focus-ring"
                 />
@@ -1176,21 +1326,46 @@ export function VoucherScreen({
               </div>
             </div>
 
+            {/* 退货单：原入库单号。从入库单退货时只读；手工退货可自己填，仅作追溯 */}
+            {isReturn ? (
+              <div className="flex flex-wrap items-center gap-2 border-b border-separator-border bg-amber-500/5 px-5 py-2">
+                <span className="shrink-0 text-body-2-medium text-amber-600">原入库单号：</span>
+                {mode.sourceVoucherId !== null ? (
+                  <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
+                    {head.sourceDocNo.trim() || "—"}
+                  </span>
+                ) : (
+                  <input
+                    aria-label="原入库单号"
+                    value={head.sourceDocNo}
+                    onChange={(e) => editHead({ sourceDocNo: e.target.value })}
+                    placeholder="选填，如 20260831001"
+                    className="h-8 w-56 rounded-md border border-border-button-default bg-background-primary-default px-2 font-mono text-[0.75rem] tabular-nums text-text-primary placeholder:text-text-tertiary outline-none focus:border-border-focus-ring"
+                  />
+                )}
+                <span className="text-caption-1-regular text-text-tertiary">
+                  {mode.sourceVoucherId !== null
+                    ? "退货数量不能超过原单尚未退完的数量，保存时会再校验"
+                    : "手工退货不校验超退；从入库单点「退货」生成时会自动带出可退数量"}
+                </span>
+              </div>
+            ) : null}
+
             {/* 明细表：列与纸单一致；送货单号逐行填（一张单可能对应多张送货单） */}
             <div className="overflow-x-auto">
               <table className="w-full min-w-[960px] table-fixed border-collapse text-[0.8125rem]">
                 <thead>
                   <tr className="border-b border-separator-border bg-background-secondary-default text-caption-1-semibold text-text-tertiary">
                     <th className="w-10 px-2 py-2 text-center font-medium">#</th>
-                    {isIn ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
+                    {showDeliveryNo ? <th className="w-36 px-2 py-2 text-start font-medium">送货单号</th> : null}
                     <th className="w-32 whitespace-nowrap px-2 py-2 text-start font-medium">物料编码</th>
                     <th className="w-[18rem] min-w-[15rem] whitespace-nowrap px-2 py-2 text-start font-medium">
                       物料名称
                     </th>
                     <th className="w-20 whitespace-nowrap px-2 py-2 text-start font-medium">单位</th>
                     <th className="w-16 px-2 py-2 text-end font-medium">数量</th>
-                    {isIn ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
-                    {isIn ? <th className="w-28 px-2 py-2 text-end font-medium">合计</th> : null}
+                    {showPrice ? <th className="w-24 px-2 py-2 text-end font-medium">单价</th> : null}
+                    {showPrice ? <th className="w-28 px-2 py-2 text-end font-medium">合计</th> : null}
                     <th className="w-32 px-2 py-2 text-start font-medium">备注</th>
                     <th className="w-10 px-2 py-2" />
                   </tr>
@@ -1206,7 +1381,7 @@ export function VoucherScreen({
                         <td className="px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-text-tertiary">
                           {index + 1}
                         </td>
-                        {isIn ? (
+                        {showDeliveryNo ? (
                           <td className="px-1 py-1">
                             <input
                               aria-label={`第 ${index + 1} 行送货单号`}
@@ -1217,46 +1392,77 @@ export function VoucherScreen({
                             />
                           </td>
                         ) : null}
-                        <td className="px-1 py-1">
-                          <ItemPicker
-                            value={line.itemCode}
-                            onPick={(item) => applyMaster(line.key, item)}
-                            onChangeText={(text) => setLine(line.key, { itemCode: text })}
-                            // 出库只能领有库存的物料；入库才需要能选到没有结存的新料
-                            inStockOnly={!isIn}
-                            placeholder={isIn ? "编码或名称" : "选有库存的物料"}
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          {/* 名称列同样引用基础资料：选中一条会一并带出编码、单位与最近单价 */}
-                          <div className="group/name flex items-center gap-1.5">
-                            <div className="min-w-0 flex-1">
-                              <ItemPicker
-                                value={line.itemName}
-                                onPick={(item) => applyMaster(line.key, item)}
-                                onChangeText={(text) => setLine(line.key, { itemName: text })}
-                                inStockOnly={!isIn}
-                                placeholder={isIn ? "选或输入名称" : "选有库存的物料"}
+                        {lockedItems ? (
+                          <td
+                            className="truncate px-2 py-1 font-mono text-[0.75rem] text-text-secondary"
+                            title={line.itemCode}
+                          >
+                            {line.itemCode || "—"}
+                          </td>
+                        ) : (
+                          <td className="px-1 py-1">
+                            <ItemPicker
+                              value={line.itemCode}
+                              onPick={(item) => applyMaster(line.key, item)}
+                              onChangeText={(text) => setLine(line.key, { itemCode: text })}
+                              // 出库（含退货）只能领有库存的物料；入库才需要能选到没有结存的新料
+                              inStockOnly={!isIn}
+                              placeholder={isIn ? "编码或名称" : "选有库存的物料"}
+                            />
+                          </td>
+                        )}
+                        {lockedItems ? (
+                          <td className="px-2 py-1 text-text-primary">
+                            <div className="flex items-center gap-1.5 truncate">
+                              <span className="truncate" title={line.itemName}>
+                                {line.itemName || "—"}
+                              </span>
+                              {line.spec ? (
+                                <span
+                                  className="shrink-0 rounded bg-background-secondary-hover px-1.5 py-0.5 font-mono text-[0.6875rem] text-text-secondary ring-1 ring-border-button-default"
+                                  title={`规格型号: ${line.spec}`}
+                                >
+                                  {line.spec}
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
+                        ) : (
+                          <td className="px-1 py-1">
+                            {/* 名称列同样引用基础资料：选中一条会一并带出编码、单位与最近单价 */}
+                            <div className="group/name flex items-center gap-1.5">
+                              <div className="min-w-0 flex-1">
+                                <ItemPicker
+                                  value={line.itemName}
+                                  onPick={(item) => applyMaster(line.key, item)}
+                                  onChangeText={(text) => setLine(line.key, { itemName: text })}
+                                  inStockOnly={!isIn}
+                                  placeholder={isIn ? "选或输入名称" : "选有库存的物料"}
+                                />
+                              </div>
+                              <SpecBadge
+                                value={line.spec}
+                                showAdd={Boolean(line.itemName && !line.spec)}
+                                onChange={(v) => setLine(line.key, { spec: v })}
                               />
                             </div>
-                            <SpecBadge
-                              value={line.spec}
-                              showAdd={Boolean(line.itemName && !line.spec)}
-                              onChange={(v) => setLine(line.key, { spec: v })}
-                            />
-                          </div>
-                        </td>
+                          </td>
+                        )}
                         <td className="px-1 py-1">
-                          <ComboPicker
-                            ariaLabel={`第 ${index + 1} 行单位`}
-                            value={line.unit}
-                            onChange={(v) => setLine(line.key, { unit: v })}
-                            options={unitOptions.map((u) => ({ value: u }))}
-                            allowCustom
-                            compact
-                            placeholder="单位"
-                            emptyText="没有这个单位，直接回车新增"
-                          />
+                          {lockedItems ? (
+                            <span className="block px-1.5 text-text-secondary">{line.unit || "—"}</span>
+                          ) : (
+                            <ComboPicker
+                              ariaLabel={`第 ${index + 1} 行单位`}
+                              value={line.unit}
+                              onChange={(v) => setLine(line.key, { unit: v })}
+                              options={unitOptions.map((u) => ({ value: u }))}
+                              allowCustom
+                              compact
+                              placeholder="单位"
+                              emptyText="没有这个单位，直接回车新增"
+                            />
+                          )}
                         </td>
                         <td className="px-1 py-1">
                           <input
@@ -1267,7 +1473,7 @@ export function VoucherScreen({
                             className="h-8 w-full rounded-md border border-border-button-default bg-background-secondary-default px-1.5 hover:border-border-button-hover focus:border-border-focus-ring focus:bg-background-primary-default text-end font-mono tabular-nums text-text-primary placeholder:text-text-tertiary outline-none hover:border-border-button-default focus:border-border-focus-ring"
                           />
                         </td>
-                        {isIn ? (
+                        {showPrice ? (
                           <td className="px-1 py-1">
                             <input
                               inputMode="decimal"
@@ -1278,7 +1484,7 @@ export function VoucherScreen({
                             />
                           </td>
                         ) : null}
-                        {isIn ? (
+                        {showPrice ? (
                           <td className="px-2 py-1 text-end font-mono tabular-nums text-text-primary">
                             {amount === null ? "—" : money(Math.round(amount * 100))}
                           </td>
@@ -1312,7 +1518,7 @@ export function VoucherScreen({
                   {/* 合计行：与纸单一致，单独一行 */}
                   <tr className="border-t border-separator-border bg-background-secondary-default">
                     <td
-                      colSpan={isIn ? 4 : 3}
+                      colSpan={showDeliveryNo ? 4 : 3}
                       className="px-2 py-2 text-end text-caption-1-semibold text-text-secondary"
                     >
                       合计
@@ -1324,8 +1530,8 @@ export function VoucherScreen({
                     <td className="px-2 py-2 text-end font-mono text-body-2-medium tabular-nums text-text-secondary">
                       {qty(totals.qty)}
                     </td>
-                    {isIn ? <td /> : null}
-                    {isIn ? (
+                    {showPrice ? <td /> : null}
+                    {showPrice ? (
                       <td className="px-2 py-2 text-end font-mono text-body-2-medium tabular-nums text-text-primary">
                         {money(totals.amount)}
                       </td>
@@ -1336,7 +1542,7 @@ export function VoucherScreen({
               </table>
             </div>
 
-            {/* 签字行：采购人 / 仓管 / 领用人，照纸单放在最底 */}
+            {/* 签字行：采购人 / 仓管 / 领用人，照纸单放在最底；退货单第三格改供应商签收 */}
             <div className="grid grid-cols-1 gap-3 border-t border-separator-border px-5 py-3 md:grid-cols-3">
               <div className="flex items-center gap-2">
                 <span className="shrink-0 text-body-2-medium text-text-secondary">采购人：</span>
@@ -1362,9 +1568,11 @@ export function VoucherScreen({
                 />
               </div>
               <div className="flex items-center gap-2">
-                <span className="shrink-0 text-body-2-medium text-text-secondary">领用人：</span>
+                <span className="shrink-0 text-body-2-medium text-text-secondary">
+                  {isReturn ? "供应商签收：" : "领用人："}
+                </span>
                 <input
-                  aria-label="领用人签字"
+                  aria-label={isReturn ? "供应商签收" : "领用人签字"}
                   value={head.receiver}
                   onChange={(e) => editHead({ receiver: e.target.value })}
                   placeholder="签字"
@@ -1379,10 +1587,12 @@ export function VoucherScreen({
                 size="small"
                 variant="secondary"
                 leadingIcon={RiAddLine}
+                title={lockedItems ? "退货明细固定来自原入库单，不能加行" : "加一行明细"}
                 onClick={() => {
                   dirty.current = true;
                   setLines((prev) => [...prev, blankLine()]);
                 }}
+                disabled={lockedItems}
               >
                 加一行
               </Button>
@@ -1396,7 +1606,7 @@ export function VoucherScreen({
                   quickAddTargetLine.current = lines[lines.length - 1]?.key ?? null;
                   setQuickAdd("item");
                 }}
-                disabled={!isTauri}
+                disabled={!isTauri || lockedItems}
               >
                 新增物料
               </Button>
@@ -1501,12 +1711,14 @@ export function VoucherScreen({
                         <span className="flex items-center gap-2">
                           <span
                             className={
-                              hit.kind === "in"
-                                ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
-                                : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
+                              hit.isReturn
+                                ? "rounded bg-amber-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-amber-500"
+                                : hit.kind === "in"
+                                  ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
+                                  : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
                             }
                           >
-                            {kindLabel(hit.kind)}
+                            {rowKindLabel(hit)}
                           </span>
                           <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
                             {hit.docNo}
@@ -1577,12 +1789,14 @@ export function VoucherScreen({
                       <span className="flex items-center gap-2">
                         <span
                           className={
-                            voucher.kind === "in"
-                              ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
-                              : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
+                            voucher.isReturn
+                              ? "rounded bg-amber-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-amber-500"
+                              : voucher.kind === "in"
+                                ? "rounded bg-emerald-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-emerald-500"
+                                : "rounded bg-sky-500/12 px-1 py-0.5 text-[0.6875rem] font-medium text-sky-400"
                           }
                         >
-                          {kindLabel(voucher.kind)}
+                          {rowKindLabel(voucher)}
                         </span>
                         <span className="font-mono text-body-2-medium tabular-nums text-text-primary">
                           {voucher.docNo}
@@ -1619,10 +1833,12 @@ export function VoucherScreen({
           {({ close }) => (
             <>
               <ModalHeader
-                title={`${kindLabel(viewingVoucher.kind)}单 ${viewingVoucher.docNo}`}
+                title={`${rowKindLabel(viewingVoucher)}单 ${viewingVoucher.docNo}`}
                 description={`${date(viewingVoucher.docDate)} · ${count(viewingVoucher.lines.length)} 行 · ${money(
                   viewingVoucher.lines.reduce((sum, line) => sum + (line.amountCents ?? 0), 0),
-                )} · ${viewingVoucher.partner ?? viewingVoucher.owner ?? "—"}`}
+                )} · ${viewingVoucher.partner ?? viewingVoucher.owner ?? "—"}${
+                  viewingVoucher.sourceDocNo ? ` · 原单 ${viewingVoucher.sourceDocNo}` : ""
+                }`}
               />
               <ModalBody>
                 <VoucherLinesTable lines={viewingVoucher.lines} showDeliveryNo={viewingVoucher.kind === "in"} />
@@ -1661,18 +1877,34 @@ export function VoucherScreen({
                 <Button size="small" variant="secondary" onClick={close}>
                   关闭
                 </Button>
-                <Button
-                  size="small"
-                  variant="secondary"
-                  leadingIcon={RiArrowLeftRightLine}
-                  title={`把这单的明细抄成一张新的${kindLabel(viewingVoucher.kind === "in" ? "out" : "in")}；原单不受影响`}
-                  onClick={() => {
-                    close();
-                    convertVoucher(viewingVoucher);
-                  }}
-                >
-                  {viewingVoucher.kind === "in" ? "转出库单" : "转入库单"}
-                </Button>
+                {viewingVoucher.kind === "in" && !viewingVoucher.isReturn ? (
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    leadingIcon={RiArrowLeftRightLine}
+                    title="按原单未退数量开一张退货单（退回供应商）"
+                    onClick={() => {
+                      close();
+                      startReturn(viewingVoucher.id);
+                    }}
+                  >
+                    退货
+                  </Button>
+                ) : null}
+                {!viewingVoucher.isReturn ? (
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    leadingIcon={RiArrowLeftRightLine}
+                    title={`把这单的明细抄成一张新的${kindLabel(viewingVoucher.kind === "in" ? "out" : "in")}；原单不受影响`}
+                    onClick={() => {
+                      close();
+                      convertVoucher(viewingVoucher);
+                    }}
+                  >
+                    {viewingVoucher.kind === "in" ? "转出库单" : "转入库单"}
+                  </Button>
+                ) : null}
                 <Button size="small" onClick={() => loadVoucherIntoForm(viewingVoucher)}>
                   载入编辑
                 </Button>
